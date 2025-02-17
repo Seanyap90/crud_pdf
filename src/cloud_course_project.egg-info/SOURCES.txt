@@ -1,0 +1,16 @@
+pyproject.toml
+src/cloud_course_project.egg-info/PKG-INFO
+src/cloud_course_project.egg-info/SOURCES.txt
+src/cloud_course_project.egg-info/dependency_links.txt
+src/cloud_course_project.egg-info/requires.txt
+src/cloud_course_project.egg-info/top_level.txt
+src/files_api/__init__.py
+src/files_api/errors.py
+src/files_api/main.py
+src/files_api/routes.py
+src/files_api/schemas.py
+src/files_api/settings.py
+src/files_api/s3/__init__.py
+src/files_api/s3/delete_objects.py
+src/files_api/s3/read_objects.py
+src/files_api/s3/write_objects.py

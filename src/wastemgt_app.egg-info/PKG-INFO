@@ -1,0 +1,53 @@
+Metadata-Version: 2.2
+Name: wastemgt_app
+Version: 0.0.0
+Summary: My package description
+Author-email: "<your name>" <some-email@gmail.com>
+License: MIT
+Keywords: one,two
+Classifier: Programming Language :: Python :: 3
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown
+Requires-Dist: boto3
+Requires-Dist: fastapi
+Requires-Dist: pydantic-settings
+Requires-Dist: python-multipart
+Requires-Dist: click
+Requires-Dist: urllib3<2.0.0
+Provides-Extra: rag
+Requires-Dist: torch>=2.0.0; extra == "rag"
+Requires-Dist: transformers>=4.36.0; extra == "rag"
+Requires-Dist: byaldi@ git+https://github.com/sergiopaniego/byaldi.git@colsmolvlm-support ; extra == "rag"
+Requires-Dist: datasets>=2.15.0; extra == "rag"
+Requires-Dist: Pillow>=10.0.0; extra == "rag"
+Requires-Dist: bitsandbytes>=0.41.0; extra == "rag"
+Requires-Dist: huggingface_hub[cli]; extra == "rag"
+Provides-Extra: api
+Requires-Dist: uvicorn; extra == "api"
+Requires-Dist: moto[server]; extra == "api"
+Provides-Extra: stubs
+Requires-Dist: boto3-stubs[s3]; extra == "stubs"
+Provides-Extra: notebooks
+Requires-Dist: jupyterlab; extra == "notebooks"
+Requires-Dist: ipykernel; extra == "notebooks"
+Requires-Dist: rich; extra == "notebooks"
+Provides-Extra: test
+Requires-Dist: pytest; extra == "test"
+Requires-Dist: pytest-cov; extra == "test"
+Requires-Dist: pytest-async; extra == "test"
+Requires-Dist: pytest-asyncio; extra == "test"
+Requires-Dist: moto; extra == "test"
+Provides-Extra: release
+Requires-Dist: build; extra == "release"
+Requires-Dist: twine; extra == "release"
+Provides-Extra: static-code-qa
+Requires-Dist: pre-commit; extra == "static-code-qa"
+Requires-Dist: pylint; extra == "static-code-qa"
+Requires-Dist: black; extra == "static-code-qa"
+Requires-Dist: isort; extra == "static-code-qa"
+Requires-Dist: flake8; extra == "static-code-qa"
+Requires-Dist: flake8-docstrings; extra == "static-code-qa"
+Requires-Dist: Flake8-pyproject; extra == "static-code-qa"
+Requires-Dist: radon; extra == "static-code-qa"
+Provides-Extra: dev
+Requires-Dist: wastemgt_app[api,notebooks,rag,release,static-code-qa,stubs,test]; extra == "dev"
