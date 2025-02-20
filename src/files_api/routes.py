@@ -27,12 +27,15 @@ from files_api.schemas import (
     GetFilesResponse,
     PutFileResponse,
     InvoiceMetadata,
-    GetInvoiceResponse
+    GetInvoiceResponse,
+    InvoiceListResponse,
+    InvoiceListItem
 )
 from files_api.settings import Settings
 from files_api.database.local import (
     add_invoice, 
-    get_invoice_metadata
+    get_invoice_metadata,
+    get_invoices_list
 )
 from files_api.msg_queue import QueueFactory
 
@@ -290,3 +293,34 @@ async def get_invoice(
             invoice_data[field] = Decimal(str(invoice_data[field]))
 
     return GetInvoiceResponse(invoice=InvoiceMetadata(**invoice_data))
+
+@ROUTER.get(
+    "/v1/invoices",
+    response_model=InvoiceListResponse,
+    responses={
+        status.HTTP_200_OK: {
+            "description": "List of invoices retrieved successfully.",
+            "model": InvoiceListResponse
+        },
+    },
+)
+async def list_invoices(
+    request: Request
+) -> InvoiceListResponse:
+    """Retrieve list of invoices for the table view."""
+    invoices, total_count = get_invoices_list()
+    
+    # Convert datetime strings to datetime objects and format decimal values
+    for invoice in invoices:
+        if invoice.get('upload_date'):
+            invoice['upload_date'] = datetime.fromisoformat(invoice['upload_date'].replace('Z', '+00:00'))
+        
+        # Convert decimal values
+        for field in ['reported_weight_kg', 'total_amount']:
+            if invoice.get(field) is not None:
+                invoice[field] = Decimal(str(invoice[field]))
+    
+    return InvoiceListResponse(
+        invoices=[InvoiceListItem(**invoice) for invoice in invoices],
+        total_count=total_count
+    )

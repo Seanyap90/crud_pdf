@@ -1,0 +1,7 @@
+*.node
+/client/node_modules/
+/client/.next/
+/recycling.db
+/tmp_pdf
+/node_modules
+/.next

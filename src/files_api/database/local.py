@@ -198,3 +198,36 @@ def get_invoice_metadata(invoice_id: int, db_path: str = "recycling.db") -> Opti
         return None
     finally:
         conn.close()
+
+def get_invoices_list(db_path: str = "recycling.db") -> tuple[list, int]:
+    """Retrieve list of invoices with their metadata."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Get total count
+        cursor.execute('SELECT COUNT(*) as count FROM vendor_invoices')
+        total_count = cursor.fetchone()['count']
+        
+        # Get invoice list with category name
+        cursor.execute('''
+            SELECT 
+                vi.invoice_id,
+                vi.invoice_number,
+                mc.category_name as category,
+                vi.filename,
+                vi.reported_weight_kg,
+                vi.total_amount,
+                vi.upload_date,
+                vi.extraction_status
+            FROM vendor_invoices vi
+            LEFT JOIN material_categories mc ON vi.category_id = mc.category_id
+            ORDER BY vi.upload_date DESC
+        ''')
+        
+        rows = cursor.fetchall()
+        invoices = [dict(row) for row in rows]
+        return invoices, total_count
+    finally:
+        conn.close()

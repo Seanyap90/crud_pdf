@@ -5,6 +5,7 @@
 from datetime import datetime
 from typing import List, Optional
 from decimal import Decimal
+from enum import Enum
 
 from pydantic import (
     BaseModel,
@@ -145,3 +146,60 @@ class GetInvoiceResponse(BaseModel):
     """Response model for getting invoice details."""
     invoice: InvoiceMetadata
 
+class ExtractionStatus(str, Enum):
+    """Enumeration for possible extraction statuses"""
+    PENDING = 'pending'
+    PROCESSING = 'processing'
+    COMPLETED = 'completed'
+    FAILED = 'failed'
+
+class InvoiceListItem(BaseModel):
+    """Schema for invoice list item displayed in the table."""
+    invoice_id: int = Field(description="Invoice ID")
+    invoice_number: str = Field(description="Invoice number")
+    category: str = Field(description="Material category")
+    filename: str = Field(description="Name of the uploaded file")
+    reported_weight_kg: Optional[Decimal] = Field(None, description="Weight in kilograms")
+    total_amount: Optional[Decimal] = Field(None, description="Total price")
+    upload_date: datetime = Field(description="Date of upload")
+    extraction_status: ExtractionStatus = Field(description="Status of processing")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "invoice_id": 13,
+                "invoice_number": "INV-2024-0013",
+                "category": "Metal",
+                "filename": "invoice_13.pdf",
+                "reported_weight_kg": "421.69",
+                "total_amount": "8833.86",
+                "upload_date": "2024-11-08T10:37:00Z",
+                "extraction_status": "failed"
+            }
+        }
+    )
+
+class InvoiceListResponse(BaseModel):
+    """Response model for listing invoices."""
+    invoices: List[InvoiceListItem]
+    total_count: int = Field(description="Total number of invoices")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "invoices": [
+                    {
+                        "invoice_id": 13,
+                        "invoice_number": "INV-2024-0013",
+                        "category": "Metal",
+                        "filename": "invoice_13.pdf",
+                        "reported_weight_kg": "421.69",
+                        "total_amount": "8833.86",
+                        "upload_date": "2024-11-08T10:37:00Z",
+                        "extraction_status": "failed"
+                    }
+                ],
+                "total_count": 1
+            }
+        }
+    )
