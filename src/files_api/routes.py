@@ -295,7 +295,7 @@ async def get_invoice(
     return GetInvoiceResponse(invoice=InvoiceMetadata(**invoice_data))
 
 @ROUTER.get(
-    "/v1/invoices",
+    "/v1/{vendor_id}/invoices",
     response_model=InvoiceListResponse,
     responses={
         status.HTTP_200_OK: {
@@ -305,22 +305,65 @@ async def get_invoice(
     },
 )
 async def list_invoices(
-    request: Request
+    request: Request,
+    vendor_id: str = Path(..., description="The ID of the vendor to get invoices for")
 ) -> InvoiceListResponse:
     """Retrieve list of invoices for the table view."""
-    invoices, total_count = get_invoices_list()
-    
-    # Convert datetime strings to datetime objects and format decimal values
-    for invoice in invoices:
-        if invoice.get('upload_date'):
-            invoice['upload_date'] = datetime.fromisoformat(invoice['upload_date'].replace('Z', '+00:00'))
-        
-        # Convert decimal values
-        for field in ['reported_weight_kg', 'total_amount']:
-            if invoice.get(field) is not None:
-                invoice[field] = Decimal(str(invoice[field]))
+    invoices, total_count = get_invoices_list(vendor_id)
     
     return InvoiceListResponse(
         invoices=[InvoiceListItem(**invoice) for invoice in invoices],
         total_count=total_count
     )
+
+@ROUTER.get("/health", tags=["System"])
+async def health_check():
+    """Health check endpoint that returns status of various system components"""
+    from files_api.msg_queue import QueueFactory
+    from files_api.vlm.load_models import ModelManager
+    
+    health_status = {
+        "status": "ok",
+        "components": {
+            "api": "ready",
+            "queue": "initializing",
+            "models": "initializing"
+        },
+        "ready": False
+    }
+    
+    # Check queue status
+    try:
+        queue = QueueFactory.get_queue_handler()
+        health_status["components"]["queue"] = "ready"
+    except Exception as e:
+        health_status["components"]["queue"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # Check models status WITHOUT loading them
+    try:
+        model_manager = ModelManager()
+        model_status = model_manager.check_model_status()
+        
+        if model_status["ready"]:
+            health_status["components"]["models"] = "ready"
+        else:
+            health_status["components"]["models"] = "loading"
+            health_status["status"] = "initializing"
+            
+        # Add detailed model status for debugging
+        health_status["models_detail"] = {
+            "rag_loaded": model_status["rag_initialized"],
+            "vlm_loaded": model_status["vlm_initialized"]
+        }
+    except Exception as e:
+        health_status["components"]["models"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # Set overall ready status - consider ready if API and queue are ready,
+    # even if models are still loading (they'll load when needed)
+    if all(v == "ready" for v in {k: health_status["components"][k] for k in ["api", "queue"]}.values()):
+        health_status["ready"] = True
+    
+    return health_status
+    

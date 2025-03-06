@@ -34,7 +34,7 @@ rag = [
 api = ["uvicorn", "moto[server]"]
 stubs = ["boto3-stubs[s3]"]
 notebooks = ["jupyterlab", "ipykernel", "rich"]
-test = ["pytest", "pytest-cov", "pytest-async", "pytest-asyncio", "moto"]
+test = ["pytest", "pytest-cov", "pytest-async", "pytest-asyncio", "moto", "openpyxl", "pytest-playwright", "playwright", "reportlab"]
 release = ["build", "twine"]
 static-code-qa = [
     "pre-commit",

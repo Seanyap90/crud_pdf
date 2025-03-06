@@ -1,8 +1,9 @@
 from textwrap import dedent
-
+import logging
 import pydantic
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
+from fastapi.middleware.cors import CORSMiddleware
 
 from files_api.errors import (
     handle_broad_exceptions,
@@ -13,8 +14,14 @@ from files_api.settings import Settings
 from fastapi import Depends
 from files_api.database.local import init_db
 
+# Set up logging
+logger = logging.getLogger(__name__)
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    """Create a FastAPI application."""
+    settings = settings or Settings()
+
     """Create a FastAPI application."""
     settings = settings or Settings()
 
@@ -34,6 +41,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ),
         docs_url="/",  # its easier to find the docs when they live on the base url
         generate_unique_id_function=custom_generate_unique_id,
+    )
+
+    # Add CORS middleware with expanded settings to work with frontend
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000"],  # Allow your frontend
+        allow_credentials=True,
+        allow_methods=["*"],  # Allow all methods
+        allow_headers=["*"],  # Allow all headers
     )
     app.state.settings = settings
     init_db()

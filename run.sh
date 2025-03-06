@@ -8,7 +8,7 @@ set -e
 
 THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 MINIMUM_TEST_COVERAGE_PERCENT=0
-
+FRONTEND_DIR="$THIS_DIR/../client" # Adjust if your frontend is in a different location
 
 ##########################
 # --- Task Functions --- #
@@ -28,6 +28,70 @@ function run {
 
 # start the FastAPI app, pointed at a mocked aws endpoint
 function local-mock {
+    set +e
+    
+    # Set queue type first
+    export QUEUE_TYPE="local-mock"
+    
+    # Set model loading behavior
+    export DISABLE_DUPLICATE_LOADING="true"
+    export MODEL_MEMORY_LIMIT="24GiB"  # Adjust based on your available GPU memory
+    
+    # Start moto server
+    python -m moto.server -p 5000 &
+    MOTO_PID=$!
+    
+    # Configure AWS mock environment
+    export AWS_ENDPOINT_URL="http://localhost:5000"
+    export AWS_SECRET_ACCESS_KEY="mock"
+    export AWS_ACCESS_KEY_ID="mock"
+    export S3_BUCKET_NAME="some-bucket"
+    
+    # Create mock bucket
+    aws s3 mb "s3://$S3_BUCKET_NAME"
+    
+    # Trap EXIT signal to kill all background processes
+    trap 'kill $(jobs -p)' EXIT
+    
+    # Start worker in background with lazy model loading
+    echo "Starting Local Worker (with lazy model loading)"
+    python src/files_api/cli.py worker --mode local-mock --no-preload-models &
+    
+    # Wait a moment to ensure worker has started
+    sleep 2
+    
+    # Start FastAPI app
+    python -m uvicorn files_api.main:create_app --reload
+    
+    wait
+}
+
+# New function to install npm dependencies
+function npm-install {
+    if [ -d "$FRONTEND_DIR" ]; then
+        echo "Installing npm dependencies in $FRONTEND_DIR"
+        cd "$FRONTEND_DIR"
+        npm install
+    else
+        echo "Error: Frontend directory not found at $FRONTEND_DIR"
+        exit 1
+    fi
+}
+
+# New function to build frontend
+function npm-build {
+    if [ -d "$FRONTEND_DIR" ]; then
+        echo "Building frontend in $FRONTEND_DIR"
+        cd "$FRONTEND_DIR"
+        npm run build
+    else
+        echo "Error: Frontend directory not found at $FRONTEND_DIR"
+        exit 1
+    fi
+}
+
+# New function to run both frontend and backend with health check
+function dev {
     set +e
     
     # Set queue type first
@@ -56,11 +120,40 @@ function local-mock {
     echo "Starting Local Worker"
     python src/files_api/cli.py worker --mode local-mock &
     
-    # Start FastAPI app
-    python -m uvicorn files_api.main:create_app --reload
+    # Start FastAPI app in background
+    echo "Starting FastAPI app"
+    python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000 &
     
-    wait
+    # Wait for the API to be ready
+    echo "Waiting for FastAPI to be ready..."
+    max_retries=30
+    counter=0
+    while [ $counter -lt $max_retries ]; do
+        if curl -s http://localhost:8000/health | grep -q "\"ready\":true"; then
+            echo "FastAPI is ready!"
+            break
+        fi
+        echo "Waiting for API... ($counter/$max_retries)"
+        sleep 2
+        counter=$((counter + 1))
+    done
+    
+    if [ $counter -eq $max_retries ]; then
+        echo "Warning: FastAPI didn't report ready status within timeout, but will continue anyway"
+    fi
+    
+    # Start frontend
+    if [ -d "$FRONTEND_DIR" ]; then
+        echo "Starting frontend"
+        cd "$FRONTEND_DIR"
+        npm run dev
+    else
+        echo "Error: Frontend directory not found at $FRONTEND_DIR"
+        # Keep running the backend even if frontend fails
+        wait
+    fi
 }
+
 # run linting, formatting, and other static code quality tools
 function lint {
     pre-commit run --all-files

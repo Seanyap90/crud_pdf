@@ -52,6 +52,25 @@ def init_db(db_path: str = "recycling.db") -> None:
                 UNIQUE(vendor_id, invoice_number)
             )
         ''')
+
+        # Initialize default categories if they don't exist
+        default_categories = [
+            (1, 'General Waste', 'Non-recyclable waste materials'),
+            (2, 'Recyclable', 'Materials that can be recycled'),
+            (3, 'Hazardous', 'Dangerous or toxic materials'),
+            (4, 'Organic', 'Biodegradable materials'),
+            (5, 'Metal', 'Metal waste and scrap'),
+            (6, 'Paper', 'Paper and cardboard materials'),
+            (7, 'Plastic', 'Plastic materials and products'),
+            (8, 'Glass', 'Glass materials and products'),
+            (9, 'Electronic', 'Electronic waste and components'),
+            (10, 'Construction', 'Construction and demolition waste')
+        ]
+        
+        cursor.executemany('''
+            INSERT OR IGNORE INTO material_categories (category_id, category_name, description)
+            VALUES (?, ?, ?)
+        ''', default_categories)
         
         conn.commit()
     finally:
@@ -199,23 +218,26 @@ def get_invoice_metadata(invoice_id: int, db_path: str = "recycling.db") -> Opti
     finally:
         conn.close()
 
-def get_invoices_list(db_path: str = "recycling.db") -> tuple[list, int]:
-    """Retrieve list of invoices with their metadata."""
+def get_invoices_list(vendor_id: str, db_path: str = "recycling.db") -> tuple[list, int]:
+    """Retrieve list of invoices with their metadata for a specific vendor."""
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        # Get total count
-        cursor.execute('SELECT COUNT(*) as count FROM vendor_invoices')
+        # Get total count for this vendor
+        cursor.execute(
+            'SELECT COUNT(*) as count FROM vendor_invoices WHERE vendor_id = ?',
+            (vendor_id,)
+        )
         total_count = cursor.fetchone()['count']
         
-        # Get invoice list with category name
+        # Get invoice list with category name, filtered by vendor_id
         cursor.execute('''
             SELECT 
                 vi.invoice_id,
                 vi.invoice_number,
-                mc.category_name as category,
+                COALESCE(mc.category_name, 'Uncategorized') as category,
                 vi.filename,
                 vi.reported_weight_kg,
                 vi.total_amount,
@@ -223,8 +245,9 @@ def get_invoices_list(db_path: str = "recycling.db") -> tuple[list, int]:
                 vi.extraction_status
             FROM vendor_invoices vi
             LEFT JOIN material_categories mc ON vi.category_id = mc.category_id
+            WHERE vi.vendor_id = ?
             ORDER BY vi.upload_date DESC
-        ''')
+        ''', (vendor_id,))
         
         rows = cursor.fetchall()
         invoices = [dict(row) for row in rows]

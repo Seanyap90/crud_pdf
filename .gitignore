@@ -2,6 +2,13 @@
 /client/node_modules/
 /client/.next/
 /recycling.db
-/tmp_pdf
+/temp_pdfs
 /node_modules
 /.next
+/.byaldi
+/src/crud_pdf.egg-info
+/src/cloud_course_project.egg-info
+/src/wastemgt_app.egg-info
+/src/crud_pdf.egg-info
+/.pytest_cache
+/.vscode

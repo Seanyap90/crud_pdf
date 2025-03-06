@@ -4,9 +4,12 @@ import React, { useState, useRef, useEffect } from 'react';
 import { X, Upload, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from './alert';
 
+const API_BASE_URL = 'http://localhost:8000';
+
 interface PDFFile {
   name: string;
   url: string;
+  file: File;  // Added to store the actual file object
 }
 
 interface InvoiceDetails {
@@ -29,9 +32,9 @@ const WASTE_CATEGORIES = [
 ];
 
 export const PDFUpload: React.FC = () => {
-  // State management
   const [pdf, setPdf] = useState<PDFFile | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [notification, setNotification] = useState<NotificationState>({
     show: false,
     message: '',
@@ -45,35 +48,26 @@ export const PDFUpload: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Calculate date range for date picker
   const today = new Date();
   const minDate = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate()).toISOString().split('T')[0];
   const maxDate = new Date(today.getFullYear(), today.getMonth() + 1, today.getDate()).toISOString().split('T')[0];
 
-  // Load saved data from localStorage on component mount
   useEffect(() => {
     const savedData = localStorage.getItem('pdfUploadData');
     if (savedData) {
       const parsedData = JSON.parse(savedData);
       setInvoiceDetails(parsedData.invoiceDetails);
-      if (parsedData.pdf) {
-        setPdf(parsedData.pdf);
-      }
     }
   }, []);
 
-  // Save data to localStorage whenever it changes
   useEffect(() => {
     localStorage.setItem('pdfUploadData', JSON.stringify({
       invoiceDetails,
-      pdf,
+      pdf: pdf ? { name: pdf.name, url: pdf.url } : null,
     }));
   }, [invoiceDetails, pdf]);
 
-  const onFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    
+  const handleFileSelection = (file: File) => {
     if (file.type !== 'application/pdf') {
       showNotification('Please upload a PDF file', 'error');
       return;
@@ -81,8 +75,15 @@ export const PDFUpload: React.FC = () => {
     
     setPdf({
       name: file.name,
-      url: URL.createObjectURL(file)
+      url: URL.createObjectURL(file),
+      file: file
     });
+  };
+
+  const onFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    handleFileSelection(file);
   };
 
   const deletePDF = () => {
@@ -119,16 +120,7 @@ export const PDFUpload: React.FC = () => {
     
     const file = event.dataTransfer.files[0];
     if (!file) return;
-    
-    if (file.type !== 'application/pdf') {
-      showNotification('Please upload a PDF file', 'error');
-      return;
-    }
-    
-    setPdf({
-      name: file.name,
-      url: URL.createObjectURL(file)
-    });
+    handleFileSelection(file);
   };
 
   const showNotification = (message: string, type: 'success' | 'error') => {
@@ -139,41 +131,57 @@ export const PDFUpload: React.FC = () => {
   };
 
   const handleSubmit = async () => {
-    // Validate all fields are filled
-    if (!pdf || !invoiceDetails.invoiceNumber || !invoiceDetails.invoiceDate || !invoiceDetails.category) {
+    if (!pdf?.file || !invoiceDetails.invoiceNumber || !invoiceDetails.invoiceDate || !invoiceDetails.category) {
       showNotification('Please fill all required fields', 'error');
       return;
     }
 
-    // Mock API call data
-    const mockData = {
-      vendor_id: 'V123',
-      vendor_name: 'Sample Vendor',
-      invoice_id: 'INV' + invoiceDetails.invoiceNumber,
-      filepath: `/uploads/${pdf.name}`,
-      invoice_number: invoiceDetails.invoiceNumber,
-      invoice_date: invoiceDetails.invoiceDate,
-      category_id: invoiceDetails.category,
-      filename: pdf.name
-    };
-
+    setIsUploading(true);
+    
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      const formData = new FormData();
+      formData.append('file_content', pdf.file);
+
+      // Build query parameters
+      const queryParams = new URLSearchParams({
+        vendor_name: 'Demo Vendor', // This should come from auth context
+        vendor_id: 'V12345',       // This should come from auth context
+        category_id: invoiceDetails.category,
+        invoice_number: invoiceDetails.invoiceNumber,
+        invoice_date: invoiceDetails.invoiceDate
+      });
+
+      // Create file path
+      const fileName = pdf.file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+      const filePath = `invoices/${new Date().getFullYear()}/${fileName}`;
+
+      const response = await fetch(
+        `${API_BASE_URL}/v1/files/${filePath}?${queryParams}`,
+        {
+          method: 'PUT',
+          body: formData
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Upload failed');
+      }
+
+      const result = await response.json();
       showNotification('Success: Invoice uploaded', 'success');
       resetForm();
     } catch (error) {
-      showNotification('Failure, please try again or contact administrator', 'error');
+      showNotification('Upload failed. Please try again.', 'error');
+    } finally {
+      setIsUploading(false);
     }
   };
 
   return (
     <div className="card">
       {notification.show && (
-        <Alert className={`mb-4 ${notification.type === 'success' ? 'bg-green-100 border-green-500' : 'bg-red-100 border-red-500'}`}>
-          <AlertDescription className={notification.type === 'success' ? 'text-green-800' : 'text-red-800'}>
-            {notification.message}
-          </AlertDescription>
+        <Alert variant={notification.type}>
+          <AlertDescription>{notification.message}</AlertDescription>
         </Alert>
       )}
 
@@ -307,11 +315,15 @@ export const PDFUpload: React.FC = () => {
 
       <button
         onClick={handleSubmit}
-        className="mt-6 flex items-center justify-center gap-2"
-        disabled={!pdf || !invoiceDetails.invoiceNumber || !invoiceDetails.invoiceDate || !invoiceDetails.category}
+        className="mt-6 flex items-center justify-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+        disabled={isUploading || !pdf || !invoiceDetails.invoiceNumber || !invoiceDetails.invoiceDate || !invoiceDetails.category}
       >
-        <Upload size={20} />
-        <span>Upload Invoice</span>
+        {isUploading ? (
+          <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white" />
+        ) : (
+          <Upload size={20} />
+        )}
+        <span>{isUploading ? 'Uploading...' : 'Upload Invoice'}</span>
       </button>
     </div>
   );

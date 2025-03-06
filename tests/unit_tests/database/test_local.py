@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import pytest
-from files_api.database.local import init_db, add_file
+from files_api.database.local import init_db, add_invoice
 
 TEST_DB = "test_files.db"
 TEST_PDF = "sample.pdf"
@@ -30,7 +30,7 @@ def test_init_db(db):
 def test_add_file(db, pdf_file):
     filepath = "uploads/sample.pdf"
     
-    add_file(TEST_PDF, filepath, db)
+    add_invoice(TEST_PDF, filepath, db)
     
     conn = sqlite3.connect(db)
     cursor = conn.cursor()

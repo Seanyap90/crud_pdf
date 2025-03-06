@@ -6,7 +6,7 @@ import boto3
 from tests.fixtures.db_client import TEST_DB
 from tests.consts import TEST_BUCKET_NAME
 from tests.fixtures.rag_fixtures import TEST_QUEUE
-from files_api.database.local import init_db, add_file
+from files_api.database.local import init_db, add_invoice
 from files_api.msg_queue import QueueFactory
 
 # Constants for testing
@@ -41,7 +41,7 @@ async def test_upload_pdf_with_db_and_s3_notification(client: TestClient, mocked
 
     # Initialize DB
     init_db(TEST_DB)
-    add_file(test_file_path, test_file_path, TEST_DB)
+    add_invoice(test_file_path, test_file_path, TEST_DB)
 
     # Verify DB entry
     conn = sqlite3.connect(TEST_DB)

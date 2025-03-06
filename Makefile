@@ -13,6 +13,16 @@ run:
 local-mock:
 	bash run.sh local-mock
 
+npm-install:
+	bash run.sh npm-install
+
+npm-build:
+	bash run.sh npm-build
+
+# Run both frontend and backend with a single command
+dev:
+	bash run.sh dev
+
 clean:
 	bash run.sh clean
 
