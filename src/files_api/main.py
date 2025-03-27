@@ -12,7 +12,7 @@ from files_api.errors import (
 from files_api.routes import ROUTER
 from files_api.settings import Settings
 from fastapi import Depends
-from files_api.database.local import init_db
+from database.local import init_db
 
 # Set up logging
 logger = logging.getLogger(__name__)

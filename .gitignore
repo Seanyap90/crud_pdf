@@ -12,3 +12,8 @@
 /src/crud_pdf.egg-info
 /.pytest_cache
 /.vscode
+/src/iot/sample
+/iot-client-admin/node_modules
+/certificates
+/iot-client-admin/.next
+/src/*.egg-info

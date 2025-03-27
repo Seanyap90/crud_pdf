@@ -9,6 +9,8 @@ set -e
 THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 MINIMUM_TEST_COVERAGE_PERCENT=0
 FRONTEND_DIR="$THIS_DIR/../client" # Adjust if your frontend is in a different location
+CERT_DIR="./certificates"
+CERT_DAYS=365
 
 ##########################
 # --- Task Functions --- #
@@ -152,6 +154,167 @@ function dev {
         # Keep running the backend even if frontend fails
         wait
     fi
+}
+
+function iot-backend-start() {
+    echo "Starting Docker containers (MQTT broker and gateway simulator)..."
+    cd src/iot && docker-compose build --no-cache gateway-simulator
+    docker-compose up -d mqtt-broker
+    
+    echo "Waiting for MQTT broker to initialize..."
+    sleep 3
+    
+    echo "Starting FastAPI backend..."
+    echo "Press CTRL+C to stop when done"
+    # Using Python module approach while staying in src/iot directory
+    cd .. && python -m iot.cli start --mode local --docker-network iot-network
+}
+
+function iot-backend-cleanup() {
+    echo "Cleaning up IoT Gateway Management System..."
+    
+    echo "Stopping Docker containers..."
+    cd src/iot && docker-compose down
+    
+    # Remove all gateway containers that might be running
+    echo "Removing any remaining gateway containers..."
+    docker ps -a | grep "gateway-" | awk '{print $1}' | xargs -r docker rm -f
+    
+    echo "Cleaning up Python cache files..."
+    find src/iot -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    find src/iot -type f -name "*.pyc" -delete 2>/dev/null || true
+    
+    # Kill any remaining Python processes related to the app (if any)
+    echo "Killing any remaining Python processes..."
+    pkill -f "iot.cli start" 2>/dev/null || true
+    
+    # Remove any temporary or log files
+    echo "Removing temporary log files..."
+    rm -f src/iot/*.log 2>/dev/null || true
+    
+    echo "Cleanup complete"
+}
+
+# Function to generate certificates for a gateway
+function generate_cert() {
+    local gateway_id=$1
+    
+    if [ -z "$gateway_id" ]; then
+        echo -e "${RED}Error: Gateway ID is required for certificate generation${NC}"
+        return 1
+    fi
+    
+    # First check if gateway exists
+    response=$(curl -s "http://localhost:8000/api/gateways/${gateway_id}")
+    if [[ $response == *"detail"* ]] || [[ $response == *"not found"* ]]; then
+        echo -e "${RED}Error: Gateway ${gateway_id} does not exist${NC}"
+        echo "Please create the gateway first using the API"
+        return 1
+    fi
+    
+    echo -e "${GREEN}Generating certificates for gateway: ${gateway_id}${NC}"
+    
+    # Create certificates directory
+    local gateway_cert_dir="${CERT_DIR}/${gateway_id}"
+    mkdir -p "$gateway_cert_dir"
+    
+    # Generate certificate and private key using OpenSSL
+    local cert_file="${gateway_cert_dir}/certificate.pem"
+    local key_file="${gateway_cert_dir}/private_key.pem"
+    
+    echo -e "${YELLOW}Creating certificate and private key...${NC}"
+    openssl req -x509 -newkey rsa:2048 -keyout "$key_file" \
+        -out "$cert_file" -days "$CERT_DAYS" -nodes \
+        -subj "/CN=gateway-${gateway_id}/O=IoT Gateway Management System" 2>/dev/null
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to generate certificates${NC}"
+        return 1
+    fi
+    
+    # Set permissions
+    chmod 644 "$cert_file"
+    chmod 600 "$key_file"
+    
+    echo -e "${GREEN}Certificates generated successfully:${NC}"
+    echo "Certificate: $cert_file"
+    echo "Private Key: $key_file"
+    
+    echo -e "${YELLOW}Next steps:${NC}"
+    echo "- Inject certificate into container: make inject-cert GATEWAY_ID=$gateway_id"
+    
+    return 0
+}
+
+# Function to inject certificates into a gateway container
+function inject_cert() {
+    local gateway_id=$1
+    
+    if [ -z "$gateway_id" ]; then
+        echo -e "${RED}Error: Gateway ID is required${NC}"
+        return 1
+    fi
+    
+    # Check if container exists
+    local container_name="gateway-$gateway_id"
+    if ! docker ps -a --format '{{.Names}}' | grep -q "^$container_name$"; then
+        echo -e "${RED}Error: Container $container_name does not exist${NC}"
+        echo "Make sure the gateway has been created and a container is running"
+        return 1
+    fi
+    
+    # Check if certificates exist
+    local cert_file="${CERT_DIR}/${gateway_id}/certificate.pem"
+    local key_file="${CERT_DIR}/${gateway_id}/private_key.pem"
+    
+    if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+        echo -e "${RED}Error: Certificates for gateway ${gateway_id} not found${NC}"
+        echo "Please generate certificates first: make generate-cert GATEWAY_ID=$gateway_id"
+        return 1
+    fi
+    
+    echo -e "${GREEN}Injecting certificates into container: ${container_name}${NC}"
+    
+    # Get container running status
+    local is_running=$(docker inspect --format='{{.State.Running}}' "$container_name" 2>/dev/null)
+    if [ "$is_running" != "true" ]; then
+        echo -e "${YELLOW}Warning: Container $container_name is not running${NC}"
+        echo "Starting container..."
+        docker start "$container_name"
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to start container${NC}"
+            return 1
+        fi
+        # Give it a moment to start
+        sleep 2
+    fi
+    
+    # Copy certificates to container
+    echo -e "${YELLOW}Copying certificate to container...${NC}"
+    docker cp "$cert_file" "$container_name:/app/certs/cert.pem"
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to copy certificate to container${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Copying private key to container...${NC}"
+    docker cp "$key_file" "$container_name:/app/certs/key.pem"
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to copy private key to container${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}Certificates successfully injected into container${NC}"
+    echo "The gateway should now detect the certificates and start normal operations"
+    
+    # Check container status
+    echo -e "${YELLOW}Container status:${NC}"
+    docker ps --filter "name=$container_name" --format "{{.Status}}"
+    
+    echo -e "${YELLOW}You can view container logs with:${NC}"
+    echo "  docker logs -f $container_name"
+    
+    return 0
 }
 
 # run linting, formatting, and other static code quality tools

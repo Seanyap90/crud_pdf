@@ -7,3 +7,5 @@
 ![Upload PDF Feature](Upload.png)
 
 ![Upload Status Review Feature](Review.png)
+
+![IoT Administrator Dashboard for managing gateways and End Devices](IoTAdminPreview.png)

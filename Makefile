@@ -13,6 +13,26 @@ run:
 local-mock:
 	bash run.sh local-mock
 
+iot-backend-start:
+	bash run.sh iot-backend-start
+
+iot-backend-cleanup:
+	bash run.sh iot-backend-cleanup
+
+generate_cert:
+	@if [ -z "$(GATEWAY_ID)" ]; then \
+		echo "Error: GATEWAY_ID is required"; \
+		exit 1; \
+	fi
+	@bash run.sh generate_cert $(GATEWAY_ID)
+
+inject_cert:
+	@if [ -z "$(GATEWAY_ID)" ]; then \
+		echo "Error: GATEWAY_ID is required"; \
+		exit 1; \
+	fi
+	@bash run.sh inject_cert $(GATEWAY_ID)
+
 npm-install:
 	bash run.sh npm-install
 

@@ -1,0 +1,32 @@
+version: '3'
+
+services:
+  mqtt-broker:
+    image: eclipse-mosquitto:latest
+    container_name: mqtt-broker
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+    networks:
+      - iot-network
+
+  gateway-simulator:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: gateway-simulator:latest
+    environment:
+      - GATEWAY_PORT=6000
+      - MQTT_BROKER_ADDRESS=mqtt-broker:1883
+      - API_URL=http://host.docker.internal:8000
+    ports:
+      - "6000:6000"
+    depends_on:
+      - mqtt-broker
+    networks:
+      - iot-network
+
+networks:
+  iot-network:
+    driver: bridge

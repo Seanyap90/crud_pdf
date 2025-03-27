@@ -32,7 +32,7 @@ from files_api.schemas import (
     InvoiceListItem
 )
 from files_api.settings import Settings
-from files_api.database.local import (
+from database.local import (
     add_invoice, 
     get_invoice_metadata,
     get_invoices_list

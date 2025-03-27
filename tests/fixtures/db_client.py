@@ -1,7 +1,7 @@
 """Database fixtures for tests."""
 import os
 import pytest
-from files_api.database.local import init_db
+from database.local import init_db
 
 TEST_DB = "test_files.db"
 

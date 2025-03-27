@@ -6,7 +6,7 @@ import boto3
 from tests.fixtures.db_client import TEST_DB
 from tests.consts import TEST_BUCKET_NAME
 from tests.fixtures.rag_fixtures import TEST_QUEUE
-from files_api.database.local import init_db, add_invoice
+from database.local import init_db, add_invoice
 from files_api.msg_queue import QueueFactory
 
 # Constants for testing

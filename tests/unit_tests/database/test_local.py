@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import pytest
-from files_api.database.local import init_db, add_invoice
+from database.local import init_db, add_invoice
 
 TEST_DB = "test_files.db"
 TEST_PDF = "sample.pdf"

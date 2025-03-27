@@ -13,7 +13,7 @@ from pathlib import Path
 from pdf2image import convert_from_path
 from files_api.vlm.load_models import ModelManager, model_on_device
 from files_api.config import config
-from files_api.database.local import update_invoice_processing_status, update_invoice_with_extracted_data
+from database.local import update_invoice_processing_status, update_invoice_with_extracted_data
 from typing import Optional, List, Tuple, Dict, Any
 
 # Configure logging
