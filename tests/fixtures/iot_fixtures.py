@@ -463,7 +463,7 @@ def gateway_utils():
                 print(f"Injecting certificate into gateway container for {gateway_id}...")
                 
                 # Check if container exists
-                container_name = f"gateway-{gateway_id}"
+                container_name = gateway_id
                 result = subprocess.run(
                     ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
                     capture_output=True,
