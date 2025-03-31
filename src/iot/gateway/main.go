@@ -9,10 +9,11 @@ import (
     "log"
     "net/http"
     "os"
+    "os/exec"
     "os/signal"
+    "strings"
     "syscall"
     "time"
-    "os/exec"
 
     mqtt "github.com/eclipse/paho.mqtt.golang"
 )
@@ -109,39 +110,67 @@ func setupBrokerAddress() {
     // Check environment variable
     envBroker := os.Getenv("MQTT_BROKER_ADDRESS")
     
-    // Detect WSL or Docker Desktop (Windows/Mac) environment
+    // Detect environment type
     isDockerDesktop := false
-    _, err := os.Stat("/proc/sys/fs/binfmt_misc/WSLInterop")
-    if err == nil {
-        // We're in WSL
+    
+    // Method 1: Check for WSL existence
+    if _, err := os.Stat("/proc/sys/fs/binfmt_misc/WSLInterop"); err == nil {
         isDockerDesktop = true
         log.Printf("WSL environment detected")
     }
     
-    // Try to ping host.docker.internal as another detection method
-    cmd := exec.Command("ping", "-c", "1", "-W", "1", "host.docker.internal")
-    if err := cmd.Run(); err == nil {
-        // host.docker.internal is pingable, must be Docker Desktop
+    // Method 2: Check if host.docker.internal is resolvable
+    pingCmd := exec.Command("ping", "-c", "1", "-W", "1", "host.docker.internal")
+    if pingCmd.Run() == nil {
         isDockerDesktop = true
         log.Printf("host.docker.internal is reachable, Docker Desktop detected")
     }
     
-    // Logic for setting broker address
+    // Set broker address based on environment
     if envBroker == "mqtt-broker:1883" && isDockerDesktop {
-        // For Docker Desktop environments, when mqtt-broker:1883 is specified, use host.docker.internal
+        // In Docker Desktop, use host.docker.internal
         brokerAddress = "host.docker.internal:1883"
         log.Printf("Docker Desktop environment detected, using host.docker.internal:1883")
     } else if envBroker != "" {
-        // For any other environment variable, use it as is
+        // Use explicitly provided address
         brokerAddress = envBroker
         log.Printf("Using MQTT broker address from environment: %s", brokerAddress)
     } else {
-        // Default fallback, just use mqtt-broker:1883
+        // Default fallback 
         brokerAddress = "mqtt-broker:1883"
         log.Printf("No MQTT broker address specified in environment, using default: %s", brokerAddress)
     }
     
     log.Printf("Final MQTT broker address: %s", brokerAddress)
+}
+
+// setupApiUrl chooses the best API URL based on environment
+func setupApiUrl() string {
+    // Get API URL from environment
+    apiURL := os.Getenv("API_URL")
+    
+    // Default fallback address for Docker environments
+    defaultApiUrl := "http://172.17.0.1:8000"
+    
+    if apiURL == "" || apiURL == "http://0.0.0.0:8000" || apiURL == "https://0.0.0.0:8000" {
+        // No valid API URL specified, use default
+        log.Printf("API_URL is not set or using 0.0.0.0, using %s instead", defaultApiUrl)
+        return defaultApiUrl
+    }
+    
+    // Check if we're using host.docker.internal but it's not accessible
+    if strings.Contains(apiURL, "host.docker.internal") {
+        // Try to ping host.docker.internal
+        pingCmd := exec.Command("ping", "-c", "1", "-W", "1", "host.docker.internal")
+        if pingCmd.Run() != nil {
+            // Cannot reach host.docker.internal, use Docker bridge IP instead
+            log.Printf("host.docker.internal not accessible, using %s instead", defaultApiUrl)
+            return defaultApiUrl
+        }
+    }
+    
+    log.Printf("Using API URL: %s", apiURL)
+    return apiURL
 }
 
 // watchCertificates monitors certificate files and sends events when they change
@@ -215,7 +244,7 @@ func handleStatusRequest(w http.ResponseWriter, r *http.Request) {
     // Add container information
     fmt.Fprintf(w, "\nContainer Information:\n")
     fmt.Fprintf(w, "Container ID: %s\n", os.Getenv("HOSTNAME"))
-    fmt.Fprintf(w, "API URL: %s\n", os.Getenv("API_URL"))
+    fmt.Fprintf(w, "API URL: %s\n", setupApiUrl())
     
     // Show certificate details if present
     if hasCertificates {
@@ -546,13 +575,8 @@ type ApiResponse struct {
 
 // sendEventToAPI sends an event to the API
 func sendEventToAPI(gatewayID string, eventType string, payload interface{}) (*ApiResponse, error) {
-    // Get API URL from environment or use default
-    apiURL := os.Getenv("API_URL")
-    if apiURL == "" || apiURL == "http://0.0.0.0:8000" || apiURL == "https://0.0.0.0:8000" {
-        // Use a more reliable default that works in Docker
-        apiURL = "http://host.docker.internal:8000"
-        log.Printf("API_URL is not set or using 0.0.0.0, using %s instead", apiURL)
-    }
+    // Get API URL with adaptive handling
+    apiURL := setupApiUrl()
     
     // Create event
     event := MQTTEvent{

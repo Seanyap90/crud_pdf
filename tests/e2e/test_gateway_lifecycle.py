@@ -31,6 +31,26 @@ def get_gateway_simulator_image():
             return image
     raise Exception("No gateway-simulator image found.")
 
+def get_api_url_for_container():
+    """Determine the best API URL for the container environment"""
+    # Check if we're in GitHub Actions
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        return "http://172.17.0.1:8000"  # GitHub Actions: use Docker bridge
+    
+    # Try to detect if host.docker.internal works on this system
+    try:
+        result = subprocess.run(
+            ["docker", "run", "--rm", "busybox", "ping", "-c", "1", "-W", "1", "host.docker.internal"],
+            capture_output=True, check=False
+        )
+        if result.returncode == 0:
+            return "http://host.docker.internal:8000"  # host.docker.internal is accessible
+    except Exception:
+        pass
+    
+    # Default fallback
+    return "http://172.17.0.1:8000"
+
 def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     page = iot_page
     
@@ -89,7 +109,7 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
         "-v", f"{key_path.absolute()}:/app/certs/key.pem",
         "-e", f"GATEWAY_ID={gateway_id}",
         "-e", "MQTT_BROKER_ADDRESS=mqtt-broker:1883",  # Set directly to mqtt-broker
-        "-e", "API_URL=http://host.docker.internal:8000",  # Keep this for API connectivity
+        "-e", f"API_URL={get_api_url_for_container()}",  # Keep this for API connectivity
     ]
     if subprocess.run(["docker", "network", "inspect", "iot-network"], capture_output=True).returncode == 0:
         docker_cmd.append(image_name)
