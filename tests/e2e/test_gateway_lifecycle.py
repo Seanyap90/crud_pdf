@@ -14,7 +14,7 @@ from playwright.sync_api import expect
 # Test configuration
 TEST_GATEWAY_NAME = "E2E Test Gateway"
 TEST_GATEWAY_LOCATION = "E2E Testing Environment"
-MAX_WAIT_TIME = 120  # seconds to wait for gateway to connect
+MAX_WAIT_TIME = 60  # seconds to wait for gateway to connect
 MAX_RETRIES = 5
 RETRY_DELAY = 5
 

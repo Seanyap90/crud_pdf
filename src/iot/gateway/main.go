@@ -128,49 +128,53 @@ func setupBrokerAddress() {
     }
     
     // In Docker Desktop, always prioritize using host.docker.internal
-    if isDockerDesktop {
+    if isDockerDesktop && (envBroker == "" || envBroker == "mqtt-broker:1883") {
         brokerAddress = "host.docker.internal:1883"
-        log.Printf("Docker Desktop detected, using host.docker.internal:1883 (ignoring any provided address)")
+        log.Printf("Docker Desktop detected, using host.docker.internal:1883")
     } else if envBroker != "" {
-        // In non-Docker Desktop, use the environment variable if set
+        // Use whatever broker address was provided
         brokerAddress = envBroker
         log.Printf("Using MQTT broker address from environment: %s", brokerAddress)
     } else {
-        // Default fallback for non-Docker Desktop environments
+        // Default to service name for Docker DNS resolution
         brokerAddress = "mqtt-broker:1883"
-        log.Printf("No MQTT broker address specified in environment, using default: %s", brokerAddress)
+        log.Printf("No broker address specified, using service name: %s", brokerAddress)
     }
     
-    // Skip TCP connectivity check for Docker Desktop
-    if !isDockerDesktop {
-        // For non-Docker Desktop, check connectivity
-        hostname := brokerAddress
-        
-        if strings.Contains(brokerAddress, ":") {
-            parts := strings.Split(brokerAddress, ":")
-            hostname = parts[0]
-            // We don't need to extract port here as checkTCPConnectivity will handle it
-        }
-        
-        // For hostnames, try to resolve
-        if net.ParseIP(hostname) == nil {
-            ips, err := net.LookupHost(hostname)
-            if err != nil {
-                log.Printf("Cannot resolve hostname %s: %v", hostname, err)
-            } else {
-                log.Printf("Hostname %s resolves to IPs: %v", hostname, ips)
+    // Extract host for resolution checks
+    hostname := brokerAddress
+    if strings.Contains(brokerAddress, ":") {
+        parts := strings.Split(brokerAddress, ":")
+        hostname = parts[0]
+    }
+    
+    // Try DNS lookup first to validate the hostname
+    if net.ParseIP(hostname) == nil {
+        // It's a hostname, try to resolve it
+        ips, err := net.LookupHost(hostname)
+        if err != nil {
+            log.Printf("Warning: Cannot resolve hostname %s: %v", hostname, err)
+            
+            // Don't try alternative approaches in Docker Desktop
+            if !isDockerDesktop {
+                // Try to verify the MQTT service is accessible
+                if !checkTCPConnectivity(brokerAddress) {
+                    log.Printf("MQTT broker at %s is not accessible, checking Docker DNS", brokerAddress)
+                    // This might be a Docker DNS service name issue
+                    log.Printf("Note: In Docker environments, ensure all containers are on the same network")
+                    log.Printf("Check that 'mqtt-broker' service is running and on the 'iot-network'")
+                }
             }
+        } else {
+            log.Printf("Successfully resolved hostname %s to IPs: %v", hostname, ips)
         }
-        
-        // Check TCP connectivity
-        checkTCPConnectivity(brokerAddress)
     }
     
     log.Printf("Final MQTT broker address: %s", brokerAddress)
 }
 
 // checkTCPConnectivity tries to establish a TCP connection to verify the address is reachable
-func checkTCPConnectivity(address string) {
+func checkTCPConnectivity(address string) bool {
     // Ensure we have a port
     if !strings.Contains(address, ":") {
         address = address + ":1883"
@@ -180,10 +184,12 @@ func checkTCPConnectivity(address string) {
     conn, err := net.DialTimeout("tcp", address, 3*time.Second)
     if err != nil {
         log.Printf("Warning: Cannot connect to %s: %v", address, err)
-    } else {
-        conn.Close()
-        log.Printf("Successfully connected to %s", address)
+        return false
     }
+    
+    conn.Close()
+    log.Printf("Successfully connected to %s", address)
+    return true
 }
 
 // setupApiUrl chooses the best API URL based on environment
