@@ -20,6 +20,18 @@ RETRY_DELAY = 5
 # Mark these tests as requiring the IoT environment setup
 pytestmark = [pytest.mark.e2e, pytest.mark.iot, pytest.mark.usefixtures("iot_backend")]
 
+def get_gateway_simulator_image():
+    """Dynamically find the gateway-simulator image name."""
+    result = subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], 
+                           capture_output=True, text=True, check=False)
+    images = result.stdout.splitlines()
+    print(f"Available images: {images}")
+    for image in images:
+        if "gateway-simulator" in image:  # Match any image containing "gateway-simulator"
+            print(f"Found gateway image: {image}")
+            return image
+    raise Exception("No gateway-simulator image found. Ensure it’s built in the workflow.")
+
 def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     page = iot_page
     
@@ -49,18 +61,28 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     
     # Debug: Check prerequisites
     print("Docker images:")
-    subprocess.run(["docker", "images"], check=False, capture_output=True, text=True)
+    images_result = subprocess.run(["docker", "images"], capture_output=True, text=True, check=False)
+    print(f"Output: {images_result.stdout}")
+    print(f"Errors (if any): {images_result.stderr}")
+    
     print("Docker networks:")
-    subprocess.run(["docker", "network", "ls"], check=False, capture_output=True, text=True)
+    networks_result = subprocess.run(["docker", "network", "ls"], capture_output=True, text=True, check=False)
+    print(f"Output: {networks_result.stdout}")
+    print(f"Errors (if any): {networks_result.stderr}")
+    
     print("Existing containers:")
-    subprocess.run(["docker", "ps", "-a"], check=False, capture_output=True, text=True)
+    containers_result = subprocess.run(["docker", "ps", "-a"], capture_output=True, text=True, check=False)
+    print(f"Output: {containers_result.stdout}")
+    print(f"Errors (if any): {containers_result.stderr}")
+    
     print(f"Cert files exist: {cert_path.exists()} {key_path.exists()}")
     
     # Clean up any existing container
     subprocess.run(["docker", "rm", "-f", gateway_id], check=False)
     
-    # Use correct image name (adjust if needed)
-    image_name = "gateway-simulator"  # Based on docker-compose.yml in src/iot
+    # Get the correct image name
+    image_name = get_gateway_simulator_image()
+    
     docker_cmd = [
         "docker", "run", "-d", "--name", gateway_id, "--network", "iot-network",
         "-v", f"{cert_path.absolute()}:/app/certs/cert.pem",
