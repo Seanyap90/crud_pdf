@@ -66,6 +66,13 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     networks_result = subprocess.run(["docker", "network", "ls"], capture_output=True, text=True, check=False)
     print(f"Output: {networks_result.stdout}")
     
+    # Test connectivity within the network
+    print("Testing network connectivity:")
+    network_test = subprocess.run(["docker", "run", "--rm", "--network", "iot-network", "busybox", "ping", "-c", "3", "mqtt-broker"], 
+                                capture_output=True, text=True, check=False)
+    print(f"Network test output: {network_test.stdout}")
+    print(f"Network test errors: {network_test.stderr}")
+    
     print("Existing containers:")
     containers_result = subprocess.run(["docker", "ps", "-a"], capture_output=True, text=True, check=False)
     print(f"Output: {containers_result.stdout}")
@@ -75,19 +82,19 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     subprocess.run(["docker", "rm", "-f", gateway_id], check=False)
     image_name = get_gateway_simulator_image()
     
-    # Use mqtt-broker directly and set API endpoint
+    # Use mqtt-broker directly and DON'T override MQTT_BROKER_ADDRESS
     docker_cmd = [
         "docker", "run", "-d", "--name", gateway_id, "--network", "iot-network",
         "-v", f"{cert_path.absolute()}:/app/certs/cert.pem",
         "-v", f"{key_path.absolute()}:/app/certs/key.pem",
         "-e", f"GATEWAY_ID={gateway_id}",
-        "-e", "MQTT_BROKER=mqtt-broker:1883",
-        "-e", "API_ENDPOINT=http://localhost:8000",  # Override default host.docker.internal
+        "-e", "MQTT_BROKER_ADDRESS=mqtt-broker:1883",  # Set directly to mqtt-broker
+        "-e", "API_URL=http://host.docker.internal:8000",  # Keep this for API connectivity
     ]
     if subprocess.run(["docker", "network", "inspect", "iot-network"], capture_output=True).returncode == 0:
         docker_cmd.append(image_name)
     else:
-        raise Exception("iot-network not found. Ensure it’s created in the workflow.")
+        raise Exception("iot-network not found. Ensure it's created in the workflow.")
     
     print(f"Running command: {' '.join(docker_cmd)}")
     try:

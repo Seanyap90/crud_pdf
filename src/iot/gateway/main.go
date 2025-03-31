@@ -12,6 +12,7 @@ import (
     "os/signal"
     "syscall"
     "time"
+    "os/exec"
 
     mqtt "github.com/eclipse/paho.mqtt.golang"
 )
@@ -105,19 +106,38 @@ func setupGatewayID() {
 
 // setupBrokerAddress gets the MQTT broker address from environment
 func setupBrokerAddress() {
-    // Default broker address that works well in Docker
-    brokerAddress = "host.docker.internal:1883"
-    
     // Check environment variable
     envBroker := os.Getenv("MQTT_BROKER_ADDRESS")
     
-    // If environment variable is set to mqtt-broker:1883, replace with host.docker.internal:1883
-    if envBroker == "mqtt-broker:1883" {
-        log.Printf("MQTT_BROKER_ADDRESS is set to mqtt-broker:1883, using host.docker.internal:1883 instead")
+    // Detect WSL or Docker Desktop (Windows/Mac) environment
+    isDockerDesktop := false
+    _, err := os.Stat("/proc/sys/fs/binfmt_misc/WSLInterop")
+    if err == nil {
+        // We're in WSL
+        isDockerDesktop = true
+        log.Printf("WSL environment detected")
+    }
+    
+    // Try to ping host.docker.internal as another detection method
+    cmd := exec.Command("ping", "-c", "1", "-W", "1", "host.docker.internal")
+    if err := cmd.Run(); err == nil {
+        // host.docker.internal is pingable, must be Docker Desktop
+        isDockerDesktop = true
+        log.Printf("host.docker.internal is reachable, Docker Desktop detected")
+    }
+    
+    // Logic for setting broker address
+    if envBroker == "mqtt-broker:1883" && isDockerDesktop {
+        // For Docker Desktop environments, when mqtt-broker:1883 is specified, use host.docker.internal
+        brokerAddress = "host.docker.internal:1883"
+        log.Printf("Docker Desktop environment detected, using host.docker.internal:1883")
     } else if envBroker != "" {
+        // For any other environment variable, use it as is
         brokerAddress = envBroker
         log.Printf("Using MQTT broker address from environment: %s", brokerAddress)
     } else {
+        // Default fallback, just use mqtt-broker:1883
+        brokerAddress = "mqtt-broker:1883"
         log.Printf("No MQTT broker address specified in environment, using default: %s", brokerAddress)
     }
     
