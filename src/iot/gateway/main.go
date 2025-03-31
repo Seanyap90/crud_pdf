@@ -7,6 +7,7 @@ import (
     "fmt"
     "io/ioutil"
     "log"
+    "net"
     "net/http"
     "os"
     "os/exec"
@@ -113,35 +114,76 @@ func setupBrokerAddress() {
     // Detect environment type
     isDockerDesktop := false
     
-    // Method 1: Check for WSL existence
+    // Check for WSL existence
     if _, err := os.Stat("/proc/sys/fs/binfmt_misc/WSLInterop"); err == nil {
         isDockerDesktop = true
         log.Printf("WSL environment detected")
     }
     
-    // Method 2: Check if host.docker.internal is resolvable
+    // Check if host.docker.internal is resolvable
     pingCmd := exec.Command("ping", "-c", "1", "-W", "1", "host.docker.internal")
     if pingCmd.Run() == nil {
         isDockerDesktop = true
         log.Printf("host.docker.internal is reachable, Docker Desktop detected")
     }
     
-    // Set broker address based on environment
-    if envBroker == "mqtt-broker:1883" && isDockerDesktop {
-        // In Docker Desktop, use host.docker.internal
+    // In Docker Desktop, always prioritize using host.docker.internal
+    if isDockerDesktop {
         brokerAddress = "host.docker.internal:1883"
-        log.Printf("Docker Desktop environment detected, using host.docker.internal:1883")
+        log.Printf("Docker Desktop detected, using host.docker.internal:1883 (ignoring any provided address)")
     } else if envBroker != "" {
-        // Use explicitly provided address
+        // In non-Docker Desktop, use the environment variable if set
         brokerAddress = envBroker
         log.Printf("Using MQTT broker address from environment: %s", brokerAddress)
     } else {
-        // Default fallback 
+        // Default fallback for non-Docker Desktop environments
         brokerAddress = "mqtt-broker:1883"
         log.Printf("No MQTT broker address specified in environment, using default: %s", brokerAddress)
     }
     
+    // Skip TCP connectivity check for Docker Desktop
+    if !isDockerDesktop {
+        // For non-Docker Desktop, check connectivity
+        hostname := brokerAddress
+        
+        if strings.Contains(brokerAddress, ":") {
+            parts := strings.Split(brokerAddress, ":")
+            hostname = parts[0]
+            // We don't need to extract port here as checkTCPConnectivity will handle it
+        }
+        
+        // For hostnames, try to resolve
+        if net.ParseIP(hostname) == nil {
+            ips, err := net.LookupHost(hostname)
+            if err != nil {
+                log.Printf("Cannot resolve hostname %s: %v", hostname, err)
+            } else {
+                log.Printf("Hostname %s resolves to IPs: %v", hostname, ips)
+            }
+        }
+        
+        // Check TCP connectivity
+        checkTCPConnectivity(brokerAddress)
+    }
+    
     log.Printf("Final MQTT broker address: %s", brokerAddress)
+}
+
+// checkTCPConnectivity tries to establish a TCP connection to verify the address is reachable
+func checkTCPConnectivity(address string) {
+    // Ensure we have a port
+    if !strings.Contains(address, ":") {
+        address = address + ":1883"
+    }
+    
+    log.Printf("Testing TCP connectivity to %s", address)
+    conn, err := net.DialTimeout("tcp", address, 3*time.Second)
+    if err != nil {
+        log.Printf("Warning: Cannot connect to %s: %v", address, err)
+    } else {
+        conn.Close()
+        log.Printf("Successfully connected to %s", address)
+    }
 }
 
 // setupApiUrl chooses the best API URL based on environment
@@ -355,14 +397,20 @@ func handleCertificateFound() {
     setupMQTTClient()
 }
 
-// setupMQTTClient creates and configures an MQTT client
+// setupMQTTClient creates and configures an MQTT client with improved error handling
 func setupMQTTClient() {
+    // Verify broker connectivity before attempting MQTT connection
+    testBrokerConnectivity()
+    
     // Create TLS config if certificates exist
     var tlsConfig *tls.Config
     if hasCertificates {
         cert, err := tls.LoadX509KeyPair(CertPath, KeyPath)
         if err != nil {
             log.Printf("WARNING: Error loading certificates: %v", err)
+            
+            // Check if certificate files exist and have proper permissions
+            checkCertificatePermissions()
         } else {
             tlsConfig = &tls.Config{
                 ClientCAs:          nil,
@@ -373,7 +421,18 @@ func setupMQTTClient() {
         }
     }
     
-    // Setup MQTT options
+    // Extract broker details for logging
+    brokerHost := brokerAddress
+    brokerPort := "1883"
+    if strings.Contains(brokerAddress, ":") {
+        parts := strings.Split(brokerAddress, ":")
+        brokerHost = parts[0]
+        if len(parts) > 1 {
+            brokerPort = parts[1]
+        }
+    }
+    
+    // Setup MQTT options with detailed logging
     opts := mqtt.NewClientOptions()
     opts.AddBroker(fmt.Sprintf("tcp://%s", brokerAddress))
     opts.SetClientID(gatewayID)
@@ -381,8 +440,11 @@ func setupMQTTClient() {
     opts.SetPingTimeout(10 * time.Second)
     opts.SetAutoReconnect(true)
     opts.SetMaxReconnectInterval(10 * time.Second)
+    opts.SetConnectTimeout(10 * time.Second) // More reasonable timeout
+    
+    // Add connection handlers
     opts.SetOnConnectHandler(func(client mqtt.Client) {
-        log.Printf("MQTT connected")
+        log.Printf("MQTT connected successfully to %s", brokerAddress)
         
         // Subscribe to control topic
         controlTopic := fmt.Sprintf("control/%s", gatewayID)
@@ -397,21 +459,145 @@ func setupMQTTClient() {
         
         eventChan <- Event{Type: EventMQTTConnected, Time: time.Now()}
     })
+    
     opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
         log.Printf("MQTT connection lost: %v", err)
         eventChan <- Event{Type: EventMQTTDisconnected, Data: err, Time: time.Now()}
+    })
+    
+    // Add default handler for unexpected messages
+    opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
+        log.Printf("Received unexpected message on topic %s: %s", msg.Topic(), string(msg.Payload()))
     })
     
     // Add TLS config if available
     if tlsConfig != nil {
         opts.SetTLSConfig(tlsConfig)
         log.Printf("MQTT configured with TLS")
+    } else {
+        log.Printf("MQTT configured without TLS")
     }
     
-    // Create client and connect
+    // Create client and connect with retry logic
+    log.Printf("Attempting MQTT connection to %s:%s", brokerHost, brokerPort)
     mqttClient = mqtt.NewClient(opts)
-    if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-        log.Printf("MQTT connection error: %v", token.Error())
+    
+    // Connect with improved error handling and retry
+    connectWithRetry(mqttClient, 3)
+}
+
+// connectWithRetry attempts to connect to MQTT with retries
+func connectWithRetry(client mqtt.Client, maxRetries int) {
+    var err error
+    
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        log.Printf("MQTT connection attempt %d of %d", attempt, maxRetries)
+        
+        token := client.Connect()
+        tokenSuccess := token.WaitTimeout(10 * time.Second)
+        
+        if !tokenSuccess {
+            log.Printf("MQTT connection attempt %d timed out", attempt)
+            err = fmt.Errorf("connection timeout")
+            time.Sleep(time.Duration(attempt) * time.Second)  // Exponential backoff
+            continue
+        }
+        
+        if token.Error() != nil {
+            log.Printf("MQTT connection attempt %d failed: %v", attempt, token.Error())
+            err = token.Error()
+            time.Sleep(time.Duration(attempt) * time.Second)  // Exponential backoff
+            continue
+        }
+        
+        // Success
+        log.Printf("MQTT connection successful on attempt %d", attempt)
+        return
+    }
+    
+    // All attempts failed
+    log.Printf("All MQTT connection attempts failed, last error: %v", err)
+}
+
+// testBrokerConnectivity tests if the broker is actually accessible before trying MQTT
+func testBrokerConnectivity() {
+    host := brokerAddress
+    port := "1883"
+    
+    if strings.Contains(brokerAddress, ":") {
+        parts := strings.Split(brokerAddress, ":")
+        host = parts[0]
+        if len(parts) > 1 {
+            port = parts[1]
+        }
+    }
+    
+    // Try TCP connection to verify broker is reachable
+    address := fmt.Sprintf("%s:%s", host, port)
+    log.Printf("Testing TCP connectivity to MQTT broker at %s", address)
+    
+    conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+    if err != nil {
+        log.Printf("WARNING: Cannot establish TCP connection to MQTT broker at %s: %v", address, err)
+        
+        // Print network configuration for debugging
+        printNetworkInfo()
+    } else {
+        conn.Close()
+        log.Printf("Successfully established TCP connection to MQTT broker at %s", address)
+    }
+}
+
+// checkCertificatePermissions checks if certificates exist and have correct permissions
+func checkCertificatePermissions() {
+    // Check certificate file
+    if certInfo, err := os.Stat(CertPath); err != nil {
+        log.Printf("Certificate file issue at %s: %v", CertPath, err)
+    } else {
+        mode := certInfo.Mode()
+        log.Printf("Certificate file exists with permissions: %v", mode)
+    }
+    
+    // Check key file
+    if keyInfo, err := os.Stat(KeyPath); err != nil {
+        log.Printf("Key file issue at %s: %v", KeyPath, err)
+    } else {
+        mode := keyInfo.Mode()
+        log.Printf("Key file exists with permissions: %v", mode)
+    }
+}
+
+// printNetworkInfo prints debugging information about the network configuration
+func printNetworkInfo() {
+    // Get interfaces
+    interfaces, err := net.Interfaces()
+    if err != nil {
+        log.Printf("Error getting network interfaces: %v", err)
+        return
+    }
+    
+    log.Printf("Network interfaces:")
+    for _, iface := range interfaces {
+        addrs, err := iface.Addrs()
+        if err != nil {
+            continue
+        }
+        
+        for _, addr := range addrs {
+            log.Printf("  Interface %s: %s", iface.Name, addr.String())
+        }
+    }
+    
+    // Try to ping common Docker gateway addresses
+    log.Printf("Trying to ping common Docker addresses:")
+    hosts := []string{"172.28.1.2", "172.17.0.1", "172.17.0.2", "172.17.0.3"}
+    for _, host := range hosts {
+        cmd := exec.Command("ping", "-c", "1", "-W", "1", host)
+        if err := cmd.Run(); err == nil {
+            log.Printf("  Successfully pinged %s", host)
+        } else {
+            log.Printf("  Failed to ping %s", host)
+        }
     }
 }
 

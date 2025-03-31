@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 import time
 import os
+import re
 from playwright.sync_api import expect
 
 # Test configuration
@@ -50,6 +51,76 @@ def get_api_url_for_container():
     
     # Default fallback
     return "http://172.17.0.1:8000"
+
+def get_mqtt_broker_address():
+    """Discover the MQTT broker address with Docker Desktop priority"""
+    # Check if we're in Docker Desktop/WSL environment
+    is_docker_desktop = False
+    
+    # Check for WSL
+    if os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
+        is_docker_desktop = True
+        print("WSL environment detected")
+    
+    # Check if host.docker.internal is pingable
+    try:
+        ping_result = subprocess.run(
+            ["ping", "-c", "1", "-W", "1", "host.docker.internal"],
+            capture_output=True, text=True, check=False
+        )
+        if ping_result.returncode == 0:
+            is_docker_desktop = True
+            print("host.docker.internal is reachable, Docker Desktop detected")
+    except Exception:
+        pass
+    
+    # In Docker Desktop, always use host.docker.internal
+    if is_docker_desktop:
+        print("Using host.docker.internal:1883 for Docker Desktop environment")
+        return "host.docker.internal:1883"
+    
+    # For non-Docker Desktop, proceed with discovery
+    # Try docker inspect to get container IP (most accurate)
+    try:
+        print("Attempting to get MQTT broker IP via Docker inspect...")
+        inspect_result = subprocess.run(
+            ["docker", "inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", "mqtt-broker"],
+            capture_output=True, text=True, check=False
+        )
+        
+        if inspect_result.returncode == 0 and inspect_result.stdout.strip():
+            ip_address = inspect_result.stdout.strip()
+            print(f"Found MQTT broker IP via Docker inspect: {ip_address}")
+            return f"{ip_address}:1883"
+    except Exception as e:
+        print(f"Error inspecting mqtt-broker container: {str(e)}")
+    
+    # Try to get broker's IP from any container in the network
+    try:
+        network_info = subprocess.run(
+            ["docker", "network", "inspect", "iot-network", "--format", "{{json .Containers}}"],
+            capture_output=True, text=True, check=False
+        )
+        
+        if network_info.returncode == 0 and network_info.stdout.strip():
+            # Look for containers with 'mqtt' or 'broker' in the name
+            import json
+            try:
+                containers = json.loads(network_info.stdout)
+                for container_id, container_info in containers.items():
+                    if 'mqtt' in container_info.get('Name', '').lower() or 'broker' in container_info.get('Name', '').lower():
+                        ip = container_info.get('IPv4Address', '').split('/')[0]
+                        if ip:
+                            print(f"Found broker container in network with IP: {ip}")
+                            return f"{ip}:1883"
+            except json.JSONDecodeError:
+                pass
+    except Exception as e:
+        print(f"Error getting network info: {str(e)}")
+    
+    # Fallback to service name with no IP
+    print("No broker IP found, using service name: mqtt-broker:1883")
+    return "mqtt-broker:1883"
 
 def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     page = iot_page
@@ -108,7 +179,7 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
         "-v", f"{cert_path.absolute()}:/app/certs/cert.pem",
         "-v", f"{key_path.absolute()}:/app/certs/key.pem",
         "-e", f"GATEWAY_ID={gateway_id}",
-        "-e", "MQTT_BROKER_ADDRESS=mqtt-broker:1883",  # Set directly to mqtt-broker
+        "-e", f"MQTT_BROKER_ADDRESS={get_mqtt_broker_address()}",  # Set directly to mqtt-broker
         "-e", f"API_URL={get_api_url_for_container()}",  # Keep this for API connectivity
     ]
     if subprocess.run(["docker", "network", "inspect", "iot-network"], capture_output=True).returncode == 0:
