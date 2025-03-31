@@ -52,7 +52,6 @@ jobs:
         run: |
           cd iot-client-admin
           npm ci
-          npm run build
       
       - name: Start backend services
         run: |
@@ -74,7 +73,7 @@ jobs:
         run: |
           echo "Starting frontend..."
           cd iot-client-admin
-          npm start &
+          npm run dev &
           
           # Wait for frontend to be available
           echo "Waiting for frontend to start..."
