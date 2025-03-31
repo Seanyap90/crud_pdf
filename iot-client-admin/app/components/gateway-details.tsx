@@ -7,7 +7,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "./ui/dialog";
-import { Info, Server, Clock, MapPin, Activity, Cpu, Cloud, Shield } from "lucide-react";
+import { Info, Server, Clock, MapPin, Activity, Cpu, Cloud, Shield, HardDrive } from "lucide-react";
 import StatusBadge from "./status-badge";
 import { Gateway } from "../../shared/schema";
 
@@ -128,6 +128,30 @@ export default function GatewayDetails({ gateway, isOpen, onClose }: GatewayDeta
                   <span className="text-gray-500">Installed At:</span>
                   <span>{formatDate(gateway.certificate_info.installed_at)}</span>
                 </>
+              )}
+            </div>
+          </div>
+          
+          {/* Firmware Information */}
+          <div className="space-y-1">
+            <h4 className="font-medium flex items-center gap-2">
+              <HardDrive className="h-4 w-4 text-blue-500" />
+              Firmware Information
+            </h4>
+            <div className="ml-6 text-sm">
+              {gateway.firmware ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <span className="text-gray-500">Version:</span>
+                  <span>{gateway.firmware.version || "Unknown"}</span>
+                  
+                  <span className="text-gray-500">Last Updated:</span>
+                  <span>{gateway.firmware.lastUpdated ? formatDate(gateway.firmware.lastUpdated) : "Never"}</span>
+                  
+                  <span className="text-gray-500">File:</span>
+                  <span>{gateway.firmware.file || "No file information"}</span>
+                </div>
+              ) : (
+                <p className="text-gray-500 italic">No firmware information available</p>
               )}
             </div>
           </div>

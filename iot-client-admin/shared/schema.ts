@@ -4,6 +4,22 @@ export type GatewayStateType = 'created' | 'connected' | 'disconnected' | 'delet
 // Types for gateway statuses (may include more UI statuses)
 export type GatewayStatusType = 'online' | 'offline' | 'warning' | 'error' | GatewayStateType;
 
+// Firmware information for gateway and end devices
+export interface FirmwareInfo {
+  version?: string;
+  lastUpdated?: string;
+  file?: string;
+}
+
+// End device information for gateway
+export interface EndDevice {
+  id: string;
+  name: string;
+  type: string;
+  status: string;
+  firmware?: FirmwareInfo;
+}
+
 // Gateway representation for the frontend
 export interface Gateway {
   id: string;
@@ -24,6 +40,8 @@ export interface Gateway {
     status: string;
     installed_at?: string;
   } | null;
+  firmware?: FirmwareInfo;
+  endDevices?: EndDevice[];
 }
 
 // Data structure for creating a new gateway

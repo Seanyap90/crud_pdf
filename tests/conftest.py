@@ -21,5 +21,6 @@ pytest_plugins = [
     "tests.fixtures.api_client",
     "tests.fixtures.rag_fixtures",
     "tests.fixtures.db_client",
-    "tests.e2e.test_invoice_e2e"
+    "tests.e2e.test_invoice_e2e",
+    "tests.fixtures.iot_fixtures"
 ]

@@ -7,21 +7,21 @@ import {
 import { Gateway } from "../../shared/schema";
 import StatusBadge from "./status-badge";
 import { Skeleton } from "./ui/skeleton";
-import { Info, Server, Clock, MapPin, Activity, Trash, RefreshCw, Eye } from "lucide-react";
-import GatewayDetails from "./gateway-details";
-import { useQueryClient } from "@tanstack/react-query";
-import { useMutation } from "@tanstack/react-query";
-import { api } from "../lib/api_client";
 import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
+  DialogFooter,
 } from "./ui/dialog";
+import { Info, Server, Clock, MapPin, Activity, Trash, RefreshCw, Eye, HardDrive } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
+import { api } from "../lib/api_client";
+import GatewayDetails from "./gateway-details";
 
 interface GatewayTableProps {
   gateways: Gateway[];
@@ -33,6 +33,8 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
   const [isAlertOpen, setIsAlertOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selectedGatewayDetails, setSelectedGatewayDetails] = useState<Gateway | null>(null);
+  const [firmwareDialogOpen, setFirmwareDialogOpen] = useState(false);
+  const [selectedFirmwareGateway, setSelectedFirmwareGateway] = useState<Gateway | null>(null);
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -117,6 +119,11 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
     setDetailsOpen(true);
   };
 
+  const handleViewFirmware = (gateway: Gateway) => {
+    setSelectedFirmwareGateway(gateway);
+    setFirmwareDialogOpen(true);
+  };
+
   if (isLoading) {
     return (
       <div className="space-y-3">
@@ -136,6 +143,7 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Updated</th>
+            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Firmware</th>
             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
             <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
           </tr>
@@ -143,7 +151,7 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
         <tbody className="bg-white divide-y divide-gray-200">
           {gateways.length === 0 ? (
             <tr>
-              <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
+              <td colSpan={7} className="px-6 py-8 text-center text-gray-500">
                 No gateways found. Add a new gateway to get started.
               </td>
             </tr>
@@ -199,7 +207,7 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
                             <div>
                               <p className="font-medium text-gray-900">Activity Information</p>
                               <p className="text-gray-500 mt-1">
-                                <strong>Last Updated:</strong> {formatDate(gateway.lastUpdated)}
+                                <strong>Last Updated:</strong> {formatDate(gateway.lastUpdated || gateway.last_updated)}
                               </p>
                               {gateway.connected_at && (
                                 <p className="text-gray-500">
@@ -223,6 +231,15 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                   {formatDate(gateway.lastUpdated || gateway.last_updated)}
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm">
+                  <button
+                    onClick={() => handleViewFirmware(gateway)}
+                    className="flex items-center text-blue-500 hover:text-blue-700"
+                  >
+                    <HardDrive size={14} className="mr-1" />
+                    <span className="underline">View Updates</span>
+                  </button>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <StatusBadge status={gateway.status} />
@@ -287,12 +304,72 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
         </DialogContent>
       </Dialog>
       
-      {/* Gateway Details Modal */}
       <GatewayDetails 
         gateway={selectedGatewayDetails} 
         isOpen={detailsOpen} 
         onClose={() => setDetailsOpen(false)} 
       />
+
+      {/* Firmware Update Dialog */}
+      <Dialog open={firmwareDialogOpen} onOpenChange={setFirmwareDialogOpen}>
+        <DialogContent className="sm:max-w-lg bg-white">
+          <DialogHeader>
+            <DialogTitle>Firmware Updates</DialogTitle>
+            <DialogDescription>
+              Firmware information for {selectedFirmwareGateway?.name}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="mt-4 space-y-4">
+            {/* Gateway Firmware Section */}
+            <div className="border rounded-lg p-4">
+              <h3 className="font-medium mb-3 flex items-center">
+                <Server size={16} className="mr-2 text-blue-500" />
+                Gateway Firmware
+              </h3>
+              
+              <div className="space-y-2 text-sm">
+                <div className="grid grid-cols-2 gap-2">
+                  <span className="text-gray-500">Current Version:</span>
+                  <span className="text-gray-700 italic">No version data</span>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-2">
+                  <span className="text-gray-500">Last Updated:</span>
+                  <span className="text-gray-700 italic">No update history</span>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-2">
+                  <span className="text-gray-500">Firmware File:</span>
+                  <span className="text-gray-700 italic">No file data</span>
+                </div>
+              </div>
+            </div>
+            
+            {/* End Devices Firmware Section */}
+            <div className="border rounded-lg p-4">
+              <h3 className="font-medium mb-3 flex items-center">
+                <HardDrive size={16} className="mr-2 text-blue-500" />
+                End Devices Firmware
+              </h3>
+              
+              <div className="bg-gray-50 p-4 rounded-md text-center text-sm text-gray-500">
+                <p>No end devices connected to this gateway.</p>
+                <p className="text-xs mt-1">End device firmware information will appear here when available.</p>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter className="mt-6">
+            <button 
+              onClick={() => setFirmwareDialogOpen(false)}
+              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+            >
+              Close
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
