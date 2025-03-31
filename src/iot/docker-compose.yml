@@ -1,5 +1,3 @@
-version: '3'
-
 services:
   mqtt-broker:
     image: eclipse-mosquitto:latest
@@ -10,23 +8,30 @@ services:
       - ./mosquitto/config:/mosquitto/config
     networks:
       - iot-network
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$$$", "-C", "1"]
+      interval: 5s
+      timeout: 10s
+      retries: 3
 
   gateway-simulator:
     build:
       context: ./gateway
       dockerfile: Dockerfile
-    container_name: gateway-simulator:latest
+    container_name: gateway-simulator
     environment:
       - GATEWAY_PORT=6000
-      - MQTT_BROKER_ADDRESS=mqtt-broker:1883
+      - MQTT_BROKER_ADDRESS=mqtt-broker:1883  # Use the service name for DNS resolution
       - API_URL=http://host.docker.internal:8000
     ports:
       - "6000:6000"
     depends_on:
-      - mqtt-broker
+      mqtt-broker:
+        condition: service_healthy
     networks:
       - iot-network
 
 networks:
   iot-network:
     driver: bridge
+    # No fixed subnet - let Docker handle the networking

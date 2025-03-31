@@ -6,9 +6,11 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { useToast } from "@/hooks/use-toast";
+import { Download, Info } from "lucide-react";
 import type { InsertGateway } from "../../shared/schema";
 import { api } from "../lib/api_client";
 
@@ -63,10 +65,21 @@ export default function GatewayForm({ onSuccess }: GatewayFormProps) {
     }
   };
 
+  // Placeholder function for certificate download (currently disabled)
+  const handleCertificateDownload = () => {
+    toast({
+      title: "Feature Not Available",
+      description: "Certificate download functionality is coming soon.",
+    });
+  };
+
   return (
     <DialogContent className="sm:max-w-md bg-white">
       <DialogHeader>
         <DialogTitle className="text-xl font-bold text-gray-900">Add New Gateway</DialogTitle>
+        <DialogDescription className="text-gray-500">
+          Enter the details for the new gateway device.
+        </DialogDescription>
       </DialogHeader>
 
       <form onSubmit={handleSubmit} className="space-y-4 mt-4">
@@ -92,6 +105,34 @@ export default function GatewayForm({ onSuccess }: GatewayFormProps) {
             placeholder="Enter gateway location"
             required
           />
+        </div>
+
+        {/* Certificate Section */}
+        <div className="pt-4 border-t border-gray-200">
+          <div className="flex items-start space-x-2">
+            <Info size={16} className="text-blue-500 mt-1" />
+            <div className="flex-1">
+              <h4 className="text-sm font-medium text-gray-900">Device Certificates</h4>
+              <p className="text-xs text-gray-500 mt-1">
+                Security certificates are required for encrypted communication with the gateway.
+              </p>
+            </div>
+          </div>
+          
+          <button
+            type="button"
+            onClick={handleCertificateDownload}
+            disabled={true}
+            className="mt-3 flex items-center px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-500 bg-gray-100 cursor-not-allowed"
+          >
+            <Download size={16} className="mr-2" />
+            Download Certificate Package
+          </button>
+          
+          <div className="mt-2 text-xs text-amber-600 flex items-center">
+            <Info size={12} className="mr-1" />
+            Certificate download is not available yet
+          </div>
         </div>
 
         <button
