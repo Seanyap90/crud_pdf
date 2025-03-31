@@ -75,13 +75,20 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     subprocess.run(["docker", "rm", "-f", gateway_id], check=False)
     image_name = get_gateway_simulator_image()
     
+    # Use mqtt-broker directly and set API endpoint
     docker_cmd = [
         "docker", "run", "-d", "--name", gateway_id, "--network", "iot-network",
         "-v", f"{cert_path.absolute()}:/app/certs/cert.pem",
         "-v", f"{key_path.absolute()}:/app/certs/key.pem",
-        "-e", f"GATEWAY_ID={gateway_id}", "-e", "MQTT_BROKER=mqtt-broker",
-        image_name
+        "-e", f"GATEWAY_ID={gateway_id}",
+        "-e", "MQTT_BROKER=mqtt-broker:1883",
+        "-e", "API_ENDPOINT=http://localhost:8000",  # Override default host.docker.internal
     ]
+    if subprocess.run(["docker", "network", "inspect", "iot-network"], capture_output=True).returncode == 0:
+        docker_cmd.append(image_name)
+    else:
+        raise Exception("iot-network not found. Ensure it’s created in the workflow.")
+    
     print(f"Running command: {' '.join(docker_cmd)}")
     try:
         result = subprocess.run(docker_cmd, check=True, capture_output=True, text=True)
@@ -92,8 +99,7 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
         print(f"Error: {e.stderr}")
         raise Exception(f"Failed to start gateway container: {e.stderr or str(e)}")
     
-    # Debug: Check container status and logs
-    time.sleep(5)  # Give it a moment to start
+    time.sleep(5)
     print("Gateway container status:")
     status_result = subprocess.run(["docker", "ps", "-a", "--filter", f"name={gateway_id}"], 
                                    capture_output=True, text=True, check=False)
@@ -105,7 +111,6 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     print(f"Output: {logs_result.stdout}")
     print(f"Errors (if any): {logs_result.stderr}")
     
-    # Test network connectivity to MQTT broker
     print("Testing connectivity to mqtt-broker:")
     ping_result = subprocess.run(["docker", "exec", gateway_id, "ping", "-c", "4", "mqtt-broker"], 
                                  capture_output=True, text=True, check=False)
