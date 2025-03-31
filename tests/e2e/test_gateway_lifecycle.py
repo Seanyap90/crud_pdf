@@ -12,6 +12,8 @@ from playwright.sync_api import expect
 TEST_GATEWAY_NAME = "E2E Test Gateway"
 TEST_GATEWAY_LOCATION = "E2E Testing Environment"
 MAX_WAIT_TIME = 60  # seconds to wait for gateway to connect
+MAX_RETRIES = 5
+RETRY_DELAY = 5
 
 # Mark these tests as requiring the IoT environment setup
 pytestmark = [pytest.mark.e2e, pytest.mark.iot, pytest.mark.usefixtures("iot_backend")]
@@ -61,7 +63,16 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     
     # Step 4: Inject certificates
     print("\n=== Injecting certificates ===")
-    gateway_utils.inject_certificate(gateway_id)
+    for attempt in range(MAX_RETRIES):
+        try:
+            gateway_utils.inject_certificate(gateway_id)
+            break
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                raise
     
     # Step 5: Wait for gateway to connect and verify status
     print("\n=== Waiting for gateway to connect ===")
