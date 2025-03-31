@@ -4,6 +4,8 @@ This test covers adding a gateway, generating certificates, injecting them into 
 and verifying the gateway connects successfully.
 """
 import pytest
+import subprocess
+from pathlib import Path
 import time
 import os
 from playwright.sync_api import expect
@@ -62,17 +64,20 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     gateway_utils.generate_certificate(gateway_id)
     
     # Step 4: Inject certificates
-    print("\n=== Injecting certificates ===")
-    for attempt in range(MAX_RETRIES):
-        try:
-            gateway_utils.inject_certificate(gateway_id)
-            break
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {e}")
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY)
-            else:
-                raise
+    print("\n=== Starting gateway container ===")
+    cert_path = Path("certs") / gateway_id / "cert.pem"
+    key_path = Path("certs") / gateway_id / "key.pem"
+    try:
+        subprocess.run([
+            "docker", "run", "-d", "--name", gateway_id, "--network", "iot-network",
+            "-v", f"{cert_path}:/app/certs/cert.pem",
+            "-v", f"{key_path}:/app/certs/key.pem",
+            "-e", f"GATEWAY_ID={gateway_id}", "-e", "MQTT_BROKER=mqtt-broker",
+            "gateway-simulator"
+        ], check=True)
+        print(f"Gateway container {gateway_id} started successfully")
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"Failed to start gateway container: {e}")
     
     # Step 5: Wait for gateway to connect and verify status
     print("\n=== Waiting for gateway to connect ===")
