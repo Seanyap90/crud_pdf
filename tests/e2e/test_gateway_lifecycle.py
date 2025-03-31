@@ -21,88 +21,76 @@ RETRY_DELAY = 5
 pytestmark = [pytest.mark.e2e, pytest.mark.iot, pytest.mark.usefixtures("iot_backend")]
 
 def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
-    """Test the full gateway lifecycle: add, generate certificate, inject, verify connection"""
-    page = iot_page  # alias for clarity
+    page = iot_page
     
-    # Step 1: Add a new gateway through the UI
     print("\n=== Adding new gateway ===")
-    
-    # Click the Add Gateway button
     add_button = page.locator("button", has_text="Add Gateway")
     add_button.click()
-    
-    # Wait for the form dialog to appear
     page.wait_for_selector("text=Add New Gateway", timeout=5000)
-    
-    # Fill in the gateway form
     page.fill('input[name="name"]', TEST_GATEWAY_NAME)
     page.fill('input[name="location"]', TEST_GATEWAY_LOCATION)
-    
-    # Submit the form
     submit_button = page.locator("button[type='submit']")
     submit_button.click()
-    
-    # Wait for success message
     page.wait_for_selector("text=Gateway created successfully", timeout=10000)
     
-    # Step 2: Get the gateway ID from the API
     print("\n=== Getting gateway ID ===")
     gateways = iot_api.get_gateways()
-    
-    target_gateway = None
-    for gateway in gateways:
-        if gateway.get("name") == TEST_GATEWAY_NAME:
-            target_gateway = gateway
-            break
-    
-    assert target_gateway is not None, f"Gateway '{TEST_GATEWAY_NAME}' not found in API response"
+    target_gateway = next((g for g in gateways if g.get("name") == TEST_GATEWAY_NAME), None)
+    assert target_gateway is not None, f"Gateway '{TEST_GATEWAY_NAME}' not found"
     gateway_id = target_gateway.get("gateway_id") or target_gateway.get("id")
     print(f"Found gateway with ID: {gateway_id}")
     
-    # Step 3: Generate certificates
     print("\n=== Generating certificates ===")
     gateway_utils.generate_certificate(gateway_id)
     
-    # Step 4: Inject certificates
     print("\n=== Starting gateway container ===")
     cert_path = Path("certs") / gateway_id / "cert.pem"
     key_path = Path("certs") / gateway_id / "key.pem"
+    
+    # Debug: Check prerequisites
+    print("Docker images:")
+    subprocess.run(["docker", "images"], check=False, capture_output=True, text=True)
+    print("Docker networks:")
+    subprocess.run(["docker", "network", "ls"], check=False, capture_output=True, text=True)
+    print("Existing containers:")
+    subprocess.run(["docker", "ps", "-a"], check=False, capture_output=True, text=True)
+    print(f"Cert files exist: {cert_path.exists()} {key_path.exists()}")
+    
+    # Clean up any existing container
+    subprocess.run(["docker", "rm", "-f", gateway_id], check=False)
+    
+    # Use correct image name (adjust if needed)
+    image_name = "iot-gateway-simulator"  # Based on docker-compose.yml in src/iot
+    docker_cmd = [
+        "docker", "run", "-d", "--name", gateway_id, "--network", "iot-network",
+        "-v", f"{cert_path.absolute()}:/app/certs/cert.pem",
+        "-v", f"{key_path.absolute()}:/app/certs/key.pem",
+        "-e", f"GATEWAY_ID={gateway_id}", "-e", "MQTT_BROKER=mqtt-broker",
+        image_name
+    ]
+    print(f"Running command: {' '.join(docker_cmd)}")
     try:
-        subprocess.run([
-            "docker", "run", "-d", "--name", gateway_id, "--network", "iot-network",
-            "-v", f"{cert_path}:/app/certs/cert.pem",
-            "-v", f"{key_path}:/app/certs/key.pem",
-            "-e", f"GATEWAY_ID={gateway_id}", "-e", "MQTT_BROKER=mqtt-broker",
-            "gateway-simulator"
-        ], check=True)
-        print(f"Gateway container {gateway_id} started successfully")
+        result = subprocess.run(docker_cmd, check=True, capture_output=True, text=True)
+        print(f"Container started: {result.stdout}")
     except subprocess.CalledProcessError as e:
-        raise Exception(f"Failed to start gateway container: {e}")
+        print(f"Docker run failed with exit code {e.returncode}")
+        print(f"Output: {e.stdout}")
+        print(f"Error: {e.stderr}")
+        raise Exception(f"Failed to start gateway container: {e.stderr or str(e)}")
     
-    # Step 5: Wait for gateway to connect and verify status
     print("\n=== Waiting for gateway to connect ===")
-    
-    # Verify connection via API
     connected = iot_api.wait_for_gateway_status(gateway_id, "connected", timeout=MAX_WAIT_TIME)
     assert connected, f"Gateway did not connect within {MAX_WAIT_TIME} seconds"
     
-    # Step 6: Verify status in UI after refreshing
+    print("\n=== Verifying UI ===")
     page.reload()
-    
-    # Wait for the gateway table to load
     page.wait_for_selector("table tbody tr", timeout=5000)
-    
-    # Find the row with our gateway name
     gateway_row = page.locator("table tbody tr", has=page.locator(f"text={TEST_GATEWAY_NAME}"))
-    
-    # Check the status column (6th column is status based on your gateway-table.tsx file)
     status_cell = gateway_row.locator("td:nth-child(6)")
     status_badge = status_cell.locator("span")
-    
-    # Verify status is "Connected"
     expect(status_badge).to_contain_text("Connected")
     
-    print(f"\n=== Test completed successfully: Gateway {gateway_id} is connected ===")
+    print(f"\n=== Test completed: Gateway {gateway_id} connected ===")
 
 
 # def test_gateway_details_display(iot_page, iot_api, gateway_utils):
