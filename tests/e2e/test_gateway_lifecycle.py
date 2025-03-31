@@ -60,7 +60,7 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     subprocess.run(["docker", "rm", "-f", gateway_id], check=False)
     
     # Use correct image name (adjust if needed)
-    image_name = "iot-gateway-simulator"  # Based on docker-compose.yml in src/iot
+    image_name = "gateway-simulator"  # Based on docker-compose.yml in src/iot
     docker_cmd = [
         "docker", "run", "-d", "--name", gateway_id, "--network", "iot-network",
         "-v", f"{cert_path.absolute()}:/app/certs/cert.pem",
