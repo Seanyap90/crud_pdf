@@ -49,11 +49,6 @@ jobs:
           pip install -e .[dev]  # Install the package in development mode with dev dependencies
           playwright install chromium
       
-      - name: Configure Docker network
-        run: |
-          docker network create iot-network || true
-          echo "Docker network created"
-      
       - name: Install frontend dependencies
         run: |
           cd iot-client-admin
@@ -61,29 +56,32 @@ jobs:
       
       - name: Start backend services
         run: |
-          echo "Starting backend services..."
+          # Create Docker network first (same as iot.cli would do)
+          echo "Creating Docker network..."
+          docker network create iot-network || true
+          echo "Docker network created"
           
-          # Start MQTT broker
-          cd src/iot && docker-compose up -d mqtt-broker
-          sleep 5  # Allow time for MQTT broker to initialize
-
-          # Wait for MQTT broker to initialize
-          sleep 5
+          echo "Starting Docker containers (MQTT broker and gateway simulator)..."
+          cd src/iot && docker-compose build --no-cache gateway-simulator
+          docker-compose up -d mqtt-broker
           
-          # Build gateway-simulator image
-          echo "Building gateway-simulator image..."
-          docker-compose build gateway-simulator
-
-          # List docker images to confirm it was built
-          docker images | grep gateway-simulator || echo "WARNING: gateway-simulator image not found"
+          echo "Waiting for MQTT broker to initialize..."
+          sleep 3
           
-          # Start the backend API
-          cd ../.. && python -m src.iot.cli start --mode local --docker-network iot-network &
+          echo "Starting FastAPI backend..."
+          cd .. && python -m iot.cli start --mode local --docker-network iot-network &
           
           # Wait for backend to be available
           echo "Waiting for backend to start..."
+          cd .. # Return to root directory
           timeout 60s bash -c 'until curl -s http://localhost:8000/health > /dev/null; do sleep 2; echo "Waiting..."; done'
           echo "Backend is available"
+      
+      - name: Setup Xvfb for visible browser
+        run: |
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1280x1024x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
       
       - name: Start frontend
         run: |
@@ -100,7 +98,7 @@ jobs:
         id: e2e_tests
         run: |
           # Set environment variable for test
-          export HEADLESS=1  # Run in headless mode on CI
+          export HEADLESS=0  # Run with visible browser for better debugging
           
           # Run the test
           python -m pytest tests/e2e/test_gateway_lifecycle.py::test_add_gateway_and_verify_connection -v
