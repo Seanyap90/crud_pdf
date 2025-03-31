@@ -21,16 +21,15 @@ RETRY_DELAY = 5
 pytestmark = [pytest.mark.e2e, pytest.mark.iot, pytest.mark.usefixtures("iot_backend")]
 
 def get_gateway_simulator_image():
-    """Dynamically find the gateway-simulator image name."""
     result = subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], 
                            capture_output=True, text=True, check=False)
     images = result.stdout.splitlines()
     print(f"Available images: {images}")
     for image in images:
-        if "gateway-simulator" in image:  # Match any image containing "gateway-simulator"
+        if "gateway-simulator" in image:
             print(f"Found gateway image: {image}")
             return image
-    raise Exception("No gateway-simulator image found. Ensure it’s built in the workflow.")
+    raise Exception("No gateway-simulator image found.")
 
 def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     page = iot_page
@@ -59,28 +58,21 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     cert_path = Path("certs") / gateway_id / "cert.pem"
     key_path = Path("certs") / gateway_id / "key.pem"
     
-    # Debug: Check prerequisites
     print("Docker images:")
     images_result = subprocess.run(["docker", "images"], capture_output=True, text=True, check=False)
     print(f"Output: {images_result.stdout}")
-    print(f"Errors (if any): {images_result.stderr}")
     
     print("Docker networks:")
     networks_result = subprocess.run(["docker", "network", "ls"], capture_output=True, text=True, check=False)
     print(f"Output: {networks_result.stdout}")
-    print(f"Errors (if any): {networks_result.stderr}")
     
     print("Existing containers:")
     containers_result = subprocess.run(["docker", "ps", "-a"], capture_output=True, text=True, check=False)
     print(f"Output: {containers_result.stdout}")
-    print(f"Errors (if any): {containers_result.stderr}")
     
     print(f"Cert files exist: {cert_path.exists()} {key_path.exists()}")
     
-    # Clean up any existing container
     subprocess.run(["docker", "rm", "-f", gateway_id], check=False)
-    
-    # Get the correct image name
     image_name = get_gateway_simulator_image()
     
     docker_cmd = [
@@ -99,6 +91,26 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
         print(f"Output: {e.stdout}")
         print(f"Error: {e.stderr}")
         raise Exception(f"Failed to start gateway container: {e.stderr or str(e)}")
+    
+    # Debug: Check container status and logs
+    time.sleep(5)  # Give it a moment to start
+    print("Gateway container status:")
+    status_result = subprocess.run(["docker", "ps", "-a", "--filter", f"name={gateway_id}"], 
+                                   capture_output=True, text=True, check=False)
+    print(f"Output: {status_result.stdout}")
+    
+    print("Gateway container logs:")
+    logs_result = subprocess.run(["docker", "logs", gateway_id], 
+                                 capture_output=True, text=True, check=False)
+    print(f"Output: {logs_result.stdout}")
+    print(f"Errors (if any): {logs_result.stderr}")
+    
+    # Test network connectivity to MQTT broker
+    print("Testing connectivity to mqtt-broker:")
+    ping_result = subprocess.run(["docker", "exec", gateway_id, "ping", "-c", "4", "mqtt-broker"], 
+                                 capture_output=True, text=True, check=False)
+    print(f"Output: {ping_result.stdout}")
+    print(f"Errors (if any): {ping_result.stderr}")
     
     print("\n=== Waiting for gateway to connect ===")
     connected = iot_api.wait_for_gateway_status(gateway_id, "connected", timeout=MAX_WAIT_TIME)
