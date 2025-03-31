@@ -21,6 +21,80 @@ RETRY_DELAY = 5
 # Mark these tests as requiring the IoT environment setup
 pytestmark = [pytest.mark.e2e, pytest.mark.iot, pytest.mark.usefixtures("iot_backend")]
 
+def setup_docker_network():
+    """Ensure proper Docker network configuration for the test"""
+    try:
+        print("\n=== Setting up Docker network environment ===")
+        
+        # Check if network already exists
+        network_check = subprocess.run(
+            ["docker", "network", "ls", "--format", "{{.Name}}", "--filter", "name=iot-network"],
+            capture_output=True, text=True, check=True
+        )
+        
+        if "iot-network" not in network_check.stdout:
+            print("Creating iot-network...")
+            subprocess.run(
+                ["docker", "network", "create", "iot-network"],
+                check=True
+            )
+            print("Created iot-network")
+        else:
+            print("iot-network already exists")
+        
+        # Ensure MQTT broker is running and on the network
+        broker_check = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}", "--filter", "name=mqtt-broker"],
+            capture_output=True, text=True, check=True
+        )
+        
+        if "mqtt-broker" not in broker_check.stdout:
+            print("MQTT broker container not running, need to start it")
+            # Make sure any old container is removed
+            subprocess.run(
+                ["docker", "rm", "-f", "mqtt-broker"],
+                capture_output=True, check=False
+            )
+            
+            # Start a new MQTT broker container
+            subprocess.run([
+                "docker", "run", "-d",
+                "--name", "mqtt-broker",
+                "--network", "iot-network",
+                "-p", "1883:1883",
+                "eclipse-mosquitto:latest"
+            ], check=True)
+            
+            print("Started new MQTT broker container")
+            # Wait a moment for it to initialize
+            time.sleep(3)
+        else:
+            print("MQTT broker container already running")
+            
+            # Ensure it's connected to our network
+            network_connect = subprocess.run(
+                ["docker", "network", "connect", "iot-network", "mqtt-broker"],
+                capture_output=True, check=False
+            )
+            # It's OK if it fails because it's already connected
+        
+        # Verify MQTT broker is on our network
+        network_info = subprocess.run(
+            ["docker", "network", "inspect", "iot-network"],
+            capture_output=True, text=True, check=True
+        )
+        
+        if "mqtt-broker" in network_info.stdout:
+            print("Confirmed: MQTT broker is on iot-network")
+        else:
+            print("WARNING: MQTT broker not found on iot-network!")
+            
+        print("=== Docker network setup complete ===\n")
+        return True
+    except Exception as e:
+        print(f"Error setting up Docker network: {str(e)}")
+        return False
+
 def get_gateway_simulator_image():
     result = subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"], 
                            capture_output=True, text=True, check=False)
@@ -53,7 +127,7 @@ def get_api_url_for_container():
     return "http://172.17.0.1:8000"
 
 def get_mqtt_broker_address():
-    """Discover the MQTT broker address with Docker Desktop priority"""
+    """Get the MQTT broker address using service name for container DNS"""
     # Check if we're in Docker Desktop/WSL environment
     is_docker_desktop = False
     
@@ -74,55 +148,20 @@ def get_mqtt_broker_address():
     except Exception:
         pass
     
-    # In Docker Desktop, always use host.docker.internal
+    # In Docker Desktop, use host.docker.internal
     if is_docker_desktop:
         print("Using host.docker.internal:1883 for Docker Desktop environment")
         return "host.docker.internal:1883"
     
-    # For non-Docker Desktop, proceed with discovery
-    # Try docker inspect to get container IP (most accurate)
-    try:
-        print("Attempting to get MQTT broker IP via Docker inspect...")
-        inspect_result = subprocess.run(
-            ["docker", "inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", "mqtt-broker"],
-            capture_output=True, text=True, check=False
-        )
-        
-        if inspect_result.returncode == 0 and inspect_result.stdout.strip():
-            ip_address = inspect_result.stdout.strip()
-            print(f"Found MQTT broker IP via Docker inspect: {ip_address}")
-            return f"{ip_address}:1883"
-    except Exception as e:
-        print(f"Error inspecting mqtt-broker container: {str(e)}")
-    
-    # Try to get broker's IP from any container in the network
-    try:
-        network_info = subprocess.run(
-            ["docker", "network", "inspect", "iot-network", "--format", "{{json .Containers}}"],
-            capture_output=True, text=True, check=False
-        )
-        
-        if network_info.returncode == 0 and network_info.stdout.strip():
-            # Look for containers with 'mqtt' or 'broker' in the name
-            import json
-            try:
-                containers = json.loads(network_info.stdout)
-                for container_id, container_info in containers.items():
-                    if 'mqtt' in container_info.get('Name', '').lower() or 'broker' in container_info.get('Name', '').lower():
-                        ip = container_info.get('IPv4Address', '').split('/')[0]
-                        if ip:
-                            print(f"Found broker container in network with IP: {ip}")
-                            return f"{ip}:1883"
-            except json.JSONDecodeError:
-                pass
-    except Exception as e:
-        print(f"Error getting network info: {str(e)}")
-    
-    # Fallback to service name with no IP
-    print("No broker IP found, using service name: mqtt-broker:1883")
+    # For all other environments (including GitHub Actions), use the service name
+    # This relies on Docker's DNS resolution within the shared network
+    print("Using service name mqtt-broker:1883 for DNS resolution")
     return "mqtt-broker:1883"
 
 def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
+    # Setup Docker network before starting the test
+    setup_docker_network()
+    
     page = iot_page
     
     print("\n=== Adding new gateway ===")
