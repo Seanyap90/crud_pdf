@@ -66,6 +66,16 @@ jobs:
           # Start MQTT broker
           cd src/iot && docker-compose up -d mqtt-broker
           sleep 5  # Allow time for MQTT broker to initialize
+
+          # Wait for MQTT broker to initialize
+          sleep 5
+          
+          # Build gateway-simulator image
+          echo "Building gateway-simulator image..."
+          docker-compose build gateway-simulator
+
+          # List docker images to confirm it was built
+          docker images | grep gateway-simulator || echo "WARNING: gateway-simulator image not found"
           
           # Start the backend API
           cd ../.. && python -m src.iot.cli start --mode local --docker-network iot-network &
