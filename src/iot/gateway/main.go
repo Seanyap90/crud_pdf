@@ -49,8 +49,8 @@ type MQTTEvent struct {
 
 // Constants
 const (
-    CertPath          = "/app/certs/cert.pem"
-    KeyPath           = "/app/certs/key.pem"
+    CertPath          = "/app/certificates/cert.pem"
+    KeyPath           = "/app/certificates/key.pem"
     CheckInterval     = 5 * time.Second
     HeartbeatInterval = 20 * time.Second
 )

@@ -355,8 +355,8 @@ class LocalWorker(BaseWorker):
                     detach=True,
                     environment={
                         "GATEWAY_ID": gateway_id,
-                        "MQTT_BROKER_ADDRESS": f"{settings.MQTT_BROKER_HOST}:{settings.MQTT_BROKER_PORT}",
-                        "API_URL": f"http://{settings.API_HOST}:{settings.API_PORT}"
+                        "MQTT_BROKER_ADDRESS": settings.CONTAINER_MQTT_ADDRESS,
+                        "API_URL": settings.CONTAINER_API_URL
                     },
                     network=settings.DOCKER_NETWORK,
                     name=f"gateway-{gateway_id}",
