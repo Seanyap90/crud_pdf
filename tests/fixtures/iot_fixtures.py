@@ -420,7 +420,7 @@ def gateway_utils():
                 print(f"Generating certificate for gateway {gateway_id}...")
                 
                 # Create certificates directory
-                certs_dir = Path("certs") / gateway_id
+                certs_dir = Path("certificates") / gateway_id
                 certs_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Generate self-signed certificate
@@ -474,8 +474,8 @@ def gateway_utils():
                     raise Exception(f"Container {container_name} not found")
                 
                 # Check if certificates exist
-                cert_path = Path("certs") / gateway_id / "cert.pem"
-                key_path = Path("certs") / gateway_id / "key.pem"
+                cert_path = Path("certificates") / gateway_id / "cert.pem"
+                key_path = Path("certificates") / gateway_id / "key.pem"
                 
                 if not cert_path.exists() or not key_path.exists():
                     raise Exception(f"Certificate files not found: {cert_path}, {key_path}")
@@ -494,12 +494,12 @@ def gateway_utils():
                 
                 # Copy certificates to container
                 subprocess.run(
-                    ["docker", "cp", str(cert_path), f"{container_name}:/app/certs/cert.pem"],
+                    ["docker", "cp", str(cert_path), f"{container_name}:/app/certificates/cert.pem"],
                     check=True
                 )
                 
                 subprocess.run(
-                    ["docker", "cp", str(key_path), f"{container_name}:/app/certs/key.pem"],
+                    ["docker", "cp", str(key_path), f"{container_name}:/app/certificates/key.pem"],
                     check=True
                 )
                 

@@ -215,8 +215,8 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     # Use mqtt-broker directly and DON'T override MQTT_BROKER_ADDRESS
     docker_cmd = [
         "docker", "run", "-d", "--name", gateway_id, "--network", "iot-network",
-        "-v", f"{cert_path.absolute()}:/app/certs/cert.pem",
-        "-v", f"{key_path.absolute()}:/app/certs/key.pem",
+        "-v", f"{cert_path.absolute()}:/app/certificates/cert.pem",
+        "-v", f"{key_path.absolute()}:/app/certificates/key.pem",
         "-e", f"GATEWAY_ID={gateway_id}",
         "-e", f"MQTT_BROKER_ADDRESS={get_mqtt_broker_address()}",  # Set directly to mqtt-broker
         "-e", f"API_URL={get_api_url_for_container()}",  # Keep this for API connectivity
