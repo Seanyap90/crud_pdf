@@ -185,8 +185,8 @@ def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     gateway_utils.generate_certificate(gateway_id)
     
     print("\n=== Starting gateway container ===")
-    cert_path = Path("certs") / gateway_id / "cert.pem"
-    key_path = Path("certs") / gateway_id / "key.pem"
+    cert_path = Path("certificates") / gateway_id / "cert.pem"
+    key_path = Path("certificates") / gateway_id / "key.pem"
     
     print("Docker images:")
     images_result = subprocess.run(["docker", "images"], capture_output=True, text=True, check=False)

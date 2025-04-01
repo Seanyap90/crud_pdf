@@ -69,7 +69,7 @@ jobs:
           sleep 3
           
           echo "Starting FastAPI backend..."
-          cd .. && python -m iot.cli start --mode local --docker-network iot-network &
+          cd .. && python -m iot.cli start --mode local --docker-network iot-network --force-environment github_actions &
           
           # Wait for backend to be available
           echo "Waiting for backend to start..."

@@ -3,6 +3,9 @@ import asyncio
 import uvicorn
 import logging
 import requests
+import socket
+import os
+import platform
 from enum import Enum
 from typing import Optional
 
@@ -14,6 +17,11 @@ class WorkerMode(str, Enum):
     LOCAL = "local"
     MOCK_AWS = "mock_aws"
     AWS = "aws"
+
+class EnvironmentType(str, Enum):
+    DOCKER_DESKTOP = "docker_desktop"  # WSL or Docker Desktop on Windows/Mac
+    GITHUB_ACTIONS = "github_actions"  # GitHub Actions environment
+    STANDARD_LINUX = "standard_linux"  # Standard Linux with Docker
 
 @click.group()
 def cli():
@@ -33,9 +41,13 @@ def cli():
 @click.option('--mqtt-broker', default='mqtt-broker', help='MQTT broker hostname or container name')
 @click.option('--heartbeat-interval', default=30, type=int, help='Heartbeat interval in seconds')
 @click.option('--heartbeat-miss-threshold', default=3, type=int, help='Number of missed heartbeats before disconnect')
+@click.option('--force-environment', 
+              type=click.Choice([env.value for env in EnvironmentType]),
+              default=None,
+              help='Force specific environment type (overrides auto-detection)')
 def start(mode: str, host: str, port: int, aws_region: str, reload: bool, 
           docker_network: str, mqtt_broker: str, heartbeat_interval: int,
-          heartbeat_miss_threshold: int):
+          heartbeat_miss_threshold: int, force_environment: Optional[str] = None):
     """Start the IoT Gateway Management service with the specified worker mode"""
     # Import here to avoid circular imports
     from iot.worker.aws_worker import AWSWorker
@@ -45,16 +57,27 @@ def start(mode: str, host: str, port: int, aws_region: str, reload: bool,
     from iot.config import update_settings
     
     # Update configuration settings
-    update_settings(
-        mode=mode,
-        host=host,
-        port=port, 
-        aws_region=aws_region,
-        docker_network=docker_network,
-        mqtt_broker=mqtt_broker,
-        heartbeat_interval=heartbeat_interval,
-        heartbeat_miss_threshold=heartbeat_miss_threshold
-    )
+    settings_update = {
+        "mode": mode,
+        "host": host,
+        "port": port, 
+        "aws_region": aws_region,
+        "docker_network": docker_network,
+        "mqtt_broker": mqtt_broker,
+        "heartbeat_interval": heartbeat_interval,
+        "heartbeat_miss_threshold": heartbeat_miss_threshold
+    }
+    
+    # Override environment type if specified
+    if force_environment:
+        settings_update["environment_type"] = EnvironmentType(force_environment)
+        logger.info(f"Forcing environment type: {force_environment}")
+    
+    # Apply settings updates
+    update_settings(**settings_update)
+    
+    # Setup Docker network with error handling
+    setup_docker_network(docker_network, mqtt_broker)
     
     # Get the appropriate worker based on mode
     worker_mode = WorkerMode(mode)
@@ -66,20 +89,6 @@ def start(mode: str, host: str, port: int, aws_region: str, reload: bool,
         worker = MockAWSWorker()
     else:  # default to local
         worker = LocalWorker()
-        
-        # Check if Docker network exists
-        try:
-            import docker
-            client = docker.from_env()
-            networks = client.networks.list()
-            network_exists = any(n.name == docker_network for n in networks)
-            
-            if not network_exists:
-                logger.info(f"Creating Docker network: {docker_network}")
-                client.networks.create(docker_network, driver="bridge")
-                logger.info(f"Created Docker network: {docker_network}")
-        except Exception as e:
-            logger.error(f"Error with Docker network setup: {str(e)}")
     
     # Create the FastAPI app with the selected worker
     app = create_app(worker)
@@ -94,6 +103,73 @@ def start(mode: str, host: str, port: int, aws_region: str, reload: bool,
     
     server = uvicorn.Server(config)
     asyncio.run(server.serve())
+
+def setup_docker_network(network_name: str, mqtt_broker: str) -> bool:
+    """Ensure Docker network exists and MQTT broker is connected to it"""
+    try:
+        import docker
+        client = docker.from_env()
+        
+        # Check if network exists
+        networks = client.networks.list(names=[network_name])
+        
+        if not networks:
+            logger.info(f"Creating Docker network: {network_name}")
+            client.networks.create(network_name, driver="bridge")
+            logger.info(f"Created Docker network: {network_name}")
+        else:
+            logger.info(f"Docker network {network_name} already exists")
+        
+        # Check if MQTT broker is running
+        try:
+            broker = client.containers.get(mqtt_broker)
+            logger.info(f"MQTT broker container '{mqtt_broker}' found")
+            
+            # Check if it's connected to our network
+            broker_networks = [n for n in broker.attrs.get('NetworkSettings', {}).get('Networks', {}).keys()]
+            
+            if network_name not in broker_networks:
+                logger.info(f"Connecting MQTT broker to {network_name}")
+                network = client.networks.get(network_name)
+                network.connect(mqtt_broker)
+                logger.info(f"MQTT broker successfully connected to {network_name}")
+        except docker.errors.NotFound:
+            logger.warning(f"MQTT broker container '{mqtt_broker}' not found, make sure it's running")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error with Docker network setup: {str(e)}")
+        return False
+
+def detect_environment() -> EnvironmentType:
+    """Detect the current environment type"""
+    # Default to standard Linux
+    detected_env = EnvironmentType.STANDARD_LINUX
+    
+    # Check for GitHub Actions
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        detected_env = EnvironmentType.GITHUB_ACTIONS
+        logger.info("GitHub Actions environment detected")
+    else:
+        # Check for WSL/Docker Desktop
+        is_wsl = False
+        if platform.system() == "Linux" and os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
+            is_wsl = True
+            logger.info("WSL environment detected")
+        
+        # Check if host.docker.internal is resolvable
+        try:
+            socket.gethostbyname("host.docker.internal")
+            detected_env = EnvironmentType.DOCKER_DESKTOP
+            logger.info("Docker Desktop environment detected (host.docker.internal is resolvable)")
+        except socket.gaierror:
+            # Only if we're in WSL but host.docker.internal isn't resolvable, still consider it Docker Desktop
+            if is_wsl:
+                detected_env = EnvironmentType.DOCKER_DESKTOP
+                logger.info("WSL environment without host.docker.internal resolution, still using Docker Desktop settings")
+    
+    logger.info(f"Environment detected as: {detected_env}")
+    return detected_env
 
 @cli.command()
 @click.argument('gateway_id')
@@ -467,6 +543,123 @@ def update_metrics(gateway_id: str, memory: str, cpu: str, uptime: str):
             click.echo(f"Failed to update metrics: {resp.text}")
     except Exception as e:
         click.echo(f"Error: {str(e)}")
+
+@cli.command()
+@click.argument('gateway_id')
+def generate_cert(gateway_id: str):
+    """Generate certificate for a gateway"""
+    try:
+        import subprocess
+        from pathlib import Path
+        
+        # Create certificates directory
+        certs_dir = Path("certs") / gateway_id
+        certs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate self-signed certificate
+        cert_path = certs_dir / "cert.pem"
+        key_path = certs_dir / "key.pem"
+        
+        click.echo(f"Generating certificate for gateway {gateway_id}...")
+        
+        cmd = [
+            "openssl", "req", "-x509", 
+            "-newkey", "rsa:2048", 
+            "-keyout", str(key_path),
+            "-out", str(cert_path),
+            "-days", "365",
+            "-nodes",
+            "-subj", f"/CN=gateway-{gateway_id}/O=IoT Gateway Management System"
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            click.echo(f"Certificate generation failed: {result.stderr}")
+            return
+        
+        # Set permissions
+        os.chmod(cert_path, 0o644)
+        os.chmod(key_path, 0o600)
+        
+        click.echo(f"Certificate generated successfully at:")
+        click.echo(f"  Certificate: {cert_path}")
+        click.echo(f"  Private key: {key_path}")
+    except Exception as e:
+        click.echo(f"Error generating certificate: {str(e)}")
+
+@cli.command()
+@click.argument('gateway_id')
+def inject_cert(gateway_id: str):
+    """Inject certificate into a gateway container"""
+    try:
+        import subprocess
+        from pathlib import Path
+        
+        # Define container name and paths based on environment
+        container_name = f"gateway-{gateway_id}"
+        cert_path = Path("certs") / gateway_id / "cert.pem"
+        key_path = Path("certs") / gateway_id / "key.pem"
+        
+        # Verify files exist
+        if not cert_path.exists() or not key_path.exists():
+            click.echo(f"Certificate files not found. Please run 'generate_cert {gateway_id}' first.")
+            return
+        
+        # Check if container exists
+        container_check = subprocess.run(
+            ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
+            capture_output=True, text=True
+        )
+        
+        if container_name not in container_check.stdout:
+            click.echo(f"Container {container_name} not found. Make sure the gateway is created.")
+            return
+        
+        click.echo(f"Injecting certificates into container {container_name}...")
+        
+        # Ensure container is running
+        container_state = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", container_name],
+            capture_output=True, text=True
+        ).stdout.strip()
+        
+        if container_state != "true":
+            click.echo(f"Starting container {container_name}...")
+            subprocess.run(["docker", "start", container_name], check=True)
+            click.echo("Waiting for container to start...")
+            import time
+            time.sleep(2)
+        
+        # Copy certificate files into container
+        subprocess.run(
+            ["docker", "cp", str(cert_path.absolute()), f"{container_name}:/app/certs/cert.pem"],
+            check=True
+        )
+        
+        subprocess.run(
+            ["docker", "cp", str(key_path.absolute()), f"{container_name}:/app/certs/key.pem"],
+            check=True
+        )
+        
+        click.echo("Certificates successfully injected, container should connect automatically.")
+        click.echo("You can check status with 'list_gateways' command.")
+        
+        # Detect environment for proper API URLs
+        env_type = detect_environment()
+        if env_type == EnvironmentType.DOCKER_DESKTOP:
+            click.echo("\nNote: Using Docker Desktop environment (host.docker.internal)")
+        elif env_type == EnvironmentType.GITHUB_ACTIONS:
+            click.echo("\nNote: Using GitHub Actions environment")
+        else:
+            click.echo("\nNote: Using standard Linux environment")
+            
+    except Exception as e:
+        click.echo(f"Error injecting certificate: {str(e)}")
 
 if __name__ == "__main__":
     cli()
