@@ -95,7 +95,7 @@ jobs:
         id: e2e_tests
         run: |
           # Set environment variable for test
-          export HEADLESS=0  # Run with visible browser for better debugging
+          export HEADLESS=1  # Run with headless browser
           
           # Run the test
           python -m pytest tests/e2e/test_gateway_lifecycle.py::test_add_gateway_and_verify_connection -v
