@@ -50,49 +50,103 @@ def setup_docker_network():
         
         if "mqtt-broker" not in broker_check.stdout:
             print("MQTT broker container not running, need to start it")
-            # Make sure any old container is removed
+            # Start MQTT broker from docker-compose
+            repo_root = Path(__file__).parent.parent.parent
+            iot_dir = repo_root / "src" / "iot"
             subprocess.run(
-                ["docker", "rm", "-f", "mqtt-broker"],
-                capture_output=True, check=False
+                ["docker-compose", "up", "-d", "mqtt-broker"],
+                cwd=str(iot_dir),
+                check=True
             )
-            
-            # Start a new MQTT broker container
-            subprocess.run([
-                "docker", "run", "-d",
-                "--name", "mqtt-broker",
-                "--network", "iot-network",
-                "-p", "1883:1883",
-                "eclipse-mosquitto:latest"
-            ], check=True)
-            
-            print("Started new MQTT broker container")
-            # Wait a moment for it to initialize
+            print("Started MQTT broker container")
+            # Wait for broker to initialize
             time.sleep(3)
         else:
             print("MQTT broker container already running")
+        
+        # Add new code: Ensure rules engine is running
+        rules_check = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}", "--filter", "name=rules-engine"],
+            capture_output=True, text=True, check=True
+        )
+        
+        if "rules-engine" not in rules_check.stdout:
+            print("Rules engine container not running, need to start it")
+            # Start rules engine from docker-compose
+            repo_root = Path(__file__).parent.parent.parent
+            iot_dir = repo_root / "src" / "iot"
+            subprocess.run(
+                ["docker-compose", "up", "-d", "rules-engine"],
+                cwd=str(iot_dir),
+                check=True
+            )
+            print("Started rules engine container")
+            # Wait for rules engine to initialize
+            time.sleep(3)
+        else:
+            print("Rules engine container already running")
             
-            # Ensure it's connected to our network
-            network_connect = subprocess.run(
-                ["docker", "network", "connect", "iot-network", "mqtt-broker"],
+        # Make sure all containers are on the network
+        for container in ["mqtt-broker", "rules-engine"]:
+            subprocess.run(
+                ["docker", "network", "connect", "iot-network", container],
                 capture_output=True, check=False
             )
-            # It's OK if it fails because it's already connected
         
-        # Verify MQTT broker is on our network
+        # Verify containers are on our network
         network_info = subprocess.run(
             ["docker", "network", "inspect", "iot-network"],
             capture_output=True, text=True, check=True
         )
         
-        if "mqtt-broker" in network_info.stdout:
-            print("Confirmed: MQTT broker is on iot-network")
-        else:
-            print("WARNING: MQTT broker not found on iot-network!")
-            
         print("=== Docker network setup complete ===\n")
         return True
     except Exception as e:
         print(f"Error setting up Docker network: {str(e)}")
+        return False
+
+def configure_rules_engine_api_url():
+    """Configure the rules engine with the correct API URL for the current environment"""
+    try:
+        # Get the API URL for the current environment
+        api_url = get_api_url_for_container()
+        
+        # Find and replace the API URL in the config.yaml
+        repo_root = Path(__file__).parent.parent.parent
+        config_path = repo_root / "src" / "iot" / "rules_engine" / "config.yaml"
+        
+        if not config_path.exists():
+            print(f"Warning: Rules engine config not found at {config_path}")
+            return False
+        
+        # Read the current config
+        with open(config_path, 'r') as f:
+            config_content = f.read()
+        
+        # Update API URL
+        updated_content = re.sub(
+            r'url: http://[^/]+/api/mqtt/events', 
+            f'url: {api_url}/api/mqtt/events',
+            config_content
+        )
+        
+        # Write updated config
+        with open(config_path, 'w') as f:
+            f.write(updated_content)
+        
+        print(f"Updated rules engine config with API URL: {api_url}")
+        
+        # Restart rules engine container for changes to take effect
+        subprocess.run(
+            ["docker", "restart", "rules-engine"],
+            check=True
+        )
+        print("Restarted rules engine container")
+        time.sleep(2)  # Give it time to restart
+        
+        return True
+    except Exception as e:
+        print(f"Error configuring rules engine: {str(e)}")
         return False
 
 def get_gateway_simulator_image():
@@ -161,6 +215,9 @@ def get_mqtt_broker_address():
 def test_add_gateway_and_verify_connection(iot_page, iot_api, gateway_utils):
     # Setup Docker network before starting the test
     setup_docker_network()
+
+    # Configure rules engine with correct API URL
+    configure_rules_engine_api_url()
     
     page = iot_page
     

@@ -67,6 +67,9 @@ jobs:
           
           echo "Waiting for MQTT broker to initialize..."
           sleep 3
+
+          echo "Starting rules engine..."
+          docker-compose up -d rules-engine
           
           echo "Starting FastAPI backend..."
           cd .. && python -m iot.cli start --mode local --docker-network iot-network --force-environment github_actions &
@@ -76,12 +79,6 @@ jobs:
           cd .. # Return to root directory
           timeout 60s bash -c 'until curl -s http://localhost:8000/health > /dev/null; do sleep 2; echo "Waiting..."; done'
           echo "Backend is available"
-      
-      - name: Setup Xvfb for visible browser
-        run: |
-          sudo apt-get install -y xvfb
-          Xvfb :99 -screen 0 1280x1024x24 &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
       
       - name: Start frontend
         run: |

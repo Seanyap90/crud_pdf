@@ -81,9 +81,12 @@ class BaseWorker(ABC):
         pass
     
     @abstractmethod
-    def list_gateways(self) -> List[Dict[str, Any]]:
+    def list_gateways(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
         """List all gateways
         
+        Args:
+            include_deleted: Whether to include deleted gateways
+            
         Returns:
             List of all gateways
         """
