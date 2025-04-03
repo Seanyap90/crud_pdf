@@ -6,7 +6,7 @@ WORKDIR /app
 RUN apk add --no-cache git ca-certificates
 
 # Create certificates directory
-RUN mkdir -p /app/certs
+RUN mkdir -p /app/certificates
 
 # Copy source code
 COPY main.go ./

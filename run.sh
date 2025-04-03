@@ -291,14 +291,14 @@ function inject_cert() {
     
     # Copy certificates to container
     echo -e "${YELLOW}Copying certificate to container...${NC}"
-    docker cp "$cert_file" "$container_name:/app/certs/cert.pem"
+    docker cp "$cert_file" "$container_name:/app/certificates/cert.pem"
     if [ $? -ne 0 ]; then
         echo -e "${RED}Failed to copy certificate to container${NC}"
         return 1
     fi
     
     echo -e "${YELLOW}Copying private key to container...${NC}"
-    docker cp "$key_file" "$container_name:/app/certs/key.pem"
+    docker cp "$key_file" "$container_name:/app/certificates/key.pem"
     if [ $? -ne 0 ]; then
         echo -e "${RED}Failed to copy private key to container${NC}"
         return 1

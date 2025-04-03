@@ -602,8 +602,8 @@ def inject_cert(gateway_id: str):
         
         # Define container name and paths based on environment
         container_name = f"gateway-{gateway_id}"
-        cert_path = Path("certs") / gateway_id / "cert.pem"
-        key_path = Path("certs") / gateway_id / "key.pem"
+        cert_path = Path("certificates") / gateway_id / "cert.pem"
+        key_path = Path("certificates") / gateway_id / "key.pem"
         
         # Verify files exist
         if not cert_path.exists() or not key_path.exists():
@@ -637,12 +637,12 @@ def inject_cert(gateway_id: str):
         
         # Copy certificate files into container
         subprocess.run(
-            ["docker", "cp", str(cert_path.absolute()), f"{container_name}:/app/certs/cert.pem"],
+            ["docker", "cp", str(cert_path.absolute()), f"{container_name}:/app/certificates/cert.pem"],
             check=True
         )
         
         subprocess.run(
-            ["docker", "cp", str(key_path.absolute()), f"{container_name}:/app/certs/key.pem"],
+            ["docker", "cp", str(key_path.absolute()), f"{container_name}:/app/certificates/key.pem"],
             check=True
         )
         
