@@ -36,6 +36,9 @@ class MQTTEventRequest(BaseModel):
     payload: Union[Dict[str, Any], str, None] = Field(default=None, description="Event payload data")
     update_type: Optional[GatewayUpdateType] = Field(default=None, description="Update type for gateway updates")
     timestamp: Optional[str] = Field(default_factory=lambda: datetime.now().isoformat())
+    
+    # Optional fields that might be included from rules engine
+    topic: Optional[str] = Field(default=None, description="Original MQTT topic (from rules engine)")
 
     class Config:
         json_schema_extra = {

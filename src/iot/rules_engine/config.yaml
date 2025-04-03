@@ -1,0 +1,63 @@
+# IoT Rules Engine Configuration
+
+# MQTT broker configuration
+mqtt:
+  host: mqtt-broker
+  port: 1883
+  client_id: iot-rules-engine
+  # Optional authentication
+  # username: user
+  # password: pass
+
+# API configuration
+api:
+  base_url: http://host.docker.internal:8000:8000  # Using service name in Docker
+
+# Rules configuration
+rules:
+  # Rule for gateway heartbeats
+  - name: gateway-heartbeat
+    description: Process gateway heartbeat messages and forward to API
+    topic_pattern: gateway/+/heartbeat
+    enabled: true
+    actions:
+      - type: http
+        url: http://host.docker.internal:8000/api/mqtt/events
+        method: POST
+        headers:
+          Content-Type: application/json
+
+  # Rule for gateway status updates
+  - name: gateway-status
+    description: Process gateway status messages and forward to API
+    topic_pattern: gateway/+/status
+    enabled: true
+    actions:
+      - type: http
+        url: http://host.docker.internal:8000/api/mqtt/events
+        method: POST
+        headers:
+          Content-Type: application/json
+
+  # Rule for device commands
+  - name: device-command
+    description: Process device command messages from API and forward to gateway
+    topic_pattern: api/command/+/device/+
+    enabled: true
+    actions:
+      - type: republish
+        topic: gateway/{gateway_id}/device/{device_id}/command
+        qos: 0
+        retain: false
+
+  # Rule for republishing messages for monitoring
+  - name: monitoring
+    description: Republish all gateway messages to a monitoring topic
+    topic_pattern: gateway/#
+    enabled: true
+    actions:
+      - type: republish
+        topic: monitoring/gateways/{original_topic}
+        qos: 0
+        retain: false
+

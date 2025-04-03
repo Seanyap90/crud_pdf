@@ -30,6 +30,22 @@ services:
         condition: service_healthy
     networks:
       - iot-network
+  
+  rules-engine:
+    build:
+      context: ./rules_engine
+      dockerfile: Dockerfile
+    container_name: rules-engine
+    depends_on:
+      mqtt-broker:
+        condition: service_started
+      # Removed dependency on non-existent 'api' service
+    networks:
+      - iot-network
+    volumes:
+      - ./rules_engine/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--verbose"]
+    restart: unless-stopped
 
 networks:
   iot-network:

@@ -45,9 +45,11 @@ def cli():
               type=click.Choice([env.value for env in EnvironmentType]),
               default=None,
               help='Force specific environment type (overrides auto-detection)')
+@click.option('--rules-engine/--no-rules-engine', default=True, help='Enable/disable rules engine integration')
 def start(mode: str, host: str, port: int, aws_region: str, reload: bool, 
           docker_network: str, mqtt_broker: str, heartbeat_interval: int,
-          heartbeat_miss_threshold: int, force_environment: Optional[str] = None):
+          heartbeat_miss_threshold: int, force_environment: Optional[str] = None,
+          rules_engine: bool = True):
     """Start the IoT Gateway Management service with the specified worker mode"""
     # Import here to avoid circular imports
     from iot.worker.aws_worker import AWSWorker
@@ -65,7 +67,8 @@ def start(mode: str, host: str, port: int, aws_region: str, reload: bool,
         "docker_network": docker_network,
         "mqtt_broker": mqtt_broker,
         "heartbeat_interval": heartbeat_interval,
-        "heartbeat_miss_threshold": heartbeat_miss_threshold
+        "heartbeat_miss_threshold": heartbeat_miss_threshold,
+        "rules_engine_enabled": rules_engine
     }
     
     # Override environment type if specified
@@ -602,8 +605,8 @@ def inject_cert(gateway_id: str):
         
         # Define container name and paths based on environment
         container_name = f"gateway-{gateway_id}"
-        cert_path = Path("certificates") / gateway_id / "cert.pem"
-        key_path = Path("certificates") / gateway_id / "key.pem"
+        cert_path = Path("certs") / gateway_id / "cert.pem"
+        key_path = Path("certs") / gateway_id / "key.pem"
         
         # Verify files exist
         if not cert_path.exists() or not key_path.exists():

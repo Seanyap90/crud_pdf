@@ -163,6 +163,13 @@ function iot-backend-start() {
     
     echo "Waiting for MQTT broker to initialize..."
     sleep 3
+
+    # Start rules-engine after MQTT broker is ready
+    if grep -q "rules-engine:" docker-compose.yml; then
+        echo "Starting Rules Engine..."
+        docker-compose up -d rules-engine
+        echo "Rules Engine started."
+    fi
     
     echo "Starting FastAPI backend..."
     echo "Press CTRL+C to stop when done"
@@ -179,6 +186,10 @@ function iot-backend-cleanup() {
     # Remove all gateway containers that might be running
     echo "Removing any remaining gateway containers..."
     docker ps -a | grep "gateway-" | awk '{print $1}' | xargs -r docker rm -f
+    
+    # Remove any rules engine containers that might be running
+    echo "Removing any rules engine containers..."
+    docker ps -a | grep -E "rules-engine|iot-rules" | awk '{print $1}' | xargs -r docker rm -f
     
     echo "Cleaning up Python cache files..."
     find src/iot -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

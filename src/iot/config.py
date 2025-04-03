@@ -5,7 +5,7 @@ import socket
 from enum import Enum
 from pydantic_settings import BaseSettings
 import logging
-from typing import Optional
+from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     # MQTT Configuration
     MQTT_BROKER_HOST: str = "mqtt-broker"
     MQTT_BROKER_PORT: int = 1883
+    MQTT_CLIENT_ID: str = "fastapi-backend"
+    MQTT_USERNAME: Optional[str] = None
+    MQTT_PASSWORD: Optional[str] = None
+    MQTT_SUBSCRIBE_TOPICS: List[str] = ["gateway/#"]  # Topics to subscribe to
+    
+    # Rules Engine Configuration
+    RULES_ENGINE_ENABLED: bool = True  # Whether to use rules engine
     
     # Container Configuration with pre-calculated default values
     CONTAINER_API_URL: str = get_container_api_url(8000)
@@ -168,6 +175,18 @@ def update_settings(**kwargs):
         settings.MQTT_BROKER_PORT = kwargs["mqtt_port"]
         # Recalculate container MQTT address
         settings.CONTAINER_MQTT_ADDRESS = get_container_mqtt_address(settings.MQTT_BROKER_PORT)
+    if "mqtt_client_id" in kwargs:
+        settings.MQTT_CLIENT_ID = kwargs["mqtt_client_id"]
+    if "mqtt_username" in kwargs:
+        settings.MQTT_USERNAME = kwargs["mqtt_username"]
+    if "mqtt_password" in kwargs:
+        settings.MQTT_PASSWORD = kwargs["mqtt_password"]
+    if "mqtt_subscribe_topics" in kwargs:
+        settings.MQTT_SUBSCRIBE_TOPICS = kwargs["mqtt_subscribe_topics"]
+        
+    # Update rules engine settings
+    if "rules_engine_enabled" in kwargs:
+        settings.RULES_ENGINE_ENABLED = kwargs["rules_engine_enabled"]
         
     # Update heartbeat settings
     if "heartbeat_interval" in kwargs:

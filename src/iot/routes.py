@@ -9,7 +9,7 @@ from .models import (
     EventResponse, 
     GatewayList,
     GatewayUpdateType,
-    GatewayState  # Import the updated GatewayState enum
+    GatewayState
 )
 from .worker.base import BaseWorker
 from .worker.local_worker import LocalWorker
@@ -182,11 +182,23 @@ async def process_mqtt_event(
 ):
     """Process an MQTT event
     
-    Processes an MQTT event received from the broker.
-    The event may be a heartbeat, status update, acknowledgment, or response.
+    Processes an MQTT event received from the rules engine.
+    The event may be a heartbeat or status update.
     """
     try:
         logger.info(f"Received MQTT event: {request.model_dump()}")
+        
+        # Handle messages from rules engine that may have a different format
+        # Check if this is coming directly from rules engine with topic info
+        if hasattr(request, 'topic') and request.topic:
+            logger.info(f"Processing message from rules engine with topic: {request.topic}")
+            # Extract gateway_id and event_type from topic if needed
+            topic_parts = request.topic.split('/')
+            if len(topic_parts) >= 3 and topic_parts[0] == 'gateway':
+                if not request.gateway_id:
+                    request.gateway_id = topic_parts[1]
+                if not request.event_type and len(topic_parts) >= 3:
+                    request.event_type = topic_parts[2]
         
         # Create task data with type from event_type
         task_data = {
