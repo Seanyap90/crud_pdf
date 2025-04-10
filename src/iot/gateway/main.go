@@ -16,6 +16,10 @@ import (
     "syscall"
     "time"
     "sync"
+    "crypto/sha256"
+	"math/rand"
+    "gopkg.in/yaml.v3"
+    "math"
 
     mqtt "github.com/eclipse/paho.mqtt.golang"
 )
@@ -64,6 +68,25 @@ type Config struct {
     UpdatedAt time.Time // When the config was last updated
 }
 
+// ConfiguredEndDevice represents a simulated end device
+type ConfiguredEndDevice struct {
+	ID              string                 // Unique device identifier
+	Type            string                 // Type of device (scale)
+	LastConfigFetch time.Time              // When configuration was last fetched
+	ConfigVersion   string                 // Hash of current configuration
+	Status          string                 // online, offline, error
+	LastMeasurement time.Time              // When last measurement was taken
+	DeviceConfig    map[string]interface{} // Device-specific configuration
+	StopChan        chan bool              // Channel to signal shutdown
+}
+
+// DeviceManager manages the lifecycle of simulated end devices
+type DeviceManager struct {
+	Devices     map[string]*ConfiguredEndDevice // Map of device ID to device
+	DeviceMutex sync.RWMutex                    // Protect access to devices map
+	ConfigMutex sync.RWMutex                    // Protect access to configuration
+}
+
 // Global variables
 var (
     gatewayID       string
@@ -75,10 +98,12 @@ var (
     mtx             http.ServeMux
     currentConfig   Config                  // Store the current configuration
     configMutex     sync.RWMutex            // Mutex to protect access to the configuration
+    endDeviceManager *DeviceManager
 )
 
 func main() {
     log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+    rand.Seed(time.Now().UnixNano())
     setupSignalHandling()
     setupGatewayID()
     setupBrokerAddress()
@@ -310,6 +335,15 @@ func storeConfig(yamlConfig string) {
         UpdatedAt: time.Now(),
     }
     
+    // Update device manager with the new configuration
+    if endDeviceManager != nil {
+        if err := endDeviceManager.UpdateConfiguration(yamlConfig); err != nil {
+            log.Printf("Error updating device manager configuration: %v", err)
+        } else {
+            log.Printf("Device manager configuration updated successfully")
+        }
+    }
+    
     log.Printf("New configuration stored, size: %d bytes", len(yamlConfig))
 }
 
@@ -350,12 +384,184 @@ func sendConfigAcknowledgment(status string) {
     }
 }
 
+// NewDeviceManager creates a new device manager
+func NewDeviceManager() *DeviceManager {
+	manager := &DeviceManager{
+		Devices: make(map[string]*ConfiguredEndDevice),
+	}
+	return manager
+}
+
+// UpdateConfiguration updates the device manager configuration
+func (dm *DeviceManager) UpdateConfiguration(yamlConfig string) error {
+    // Parse YAML into a map for configuration values
+    var configMap map[string]interface{}
+    if err := yaml.Unmarshal([]byte(yamlConfig), &configMap); err != nil {
+        return fmt.Errorf("failed to parse configuration: %v", err)
+    }
+    
+    // Get devices configuration
+    deviceCount := 5 // Default
+    if devicesConfig, ok := configMap["devices"].(map[string]interface{}); ok {
+        if count, ok := devicesConfig["count"].(int); ok && count > 0 {
+            deviceCount = count
+        }
+    }
+    
+    // Update devices based on new configuration
+    dm.updateDevices(deviceCount, configMap)
+    
+    log.Printf("Device manager updated with new configuration: %d devices", deviceCount)
+    return nil
+}
+
+// updateDevices updates the device list based on the configuration
+func (dm *DeviceManager) updateDevices(targetCount int, config map[string]interface{}) {
+	dm.DeviceMutex.Lock()
+	defer dm.DeviceMutex.Unlock()
+	
+	currentCount := len(dm.Devices)
+	
+	// Create new devices if needed
+	for i := currentCount + 1; i <= targetCount; i++ {
+		deviceID := fmt.Sprintf("scale-%s-%d", gatewayID, i)
+		log.Printf("Creating new device: %s", deviceID)
+		
+		device := &ConfiguredEndDevice{
+			ID:      deviceID,
+			Type:    "scale",
+			Status:  "online",
+			StopChan: make(chan bool),
+		}
+		
+		dm.Devices[deviceID] = device
+		
+		// Configure the device based on config
+		device.DeviceConfig = getDeviceConfig(device.Type, config)
+		
+		// Start the device simulation in a goroutine
+		go dm.runDeviceSimulation(device)
+	}
+	
+	// Remove excess devices if needed
+	if currentCount > targetCount {
+		// Find devices to remove
+		var toRemove []string
+		count := 0
+		for id := range dm.Devices {
+			if count >= (currentCount - targetCount) {
+				break
+			}
+			toRemove = append(toRemove, id)
+			count++
+		}
+		
+		// Stop and remove each device
+		for _, id := range toRemove {
+			device := dm.Devices[id]
+			close(device.StopChan) // Signal to stop
+			delete(dm.Devices, id)
+			log.Printf("Removed device: %s", id)
+		}
+	}
+}
+
+// getDeviceConfig extracts device-specific configuration
+func getDeviceConfig(deviceType string, config map[string]interface{}) map[string]interface{} {
+	// Extract relevant configuration for this device type
+	deviceConfig := make(map[string]interface{})
+	
+	// Copy global configuration that applies to all devices
+	if materials, ok := config["materials"]; ok {
+		deviceConfig["materials"] = materials
+	}
+	if vendors, ok := config["vendors"]; ok {
+		deviceConfig["vendors"] = vendors
+	}
+	if measurement, ok := config["measurement"]; ok {
+		deviceConfig["measurement"] = measurement
+	}
+	if reporting, ok := config["reporting"]; ok {
+		deviceConfig["reporting"] = reporting
+	}
+	
+	// Extract device-specific configuration based on type
+	if devicesConfig, ok := config["devices"].(map[string]interface{}); ok {
+		if behaviors, ok := devicesConfig["behaviors"].(map[string]interface{}); ok {
+			if behavior, ok := behaviors[deviceType].(map[string]interface{}); ok {
+				deviceConfig["behavior"] = behavior
+			}
+		}
+	}
+	
+	return deviceConfig
+}
+
+func handleDevicesRequest(w http.ResponseWriter, r *http.Request) {
+    if endDeviceManager == nil {
+        http.Error(w, "End device manager not initialized", http.StatusInternalServerError)
+        return
+    }
+    
+    w.Header().Set("Content-Type", "application/json")
+    devices := endDeviceManager.GetDeviceStatus()
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "devices": devices,
+        "count":   len(devices),
+    })
+}
+
+func handleMeasurementRequest(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+    
+    var measurement map[string]interface{}
+    if err := json.NewDecoder(r.Body).Decode(&measurement); err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
+    
+    deviceID, ok := measurement["device_id"].(string)
+    if !ok || deviceID == "" {
+        http.Error(w, "Missing device_id", http.StatusBadRequest)
+        return
+    }
+    
+    log.Printf("Received measurement from device %s via HTTP", deviceID)
+    
+    if isMqttConnected && mqttClient != nil {
+        measurement["gateway_id"] = gatewayID
+        jsonData, err := json.Marshal(measurement)
+        if err != nil {
+            http.Error(w, "Error encoding measurement", http.StatusInternalServerError)
+            return
+        }
+        
+        topic := fmt.Sprintf("gateway/%s/device/%s/measurement", gatewayID, deviceID)
+        token := mqttClient.Publish(topic, 0, false, jsonData)
+        token.Wait()
+        
+        if token.Error() != nil {
+            log.Printf("Error publishing measurement: %v", token.Error())
+            http.Error(w, "Error publishing measurement", http.StatusInternalServerError)
+            return
+        }
+    }
+    
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte("{\"status\":\"ok\"}"))
+}
+
 // startHTTPServer initializes and starts the HTTP server
 func startHTTPServer() {
     mtx.HandleFunc("/status", handleStatusRequest)
     mtx.HandleFunc("/health", handleHealthRequest)
     mtx.HandleFunc("/reset", handleResetRequest)
     mtx.HandleFunc("/config", handleConfigRequest)
+    mtx.HandleFunc("/devices", handleDevicesRequest)
+    mtx.HandleFunc("/measurement", handleMeasurementRequest)
     
     port := os.Getenv("GATEWAY_PORT")
     if port == "" {
@@ -416,6 +622,82 @@ func handleResetRequest(w http.ResponseWriter, r *http.Request) {
     fmt.Fprintf(w, "reset initiated")
 }
 
+// runDeviceSimulation runs the simulation for a device
+func (dm *DeviceManager) runDeviceSimulation(device *ConfiguredEndDevice) {
+	// Get behavior configuration
+	measurementInterval := 60 // Default: 60 seconds
+	if behaviorConfig, ok := device.DeviceConfig["behavior"].(map[string]interface{}); ok {
+		if frequency, ok := behaviorConfig["measurement_frequency_seconds"].(int); ok && frequency > 0 {
+			measurementInterval = frequency
+		}
+	}
+	
+	// Add some randomness
+	jitter := rand.Intn(measurementInterval / 4)
+	measurementInterval = measurementInterval + jitter
+	
+	// Create ticker for periodic measurements
+	ticker := time.NewTicker(time.Duration(measurementInterval) * time.Second)
+	defer ticker.Stop()
+	
+	// Fetch configuration immediately
+	dm.fetchDeviceConfig(device)
+	
+	log.Printf("Started simulation for device %s with interval %d seconds", 
+		device.ID, measurementInterval)
+	
+	// Main simulation loop
+	for {
+		select {
+		case <-ticker.C:
+			// Generate and send measurement
+			if config := getConfig(); config.YAML != "" {
+				measurement := dm.generateMeasurement(device)
+				dm.publishMeasurement(device, measurement)
+				// Also send to HTTP endpoint on gateway
+				go dm.sendMeasurementToGateway(device, measurement)
+			}
+		
+		case <-device.StopChan:
+			// Stop simulation
+			log.Printf("Stopping simulation for device %s", device.ID)
+			return
+		}
+	}
+}
+
+// fetchDeviceConfig fetches device configuration from gateway
+func (dm *DeviceManager) fetchDeviceConfig(device *ConfiguredEndDevice) {
+	// In a real device, this would make an HTTP request to the gateway
+	// For simulation, we access the configuration directly
+	configData := getConfig()
+    if configData.YAML == "" {
+        return
+    }
+	
+	// Generate a version hash for the configuration
+	h := sha256.New()
+	h.Write([]byte(configData.YAML))
+	newVersion := fmt.Sprintf("%x", h.Sum(nil))[:8]
+	
+	// Only update if version changed
+    if newVersion != device.ConfigVersion {
+        // Parse YAML into map
+        var configMap map[string]interface{}
+        if err := yaml.Unmarshal([]byte(configData.YAML), &configMap); err != nil {
+            log.Printf("Error parsing config for device %s: %v", device.ID, err)
+            return
+        }
+        
+        device.DeviceConfig = getDeviceConfig(device.Type, configMap)
+        device.ConfigVersion = newVersion
+        device.LastConfigFetch = time.Now()
+        
+        log.Printf("Device %s updated configuration to version %s", 
+            device.ID, device.ConfigVersion)
+    }
+}
+
 // mainEventLoop processes events and coordinates actions
 func mainEventLoop() {
     for {
@@ -440,6 +722,21 @@ func mainEventLoop() {
                 "certificate_status": "installed",
                 "status": "online",
             })
+
+            // Initialize device manager if not already done
+            if endDeviceManager == nil {
+                endDeviceManager = NewDeviceManager()
+                log.Printf("Device manager initialized")
+                
+                // If we already have a configuration, apply it
+                if config := getConfig(); config.YAML != "" {
+                    if err := endDeviceManager.UpdateConfiguration(config.YAML); err != nil {
+                        log.Printf("Error applying existing configuration to device manager: %v", err)
+                    } else {
+                        log.Printf("Applied existing configuration to device manager")
+                    }
+                }
+            }
 
             // Request configuration after connection
             time.Sleep(500 * time.Millisecond) // Small delay to ensure subscriptions are set up
@@ -492,6 +789,10 @@ func mainEventLoop() {
             }
             
         case EventShutdown:
+            // Shutdown device manager if it exists
+            if endDeviceManager != nil {
+                endDeviceManager.Shutdown()
+            }
             // Send offline status
             sendStatusUpdate("shutdown", "Gateway shutting down", map[string]interface{}{
                 "status": "offline",
@@ -886,6 +1187,161 @@ func sendStatusUpdate(status string, message string, additionalData ...map[strin
     }
     
     sendEventToAPI(gatewayID, "status", payload)
+}
+
+// generateMeasurement creates a simulated measurement
+func (dm *DeviceManager) generateMeasurement(device *ConfiguredEndDevice) map[string]interface{} {
+	// Get measurement parameters from configuration
+	var minWeight float64 = 0.1
+	var maxWeight float64 = 25.0
+	var precision float64 = 0.1
+	
+	if measurementConfig, ok := device.DeviceConfig["measurement"].(map[string]interface{}); ok {
+		if min, ok := measurementConfig["min_weight_kg"].(float64); ok {
+			minWeight = min
+		}
+		if max, ok := measurementConfig["max_weight_kg"].(float64); ok {
+			maxWeight = max
+		}
+		if prec, ok := measurementConfig["precision"].(float64); ok {
+			precision = prec
+		}
+	}
+	
+	// Get materials from configuration
+	materials := []string{"Plastic", "Paper", "Glass", "Metal", "Organic"}
+	if materialsConfig, ok := device.DeviceConfig["materials"].([]interface{}); ok && len(materialsConfig) > 0 {
+		materials = make([]string, 0, len(materialsConfig))
+		for _, m := range materialsConfig {
+			if material, ok := m.(map[string]interface{}); ok {
+				if name, ok := material["name"].(string); ok {
+					materials = append(materials, name)
+				}
+			} else if name, ok := m.(string); ok {
+				materials = append(materials, name)
+			}
+		}
+	}
+	
+	// Get vendors from configuration
+	vendors := []string{"Vendor A", "Vendor B", "Vendor C"}
+	if vendorsConfig, ok := device.DeviceConfig["vendors"].([]interface{}); ok && len(vendorsConfig) > 0 {
+		vendors = make([]string, 0, len(vendorsConfig))
+		for _, v := range vendorsConfig {
+			if name, ok := v.(string); ok {
+				vendors = append(vendors, name)
+			}
+		}
+	}
+	
+	// Generate random weight value
+	// Convert to precision level
+	precisionMultiplier := 1.0 / precision
+	randomValue := minWeight + rand.Float64()*(maxWeight-minWeight)
+	roundedValue := math.Round(randomValue*precisionMultiplier) / precisionMultiplier
+	
+	// Pick random material and vendor
+	material := materials[rand.Intn(len(materials))]
+	vendor := vendors[rand.Intn(len(vendors))]
+	
+	// Update device timestamp
+	now := time.Now()
+	device.LastMeasurement = now
+	
+	// Create measurement payload (similar to MQTTEvent format)
+	return map[string]interface{}{
+		"gateway_id": gatewayID,
+		"device_id":  device.ID,
+		"event_type": "measurement",
+		"type":       "weight_measurement",
+		"timestamp":  now.Format(time.RFC3339),
+		"payload": map[string]interface{}{
+			"weight_kg": roundedValue,
+			"material":  material,
+			"vendor":    vendor,
+		},
+	}
+}
+
+// publishMeasurement publishes a measurement via MQTT
+func (dm *DeviceManager) publishMeasurement(device *ConfiguredEndDevice, measurement map[string]interface{}) {
+	// Only publish if connected to MQTT
+	if !isMqttConnected || mqttClient == nil {
+		log.Printf("Cannot publish measurement: MQTT not connected")
+		return
+	}
+	
+	// Convert to JSON
+	jsonData, err := json.Marshal(measurement)
+	if err != nil {
+		log.Printf("Error marshaling measurement: %v", err)
+		return
+	}
+	
+	// Create topic
+	topic := fmt.Sprintf("gateway/%s/device/%s/measurement", gatewayID, device.ID)
+	
+	// Publish to MQTT
+	token := mqttClient.Publish(topic, 0, false, jsonData)
+	token.Wait()
+	
+	if token.Error() != nil {
+		log.Printf("Error publishing measurement: %v", token.Error())
+	} else {
+		payload, _ := measurement["payload"].(map[string]interface{})
+		if payload != nil {
+			weight, _ := payload["weight_kg"].(float64)
+			material, _ := payload["material"].(string)
+			log.Printf("Published measurement from device %s: %.1f kg of %s", 
+				device.ID, weight, material)
+		}
+	}
+}
+
+// sendMeasurementToGateway sends a measurement to the gateway's HTTP endpoint
+func (dm *DeviceManager) sendMeasurementToGateway(device *ConfiguredEndDevice, measurement map[string]interface{}) {
+	// In a real implementation, this would be an HTTP POST to the gateway
+	// For our simulation, we'll just log it
+	payload, _ := measurement["payload"].(map[string]interface{})
+	if payload != nil {
+		weight, _ := payload["weight_kg"].(float64)
+		material, _ := payload["material"].(string)
+		log.Printf("Device %s sent measurement to gateway HTTP endpoint: %.1f kg of %s", 
+			device.ID, weight, material)
+	}
+}
+
+// GetDeviceStatus returns status information for all devices
+func (dm *DeviceManager) GetDeviceStatus() []map[string]interface{} {
+	dm.DeviceMutex.RLock()
+	defer dm.DeviceMutex.RUnlock()
+	
+	devices := make([]map[string]interface{}, 0, len(dm.Devices))
+	
+	for _, device := range dm.Devices {
+		status := map[string]interface{}{
+			"id":                device.ID,
+			"type":              device.Type,
+			"status":            device.Status,
+			"last_config_fetch": device.LastConfigFetch,
+			"config_version":    device.ConfigVersion,
+			"last_measurement":  device.LastMeasurement,
+		}
+		devices = append(devices, status)
+	}
+	
+	return devices
+}
+
+// Shutdown stops all device simulations
+func (dm *DeviceManager) Shutdown() {
+	dm.DeviceMutex.Lock()
+	defer dm.DeviceMutex.Unlock()
+	
+	for id, device := range dm.Devices {
+		close(device.StopChan)
+		log.Printf("Stopped simulation for device %s", id)
+	}
 }
 
 // GatewayInfo represents information about a gateway from API responses
