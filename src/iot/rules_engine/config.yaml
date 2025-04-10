@@ -11,7 +11,7 @@ mqtt:
 
 # API configuration
 api:
-  base_url: http://host.docker.internal:8000:8000  # Using service name in Docker
+  base_url: http://host.docker.internal:8000  # Using service name in Docker
 
 # Rules configuration
 rules:
@@ -61,3 +61,31 @@ rules:
         qos: 0
         retain: false
 
+  # Rule for gateway configuration requests
+  - name: gateway-config-request
+    description: Process gateway configuration requests
+    topic_pattern: gateway/+/request_config
+    enabled: true
+    actions:
+      - type: function
+        function: handleConfigRequest
+
+  # Rule for new configurations from backend
+  - name: backend-config-new
+    description: Process new configuration from backend
+    topic_pattern: config/new
+    enabled: true
+    actions:
+      - type: function
+        function: handleNewConfig
+
+  # Rule for configuration delivery acknowledgments
+  - name: gateway-config-delivered
+    description: Process gateway configuration delivery acknowledgments
+    topic_pattern: gateway/+/config/delivered
+    enabled: true
+    actions:
+      - type: republish
+        topic: config/delivered
+        qos: 0
+        retain: false

@@ -62,6 +62,22 @@ type ActionConfig struct {
 	Payload   map[string]interface{} `yaml:"payload"`
 }
 
+// Configuration message types
+type ConfigUpdateMessage struct {
+	GatewayID  string `json:"gateway_id"`
+	YAMLConfig string `json:"yaml_config"`
+	Timestamp  string `json:"timestamp"`
+}
+
+type ConfigRequestMessage struct {
+	Timestamp string `json:"timestamp"`
+}
+
+type ConfigDeliveryMessage struct {
+	Status    string `json:"status"`
+	Timestamp string `json:"timestamp"`
+}
+
 // Rule represents a processing rule for MQTT messages
 type Rule struct {
 	Name         string
@@ -135,6 +151,8 @@ type RulesEngine struct {
 	RepublishClient mqtt.Client
 	ExitChan        chan struct{}
 	WaitGroup       sync.WaitGroup
+	ConfigStorage   map[string]string // Maps gateway_id to YAML config
+	ConfigMutex     sync.RWMutex      // Protects access to ConfigStorage
 }
 
 // NewRulesEngine creates a new RulesEngine
@@ -162,10 +180,11 @@ func NewRulesEngine(configPath string) (*RulesEngine, error) {
 	}
 
 	return &RulesEngine{
-		Config:    config,
-		Rules:     rules,
-		ExitChan:  make(chan struct{}),
-		WaitGroup: sync.WaitGroup{},
+		Config:        config,
+		Rules:         rules,
+		ExitChan:      make(chan struct{}),
+		WaitGroup:     sync.WaitGroup{},
+		ConfigStorage: make(map[string]string),
 	}, nil
 }
 
@@ -343,6 +362,14 @@ func (engine *RulesEngine) onConnectionLost(client mqtt.Client, err error) {
 
 // defaultMessageHandler handles unexpected messages
 func (engine *RulesEngine) defaultMessageHandler(client mqtt.Client, msg mqtt.Message) {
+	topic := msg.Topic()
+	
+	// More descriptive logging for config-related topics
+    if strings.Contains(topic, "config") {
+        log.Printf("Config-related message on topic: %s", topic)
+        return
+    }
+    
 	log.Printf("Received unexpected message on topic %s", msg.Topic())
 }
 
@@ -391,6 +418,8 @@ func (engine *RulesEngine) processMessage(rule *Rule, topic string, payload map[
 			engine.executeRepublishAction(action, topic, processedPayload)
 		case "lambda":
 			engine.executeLambdaAction(action, topic, processedPayload)
+		case "function": // New action type
+			engine.executeFunctionAction(action, topic, processedPayload)
 		default:
 			log.Printf("Unknown action type: %s", action.Type)
 		}
@@ -549,6 +578,83 @@ func (engine *RulesEngine) executeLambdaAction(action ActionConfig, topic string
 	
 	// In a real AWS environment, this would invoke a Lambda function
 	// For now, we just log it
+}
+
+// executeFunctionAction executes a function action
+func (engine *RulesEngine) executeFunctionAction(action ActionConfig, topic string, payload map[string]interface{}) {
+    functionName := action.Function
+    
+    switch functionName {
+    case "handleConfigRequest":
+        engine.handleConfigRequest(topic, payload)
+    case "handleNewConfig":
+        engine.handleNewConfig(topic, payload)
+    default:
+        log.Printf("Unknown function action: %s", functionName)
+    }
+}
+
+// handleConfigRequest processes a configuration request from a gateway
+func (engine *RulesEngine) handleConfigRequest(topic string, payload map[string]interface{}) {
+    // Extract gateway ID from topic (format: gateway/<gateway_id>/request_config)
+    parts := strings.Split(topic, "/")
+    if len(parts) != 3 {
+        log.Printf("Invalid config request topic format: %s", topic)
+        return
+    }
+
+    gatewayID := parts[1]
+    log.Printf("Received configuration request from gateway %s", gatewayID)
+
+    // Check if we have a configuration for this gateway
+    engine.ConfigMutex.RLock()
+    yamlConfig, exists := engine.ConfigStorage[gatewayID]
+    engine.ConfigMutex.RUnlock()
+
+    if !exists {
+        log.Printf("No configuration available for gateway %s", gatewayID)
+        return
+    }
+
+    // Send configuration to gateway
+    configTopic := fmt.Sprintf("gateway/%s/config/update", gatewayID)
+    log.Printf("Sending configuration to gateway %s", gatewayID)
+
+    if engine.RepublishClient != nil && engine.RepublishClient.IsConnected() {
+        token := engine.RepublishClient.Publish(configTopic, 0, false, yamlConfig)
+        token.Wait()
+
+        if token.Error() != nil {
+            log.Printf("Error sending configuration: %v", token.Error())
+        }
+    } else {
+        log.Printf("Cannot send configuration: republish client not available")
+    }
+}
+
+// handleNewConfig processes a new configuration from the backend
+func (engine *RulesEngine) handleNewConfig(topic string, payload map[string]interface{}) {
+    gatewayID, ok := payload["gateway_id"].(string)
+    if !ok || gatewayID == "" {
+        log.Printf("Invalid config message: missing gateway_id")
+        return
+    }
+    
+    yamlConfig, ok := payload["yaml_config"].(string)
+    if !ok || yamlConfig == "" {
+        log.Printf("Invalid config message: missing yaml_config")
+        return
+    }
+
+    log.Printf("Received new configuration for gateway %s (%d bytes)", 
+               gatewayID, len(yamlConfig))
+
+    // Store the configuration
+    engine.ConfigMutex.Lock()
+    engine.ConfigStorage[gatewayID] = yamlConfig
+    engine.ConfigMutex.Unlock()
+
+    log.Printf("Configuration stored for gateway %s, waiting for gateway request", gatewayID)
 }
 
 // loadConfig loads the configuration from a file

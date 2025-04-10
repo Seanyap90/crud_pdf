@@ -15,6 +15,7 @@ import (
     "strings"
     "syscall"
     "time"
+    "sync"
 
     mqtt "github.com/eclipse/paho.mqtt.golang"
 )
@@ -30,6 +31,8 @@ const (
     EventHeartbeatDue
     EventShutdown
     EventMQTTMessage
+    EventConfigUpdate      // New event type
+    EventConfigRequest     // New event type
 )
 
 // Event represents an internal event in the system
@@ -52,8 +55,14 @@ const (
     CertPath          = "/app/certificates/cert.pem"
     KeyPath           = "/app/certificates/key.pem"
     CheckInterval     = 5 * time.Second
-    HeartbeatInterval = 20 * time.Second
+    HeartbeatInterval = 30 * time.Second
 )
+
+// Config represents a YAML configuration for end devices
+type Config struct {
+    YAML      string    // The raw YAML configuration
+    UpdatedAt time.Time // When the config was last updated
+}
 
 // Global variables
 var (
@@ -64,6 +73,8 @@ var (
     hasCertificates bool = false
     isMqttConnected bool = false
     mtx             http.ServeMux
+    currentConfig   Config                  // Store the current configuration
+    configMutex     sync.RWMutex            // Mutex to protect access to the configuration
 )
 
 func main() {
@@ -261,11 +272,90 @@ func heartbeatTimer() {
     }
 }
 
+// requestConfig sends a request for the latest configuration
+func requestConfig() {
+    if !isMqttConnected || mqttClient == nil {
+        log.Printf("Cannot request config: MQTT not connected")
+        return
+    }
+    
+    topic := fmt.Sprintf("gateway/%s/request_config", gatewayID)
+    payload := map[string]interface{}{
+        "timestamp": time.Now().Format(time.RFC3339),
+    }
+    
+    jsonData, err := json.Marshal(payload)
+    if err != nil {
+        log.Printf("Error marshaling config request: %v", err)
+        return
+    }
+    
+    token := mqttClient.Publish(topic, 0, false, jsonData)
+    token.Wait()
+    
+    if token.Error() != nil {
+        log.Printf("Error requesting config: %v", token.Error())
+    } else {
+        log.Printf("Configuration request sent to topic: %s", topic)
+    }
+}
+
+// storeConfig safely stores a new configuration
+func storeConfig(yamlConfig string) {
+    configMutex.Lock()
+    defer configMutex.Unlock()
+    
+    currentConfig = Config{
+        YAML:      yamlConfig,
+        UpdatedAt: time.Now(),
+    }
+    
+    log.Printf("New configuration stored, size: %d bytes", len(yamlConfig))
+}
+
+// getConfig safely retrieves the current configuration
+func getConfig() Config {
+    configMutex.RLock()
+    defer configMutex.RUnlock()
+    
+    return currentConfig
+}
+
+// sendConfigAcknowledgment sends an acknowledgment for a received configuration
+func sendConfigAcknowledgment(status string) {
+    if !isMqttConnected || mqttClient == nil {
+        log.Printf("Cannot send config acknowledgment: MQTT not connected")
+        return
+    }
+    
+    topic := fmt.Sprintf("gateway/%s/config/delivered", gatewayID)
+    payload := map[string]interface{}{
+        "status": status,
+        "timestamp": time.Now().Format(time.RFC3339),
+    }
+    
+    jsonData, err := json.Marshal(payload)
+    if err != nil {
+        log.Printf("Error marshaling config acknowledgment: %v", err)
+        return
+    }
+    
+    token := mqttClient.Publish(topic, 0, false, jsonData)
+    token.Wait()
+    
+    if token.Error() != nil {
+        log.Printf("Error sending config acknowledgment: %v", token.Error())
+    } else {
+        log.Printf("Configuration acknowledgment sent to topic: %s", topic)
+    }
+}
+
 // startHTTPServer initializes and starts the HTTP server
 func startHTTPServer() {
     mtx.HandleFunc("/status", handleStatusRequest)
     mtx.HandleFunc("/health", handleHealthRequest)
     mtx.HandleFunc("/reset", handleResetRequest)
+    mtx.HandleFunc("/config", handleConfigRequest)
     
     port := os.Getenv("GATEWAY_PORT")
     if port == "" {
@@ -350,6 +440,10 @@ func mainEventLoop() {
                 "certificate_status": "installed",
                 "status": "online",
             })
+
+            // Request configuration after connection
+            time.Sleep(500 * time.Millisecond) // Small delay to ensure subscriptions are set up
+            requestConfig()
             
         case EventMQTTDisconnected:
             isMqttConnected = false
@@ -374,6 +468,27 @@ func mainEventLoop() {
         case EventMQTTMessage:
             if msg, ok := event.Data.(mqtt.Message); ok {
                 handleMQTTMessage(msg)
+            }
+        
+        case EventConfigUpdate:
+            if msg, ok := event.Data.(mqtt.Message); ok {
+                log.Printf("Processing configuration update")
+                
+                // Try to parse as JSON first
+                var configData map[string]interface{}
+                if err := json.Unmarshal(msg.Payload(), &configData); err == nil {
+                    // Check if there's a yaml_config field in the JSON
+                    if yamlConfig, ok := configData["yaml_config"].(string); ok {
+                        storeConfig(yamlConfig)
+                        sendConfigAcknowledgment("success")
+                        continue
+                    }
+                }
+                
+                // If not JSON or no yaml_config field, treat payload as raw YAML
+                yamlConfig := string(msg.Payload())
+                storeConfig(yamlConfig)
+                sendConfigAcknowledgment("success")
             }
             
         case EventShutdown:
@@ -461,6 +576,17 @@ func setupMQTTClient() {
             eventChan <- Event{Type: EventMQTTMessage, Data: msg, Time: time.Now()}
         }); token.Wait() && token.Error() != nil {
             log.Printf("Error subscribing to control topic: %v", token.Error())
+        }
+
+        // Subscribe to config update topic
+        configTopic := fmt.Sprintf("gateway/%s/config/update", gatewayID)
+        log.Printf("Subscribing to config topic: %s", configTopic)
+        
+        if token := client.Subscribe(configTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+            log.Printf("Received config update on topic %s", msg.Topic())
+            eventChan <- Event{Type: EventConfigUpdate, Data: msg, Time: time.Now()}
+        }); token.Wait() && token.Error() != nil {
+            log.Printf("Error subscribing to config topic: %v", token.Error())
         }
         
         eventChan <- Event{Type: EventMQTTConnected, Time: time.Now()}
@@ -609,6 +735,16 @@ func printNetworkInfo() {
 
 // handleMQTTMessage processes messages received on MQTT topics
 func handleMQTTMessage(msg mqtt.Message) {
+    topic := msg.Topic()
+
+    // Check for configuration-related topics
+    if strings.Contains(topic, "/config/") {
+        if strings.HasSuffix(topic, "/config/update") {
+            eventChan <- Event{Type: EventConfigUpdate, Data: msg, Time: time.Now()}
+            return
+        }
+    }
+
     // Parse message
     var command map[string]interface{}
     if err := json.Unmarshal(msg.Payload(), &command); err != nil {
@@ -836,4 +972,28 @@ func getUptime() string {
         return fmt.Sprintf("%ds", time.Now().Unix()%86400)
     }
     return uptime
+}
+
+func handleConfigRequest(w http.ResponseWriter, r *http.Request) {
+    // Only allow GET requests for end devices
+    if r.Method != http.MethodGet && r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+    
+    // Get the current configuration
+    config := getConfig()
+    
+    // Check if we have a configuration
+    if config.YAML == "" {
+        http.Error(w, "No configuration available", http.StatusNotFound)
+        return
+    }
+    
+    // Set appropriate content type and send the YAML config
+    w.Header().Set("Content-Type", "application/x-yaml")
+    w.WriteHeader(http.StatusOK)
+    fmt.Fprintf(w, "%s", config.YAML)
+    
+    log.Printf("Served configuration to end device (IP: %s)", r.RemoteAddr)
 }
