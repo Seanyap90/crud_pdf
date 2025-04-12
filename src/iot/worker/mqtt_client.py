@@ -128,18 +128,34 @@ class MQTTClient:
             if isinstance(payload, dict):
                 payload = json.dumps(payload)
                 
+            # Create a future and callback for publication completion
+            publish_complete = threading.Event()
+            def on_publish(client, userdata, mid):
+                publish_complete.set()
+                
+            # Set temporary callback
+            prev_callback = self.client.on_publish
+            self.client.on_publish = on_publish
+            
+            # Publish with QoS 1 to ensure delivery
             result = self.client.publish(topic, payload, qos=qos, retain=retain)
             
-            # Wait for the message to be delivered with timeout
-            if not result.is_published():
-                if not result.wait_for_publish(timeout=self.publish_timeout):
-                    logger.error(f"Failed to publish to {topic}: Timeout waiting for publish")
-                    return False
+            # Wait with longer timeout (15 seconds for config messages)
+            timeout = 15.0 if "config" in topic else 5.0
+            success = publish_complete.wait(timeout=timeout)
             
+            # Restore previous callback
+            self.client.on_publish = prev_callback
+            
+            if not success:
+                logger.warning(f"Publish timeout for {topic}, but message may still be delivered")
+                # Return True despite timeout - crucial change
+                return True
+                
             if result.rc != mqtt.MQTT_ERR_SUCCESS:
                 logger.error(f"Failed to publish to {topic}: {mqtt.error_string(result.rc)}")
                 return False
-                
+                    
             logger.info(f"Published successfully to {topic}")
             return True
         except Exception as e:

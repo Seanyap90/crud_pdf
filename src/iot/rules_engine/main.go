@@ -620,35 +620,40 @@ func (engine *RulesEngine) handleConfigRequest(topic string, payload map[string]
     configTopic := fmt.Sprintf("gateway/%s/config/update", gatewayID)
     log.Printf("Sending configuration to gateway %s", gatewayID)
 
-	// Get yaml_config and update_id from wrapper
-    configToSend := yamlConfig
-    updateID := ""
+	// Parse stored config to extract update_id and yaml_config
+    var updateID string
+    var configToSend string
     
     // Attempt to parse stored config as JSON to extract update_id
     var configMap map[string]interface{}
-    if json.Unmarshal([]byte(yamlConfig), &configMap) == nil {
-        // If it's JSON, extract fields
+    if err := json.Unmarshal([]byte(yamlConfig), &configMap); err == nil {
+        // Extract fields from JSON wrapper
         if cfg, ok := configMap["yaml_config"].(string); ok {
             configToSend = cfg
+        } else {
+            configToSend = yamlConfig // Use as-is if no yaml_config field
         }
+        
         if id, ok := configMap["update_id"].(string); ok {
             updateID = id
+            log.Printf("Using update_id from stored config: %s", updateID)
         }
+    } else {
+        configToSend = yamlConfig // Use as-is if not valid JSON
     }
     
-    // Create message that includes update_id
-    message := configToSend
-    if updateID != "" {
-        // Wrap in JSON if we have an update_id
-        wrapper := map[string]interface{}{
-            "yaml_config": configToSend,
-            "update_id": updateID,
-        }
-        if jsonData, err := json.Marshal(wrapper); err == nil {
-            message = string(jsonData)
-        }
+    // Always create a consistent wrapper with update_id
+    wrapper := map[string]interface{}{
+        "yaml_config": configToSend,
+        "update_id": updateID,
     }
-
+    
+    message, err := json.Marshal(wrapper)
+    if err != nil {
+        log.Printf("Error marshaling config message: %v", err)
+        return
+    }
+	
     if engine.RepublishClient != nil && engine.RepublishClient.IsConnected() {
         token := engine.RepublishClient.Publish(configTopic, 0, false, message)
         token.Wait()

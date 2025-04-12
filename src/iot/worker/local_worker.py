@@ -987,27 +987,36 @@ class LocalWorker(BaseWorker):
                 gateway_id = parts[1]
         
         # For delivered events with missing update_id, try harder to find the update_id
-        if ("delivered" in topic or event_type == "delivered") and not update_id:
+        if not update_id and ("delivered" in topic or event_type == "delivered"):
             try:
-                # Check for update_id in payload
-                if isinstance(payload, dict) and "update_id" in payload:
-                    update_id = payload["update_id"]
-                    logger.info(f"Found update_id in payload: {update_id}")
-                # If still not found, find the most recent pending update for this gateway
-                elif gateway_id:
-                    active_updates = self.list_config_updates(
-                        gateway_id=gateway_id, 
-                        include_completed=False
+                # First check payload for update_id
+                if isinstance(payload, dict):
+                    if "update_id" in payload and payload["update_id"]:
+                        update_id = payload["update_id"]
+                        logger.info(f"Found update_id in payload: {update_id}")
+                        task_data["update_id"] = update_id
+                
+                # If still not found, get most recent update for this gateway
+                if not update_id and gateway_id:
+                    # Look for any state, not just pending
+                    all_updates = self.list_config_updates(
+                        gateway_id=gateway_id,
+                        include_completed=True
                     )
-                    if active_updates:
-                        # Use the most recent update
-                        update_id = active_updates[0].get("update_id")
-                        logger.info(f"Using most recent pending update_id: {update_id}")
+                    
+                    if all_updates:
+                        # Sort by recency if timestamps available
+                        if all_updates[0].get("last_updated"):
+                            all_updates.sort(
+                                key=lambda x: x.get("last_updated", ""),
+                                reverse=True
+                            )
                         
-                        # Update the task_data with the found update_id
+                        update_id = all_updates[0].get("update_id")
+                        logger.info(f"Using most recent update_id: {update_id}")
                         task_data["update_id"] = update_id
             except Exception as e:
-                logger.error(f"Error finding update_id for delivered event: {str(e)}")
+                logger.error(f"Error finding update_id: {str(e)}")
 
         
         if not update_id:

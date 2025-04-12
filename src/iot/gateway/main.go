@@ -420,6 +420,31 @@ func sendConfigAcknowledgment(status string) {
     }
     
     topic := fmt.Sprintf("gateway/%s/config/delivered", gatewayID)
+
+    // Ensure we have an update_id
+    updateID := currentUpdateID
+    if updateID == "" {
+        // Try to extract update_id from the stored config
+        configMutex.RLock()
+        config := currentConfig
+        configMutex.RUnlock()
+        
+        var configData map[string]interface{}
+        if err := json.Unmarshal([]byte(config.YAML), &configData); err == nil {
+            if id, ok := configData["update_id"].(string); ok {
+                updateID = id
+                currentUpdateID = id
+                log.Printf("Found update_id in config: %s", updateID)
+            }
+        }
+        
+        // If still empty, generate a placeholder
+        if updateID == "" {
+            updateID = fmt.Sprintf("gateway-%s-%d", gatewayID, time.Now().Unix())
+            log.Printf("Using generated update_id: %s", updateID)
+        }
+    }
+    
     payload := map[string]interface{}{
         "status": status,
         "timestamp": time.Now().Format(time.RFC3339),

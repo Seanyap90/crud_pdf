@@ -89,3 +89,14 @@ rules:
         topic: config/delivered
         qos: 0
         retain: false
+
+  - name: device-measurement
+    description: Process device measurement messages and forward to API
+    topic_pattern: gateway/+/device/+/measurement
+    enabled: true
+    actions:
+      - type: http
+        url: http://host.docker.internal:8000/api/mqtt/events
+        method: POST
+        headers:
+          Content-Type: application/json 
