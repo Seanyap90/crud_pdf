@@ -8,6 +8,7 @@ from .routes import router, get_worker
 from .worker.base import BaseWorker
 from .worker.local_worker import LocalWorker
 from .worker.state_machine import GatewayStateMachine
+from .worker.config_state_machine import ConfigUpdateStateMachine
 from database import local as db
 from database import event_store
 from .config import settings, update_settings
@@ -87,6 +88,8 @@ def create_app(worker_instance: BaseWorker = None) -> FastAPI:
             event_store.init_event_store(DB_PATH)
             # Initialize gateway tables
             GatewayStateMachine.initialize_gateway_tables(DB_PATH)
+            # Initialize configuration tables
+            ConfigUpdateStateMachine.initialize_config_tables(DB_PATH)
             logger.info("Database initialization completed")
         except Exception as e:
             logger.error(f"Error initializing database: {str(e)}")
@@ -113,9 +116,6 @@ def create_app(worker_instance: BaseWorker = None) -> FastAPI:
             logger.info(f"Stopped worker instance: {type(worker_instance).__name__}")
 
     return app
-
-# This is used by ASGI servers like Uvicorn
-app = create_app()
 
 # Factory function for testing
 def get_test_app() -> FastAPI:

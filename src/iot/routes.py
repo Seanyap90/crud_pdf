@@ -1,6 +1,9 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, File, Form, UploadFile
 from datetime import datetime
 import logging
+import hashlib
+import json
+import yaml
 from typing import Dict, Any, List, Optional
 from .models import (
     CreateGatewayRequest, 
@@ -9,7 +12,12 @@ from .models import (
     EventResponse, 
     GatewayList,
     GatewayUpdateType,
-    GatewayState
+    GatewayState,
+    ConfigUpdateRequest,
+    ConfigUpdateStatus,
+    ConfigUpdateResponse,
+    ConfigUpdateList,
+    ConfigMQTTEventRequest
 )
 from .worker.base import BaseWorker
 from .worker.local_worker import LocalWorker
@@ -41,12 +49,7 @@ async def create_gateway(
     request: CreateGatewayRequest,
     worker: BaseWorker = Depends(get_worker)
 ):
-    """Create a new gateway
-    
-    Creates a new gateway with the specified name and location.
-    If gateway_id is not provided, a unique ID will be generated.
-    The gateway will be registered in the system and a Docker container will be started.
-    """
+    """Create a new gateway"""
     try:
         # Log the raw request data
         request_dict = request.model_dump()
@@ -447,4 +450,206 @@ async def reset_gateway(
         return connect_result
     except Exception as e:
         logger.error(f"Error resetting gateway: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Configuration management endpoints
+@router.post("/api/config", status_code=status.HTTP_201_CREATED)
+async def create_config_update(
+    gateway_id: str = Form(...),
+    yaml_config: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    worker: BaseWorker = Depends(get_worker)
+):
+    """Create a new configuration update for a gateway
+    
+    This endpoint accepts either a text configuration or a file upload.
+    At least one of yaml_config or file must be provided.
+    
+    Form Parameters:
+        gateway_id: ID of the gateway to configure
+        yaml_config: YAML configuration as text (optional)
+        file: Uploaded YAML file (optional)
+    """
+    try:
+        # Check that at least one config source is provided
+        if not yaml_config and not file:
+            raise HTTPException(
+                status_code=400,
+                detail="Either yaml_config parameter or file upload is required"
+            )
+        
+        # If file is provided, read its contents
+        if file:
+            logger.info(f"Reading configuration from uploaded file {file.filename}")
+            file_content = await file.read()
+            yaml_config = file_content.decode('utf-8')
+        
+        # Create a unique update ID
+        update_id = f"config-{gateway_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        # Create a hash of the config for storage and comparison
+        hash_obj = hashlib.sha256(yaml_config.encode('utf-8'))
+        config_hash = hash_obj.hexdigest()
+        
+        # Validate YAML
+        try:
+            yaml.safe_load(yaml_config)
+        except yaml.YAMLError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid YAML configuration: {str(e)}")
+        
+        # Create task data for the worker
+        task_data = {
+            "type": "config_update",
+            "update_id": update_id,
+            "gateway_id": gateway_id,
+            "yaml_config": yaml_config,
+            "config_hash": config_hash,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Process the task
+        logger.info(f"Creating configuration update {update_id} for gateway {gateway_id}")
+        result = await worker.process_task(task_data)
+        
+        return {
+            "status": "created",
+            "update_id": update_id,
+            "gateway_id": gateway_id,
+            "config_hash": config_hash
+        }
+    
+    except ValueError as e:
+        logger.error(f"Invalid config data: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating config update: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/config", response_model=ConfigUpdateList)
+async def list_config_updates(
+    gateway_id: Optional[str] = None,
+    include_completed: bool = True,
+    worker: BaseWorker = Depends(get_worker)
+):
+    """List configuration updates"""
+    try:
+        updates = worker.list_config_updates(gateway_id, include_completed)
+        return {"updates": updates, "total": len(updates)}
+    except Exception as e:
+        logger.error(f"Error listing config updates: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/config/{update_id}", response_model=ConfigUpdateStatus)
+async def get_config_update(
+    update_id: str,
+    include_config: bool = False,
+    worker: BaseWorker = Depends(get_worker)
+):
+    """Get details of a specific configuration update"""
+    try:
+        update = worker.get_config_update(update_id, include_config)
+        if not update:
+            raise HTTPException(status_code=404, detail="Configuration update not found")
+        return update
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting config update: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/config/gateway/{gateway_id}/latest", response_model=ConfigUpdateStatus)
+async def get_latest_config(
+    gateway_id: str,
+    include_config: bool = True,
+    worker: BaseWorker = Depends(get_worker)
+):
+    """Get the latest configuration for a gateway"""
+    try:
+        update = worker.get_latest_config(gateway_id, include_config)
+        if not update:
+            raise HTTPException(status_code=404, detail="No configuration found for this gateway")
+        return update
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting latest config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/api/config/mqtt/events", response_model=ConfigUpdateResponse)
+async def process_config_mqtt_event(
+    event: Dict[str, Any],
+    worker: BaseWorker = Depends(get_worker)
+):
+    """Process MQTT events related to configuration updates"""
+    try:
+        logger.info(f"Received config MQTT event: {event}")
+        
+        # Extract required fields
+        topic = event.get("topic")
+        if not topic:
+            raise HTTPException(status_code=400, detail="Topic is required")
+        
+        gateway_id = None
+        event_type = None
+        update_id = None
+        
+        # Extract info from topic: gateway/{gateway_id}/config/{action}
+        # or config/{action}
+        topic_parts = topic.split('/')
+        
+        if topic.startswith("gateway/"):
+            if len(topic_parts) >= 4:
+                gateway_id = topic_parts[1]
+                event_type = topic_parts[3]  # e.g., "update", "delivered"
+        elif topic.startswith("config/"):
+            if len(topic_parts) >= 2:
+                event_type = topic_parts[1]  # e.g., "new", "delivered"
+        
+        # Extract update_id from payload
+        payload = event.get("payload", {})
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except:
+                payload = {"raw": payload}
+        
+        update_id = payload.get("update_id")
+        
+        # If we don't have an update_id but have gateway_id, try to find active update
+        if not update_id and gateway_id:
+            active_updates = worker.list_config_updates(
+                gateway_id=gateway_id, 
+                include_completed=False
+            )
+            if active_updates:
+                update_id = active_updates[0].get("update_id")
+        
+        if not update_id:
+            logger.warning(f"Could not determine update_id for topic {topic}")
+            return {"status": "ignored", "reason": "No update_id found"}
+        
+        # Create task data with mqtt_config prefix to distinguish from gateway MQTT events
+        task_data = {
+            "type": "mqtt_config_event",
+            "update_id": update_id,
+            "gateway_id": gateway_id,
+            "event_type": event_type,
+            "topic": topic,
+            "payload": payload,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Process the task using the existing task processor
+        result = await worker.process_task(task_data)
+        
+        # Convert result to the expected format
+        if isinstance(result, dict) and "status" not in result:
+            result = {"status": "processed", "update": result}
+            
+        return result
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing config MQTT event: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

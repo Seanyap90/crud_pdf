@@ -8,8 +8,10 @@ from typing import Dict, Any, List, Optional
 
 from .base import BaseWorker
 from .state_machine import GatewayStateMachine, EventType, GatewayState, GatewayUpdateType
+from .config_state_machine import ConfigUpdateStateMachine, ConfigUpdateState, ConfigEventType
 from database import event_store
 from iot.config import settings
+from .mqtt_client import MQTTClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,39 @@ class LocalWorker(BaseWorker):
         except Exception as e:
             logger.error(f"Failed to initialize Docker client: {str(e)}")
             self.docker_client = None
+        
+        # Initialize MQTT client
+        self.mqtt_client = None
+        self._init_mqtt_client()
+    
+    def _init_mqtt_client(self):
+        """Initialize MQTT client"""
+        try:
+            # Create MQTT client with improved implementation
+            self.mqtt_client = MQTTClient(
+                broker_host="localhost",
+                broker_port=settings.MQTT_BROKER_PORT,
+                # client_id=settings.MQTT_CLIENT_ID,
+                username=settings.MQTT_USERNAME,
+                password=settings.MQTT_PASSWORD
+            )
+            
+            # Attempt connection with explicit result checking
+            if not self.mqtt_client.connect():
+                logger.warning(f"Initial MQTT connection failed - will retry automatically. Check broker at {settings.MQTT_BROKER_HOST}:{settings.MQTT_BROKER_PORT}")
+            else:
+                logger.info(f"MQTT client connected successfully to {settings.MQTT_BROKER_HOST}:{settings.MQTT_BROKER_PORT}")
+            
+            # Always subscribe to topics, the improved client will queue these
+            # until connection is established
+            if settings.RULES_ENGINE_ENABLED:
+                self.mqtt_client.subscribe("config/delivered", self._handle_config_delivered_message)
+                logger.info(f"Subscribed to config/delivered topic for configuration updates")
+            
+            logger.info(f"MQTT client initialized with broker {settings.MQTT_BROKER_HOST}:{settings.MQTT_BROKER_PORT}")
+        except Exception as e:
+            logger.error(f"MQTT client initialization failed: {str(e)}")
+            #self.mqtt_client = None
     
     async def start(self) -> None:
         """Start the worker"""
@@ -39,7 +74,7 @@ class LocalWorker(BaseWorker):
         logger.debug("Worker started")
         
         # Start heartbeat checker task
-        asyncio.create_task(self._heartbeat_checker())
+        asyncio.create_task(self._heartbeat_checker())   
     
     async def _heartbeat_checker(self):
         """Background task to periodically check for missed heartbeats"""
@@ -307,7 +342,13 @@ class LocalWorker(BaseWorker):
             elif task_type == "delete_gateway":
                 return await self._handle_delete_gateway(task_data)
             elif task_type.startswith("mqtt_"):
-                return await self._handle_mqtt_event(task_data)
+                # Handle config events differently from regular gateway MQTT events
+                if task_type == "mqtt_config_event":
+                    return await self._handle_config_mqtt_event(task_data)
+                else:
+                    return await self._handle_mqtt_event(task_data)
+            elif task_type == "config_update":
+                return await self._handle_config_update(task_data)
             else:
                 logger.warning(f"Unknown task type: {task_type}")
                 raise ValueError(f"Unknown task type: {task_type}")
@@ -669,3 +710,438 @@ class LocalWorker(BaseWorker):
         
         # Return the current gateway status
         return self.get_gateway_status(gateway_id)
+    
+    def _handle_config_delivered_message(self, topic: str, payload: dict):
+        """Handle config delivered messages from MQTT
+        
+        This is called when a message is received on the config/delivered topic.
+        It asynchronously processes the message to update the config state machine.
+        """
+        try:
+            update_id = payload.get("update_id")
+            if not update_id:
+                logger.warning(f"Received config delivered message without update_id: {payload}")
+                return
+                
+            # Process the message asynchronously
+            asyncio.create_task(self.process_config_mqtt_event({
+                "type": "mqtt_config_event",
+                "topic": topic,
+                "payload": payload,
+                "update_id": update_id,
+                "event_type": "delivered"
+            }))
+            
+        except Exception as e:
+            logger.error(f"Error handling config delivered message: {str(e)}")
+    
+    async def stop(self) -> None:
+        """Stop the worker and clean up resources
+        
+        Ensures all resources are properly released, including:
+        - MQTT client disconnection
+        - Docker client cleanup
+        """
+        logger.info("Stopping worker and cleaning up resources")
+
+        # Clean up MQTT client
+        if self.mqtt_client:
+            try:
+                self.mqtt_client.disconnect()
+                logger.info("MQTT client disconnected successfully")
+            except Exception as e:
+                logger.error(f"Error disconnecting MQTT client: {str(e)}")
+            
+        # Existing cleanup code...
+        if self.docker_client:
+            try:
+                self.docker_client.close()
+                logger.info("Docker client closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing Docker client: {str(e)}")
+        
+        # Set running flag to false
+        self.running = False
+        logger.info("Worker stopped")
+    
+    async def _handle_config_update(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle configuration update task"""
+        update_id = task_data.get("update_id")
+        gateway_id = task_data.get("gateway_id")
+        yaml_config = task_data.get("yaml_config")
+        config_hash = task_data.get("config_hash")
+        
+        if not update_id or not gateway_id or not yaml_config:
+            raise ValueError("update_id, gateway_id, and yaml_config are required")
+        
+        # Check if the gateway exists
+        gateway_status = self.get_gateway_status(gateway_id)
+        if not gateway_status:
+            raise ValueError(f"Gateway {gateway_id} not found")
+        
+        # Check if the gateway is in CONNECTED state
+        if gateway_status.get("status") != GatewayState.CONNECTED.value:
+            raise ValueError(f"Gateway {gateway_id} is not in CONNECTED state")
+        
+        # Check if update already exists (idempotency)
+        current_version = event_store.get_current_version(
+            aggregate_id=update_id,
+            aggregate_type=ConfigUpdateStateMachine.AGGREGATE_TYPE,
+            db_path=self.db_path
+        )
+        
+        if current_version != -1:
+            logger.info(f"Configuration update {update_id} already exists, returning existing state")
+            return self.get_config_update(update_id)
+        
+        # Store the configuration in the configs table
+        ConfigUpdateStateMachine.store_config(
+            config_hash=config_hash,
+            yaml_config=yaml_config,
+            created_at=task_data.get("timestamp"),
+            db_path=self.db_path
+        )
+        
+        # Create event data
+        event_data = {
+            "update_id": update_id,
+            "gateway_id": gateway_id,
+            "config_hash": config_hash,
+            "timestamp": task_data.get("timestamp", datetime.now().isoformat())
+        }
+        
+        # Create and append CONFIG_CREATED event
+        event = ConfigUpdateStateMachine.create_event(
+            update_id,
+            ConfigEventType.CONFIG_CREATED,
+            event_data,
+            0  # Initial version
+        )
+        self.append_event(event)
+        
+        # Update read model
+        self.update_config_read_model(update_id)
+
+        # Publish configuration to MQTT with improved error handling and retries
+        mqtt_publish_success = False
+        
+        # Ensure MQTT client is available
+        if self.mqtt_client is None:
+            # Reinitialize MQTT client if needed
+            self._init_mqtt_client()
+        
+        if self.mqtt_client:
+            # Prepare MQTT payload
+            mqtt_payload = {
+                "gateway_id": gateway_id,
+                "yaml_config": yaml_config,
+                "update_id": update_id,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Multiple attempts to publish with backoff
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    # Use the improved publish method that returns success/failure
+                    if self.mqtt_client.publish("config/new", mqtt_payload):
+                        logger.info(f"Configuration published to MQTT for update {update_id} on attempt {attempt}")
+                        mqtt_publish_success = True
+                        break
+                    else:
+                        logger.warning(f"Failed to publish config to MQTT for update {update_id} on attempt {attempt}")
+                        if attempt < max_attempts:
+                            # Wait before retrying
+                            await asyncio.sleep(1 * attempt)  # Increasing backoff
+                except Exception as e:
+                    logger.error(f"Error publishing config to MQTT on attempt {attempt}: {str(e)}")
+                    if attempt < max_attempts:
+                        await asyncio.sleep(1 * attempt)
+        else:
+            logger.error(f"Cannot publish configuration to MQTT: client not available")
+        
+        # Only update state if MQTT publish was successful
+        if mqtt_publish_success:
+            # Create and append CONFIG_PUBLISHED event
+            publish_event_data = {
+                "update_id": update_id,
+                "gateway_id": gateway_id,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            publish_event = ConfigUpdateStateMachine.create_event(
+                update_id,
+                ConfigEventType.CONFIG_PUBLISHED,
+                publish_event_data,
+                1  # Next version
+            )
+            self.append_event(publish_event)
+            
+            # Update read model again
+            self.update_config_read_model(update_id)
+            
+            logger.info(f"Configuration update {update_id} published to MQTT successfully")
+        else:
+            # We created the config but couldn't publish it - log this state
+            logger.error(f"Failed to publish configuration update {update_id} to MQTT after multiple attempts")
+            
+            # Create and append CONFIG_FAILED event
+            fail_event_data = {
+                "update_id": update_id,
+                "gateway_id": gateway_id,
+                "error": "Failed to publish configuration to MQTT broker",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            fail_event = ConfigUpdateStateMachine.create_event(
+                update_id,
+                ConfigEventType.CONFIG_FAILED,
+                fail_event_data,
+                1  # Next version
+            )
+            self.append_event(fail_event)
+            
+            # Update read model
+            self.update_config_read_model(update_id)
+        
+        # Return the current status
+        return self.get_config_update(update_id)
+    
+    async def _handle_config_mqtt_event(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle configuration-related MQTT events"""
+        update_id = task_data.get("update_id")
+        event_type = task_data.get("event_type")
+        topic = task_data.get("topic")
+        payload = task_data.get("payload", {})
+        
+        if not update_id:
+            raise ValueError("update_id is required")
+        
+        # Get current version
+        current_version = event_store.get_current_version(
+            aggregate_id=update_id,
+            aggregate_type=ConfigUpdateStateMachine.AGGREGATE_TYPE,
+            db_path=self.db_path
+        )
+        
+        if current_version == -1:
+            raise ValueError(f"Configuration update {update_id} not found")
+        
+        # Get current state machine
+        state_machine = ConfigUpdateStateMachine.reconstruct_from_events(
+            update_id=update_id,
+            db_path=self.db_path
+        )
+        
+        # Process the event based on the event type and current state
+        if topic.startswith("gateway/") and "request_config" in topic:
+            # Gateway requested configuration
+            if state_machine.current_state == ConfigUpdateState.WAITING_FOR_REQUEST:
+                # Create and append CONFIG_REQUESTED event
+                event_data = {
+                    "update_id": update_id,
+                    "topic": topic,
+                    "timestamp": task_data.get("timestamp", datetime.now().isoformat())
+                }
+                
+                event = ConfigUpdateStateMachine.create_event(
+                    update_id,
+                    ConfigEventType.CONFIG_REQUESTED,
+                    event_data,
+                    current_version + 1
+                )
+                self.append_event(event)
+                
+                # Update read model
+                self.update_config_read_model(update_id)
+                logger.info(f"Gateway requested configuration for update {update_id}")
+            else:
+                logger.warning(f"Ignoring config request in state {state_machine.current_state}")
+        
+        elif event_type == "update" or "config/update" in topic:
+            # Configuration was sent to the gateway
+            if state_machine.current_state == ConfigUpdateState.NOTIFYING_GATEWAY:
+                # Create and append CONFIG_SENT event
+                event_data = {
+                    "update_id": update_id,
+                    "topic": topic,
+                    "timestamp": task_data.get("timestamp", datetime.now().isoformat())
+                }
+                
+                event = ConfigUpdateStateMachine.create_event(
+                    update_id,
+                    ConfigEventType.CONFIG_SENT,
+                    event_data,
+                    current_version + 1
+                )
+                self.append_event(event)
+                
+                # Update read model
+                self.update_config_read_model(update_id)
+                logger.info(f"Configuration sent to gateway for update {update_id}")
+            else:
+                logger.warning(f"Ignoring config sent event in state {state_machine.current_state}")
+        
+        elif event_type == "delivered" or "config/delivered" in topic:
+            # Gateway acknowledged delivery
+            if state_machine.current_state == ConfigUpdateState.WAITING_FOR_ACK:
+                # Create and append CONFIG_DELIVERED event
+                event_data = {
+                    "update_id": update_id,
+                    "topic": topic,
+                    "status": payload.get("status", "unknown"),
+                    "timestamp": task_data.get("timestamp", datetime.now().isoformat())
+                }
+                
+                event = ConfigUpdateStateMachine.create_event(
+                    update_id,
+                    ConfigEventType.CONFIG_DELIVERED,
+                    event_data,
+                    current_version + 1
+                )
+                self.append_event(event)
+                
+                # Update read model
+                self.update_config_read_model(update_id)
+                logger.info(f"Configuration delivery acknowledged for update {update_id}")
+                
+                # Now send the completion event if delivery was successful
+                if payload.get("status") == "success":
+                    # Create and append CONFIG_COMPLETED event
+                    complete_event_data = {
+                        "update_id": update_id,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    
+                    complete_event = ConfigUpdateStateMachine.create_event(
+                        update_id,
+                        ConfigEventType.CONFIG_COMPLETED,
+                        complete_event_data,
+                        current_version + 2
+                    )
+                    self.append_event(complete_event)
+                    
+                    # Update read model
+                    self.update_config_read_model(update_id)
+                    logger.info(f"Configuration update {update_id} completed successfully")
+                else:
+                    # Create and append CONFIG_FAILED event
+                    fail_event_data = {
+                        "update_id": update_id,
+                        "error": f"Delivery failed: {payload.get('status')}",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    
+                    fail_event = ConfigUpdateStateMachine.create_event(
+                        update_id,
+                        ConfigEventType.CONFIG_FAILED,
+                        fail_event_data,
+                        current_version + 2
+                    )
+                    self.append_event(fail_event)
+                    
+                    # Update read model
+                    self.update_config_read_model(update_id)
+                    logger.info(f"Configuration update {update_id} failed")
+            else:
+                logger.warning(f"Ignoring config delivered event in state {state_machine.current_state}")
+        
+        else:
+            logger.warning(f"Unhandled config event type: {event_type} on topic {topic}")
+        
+        # Return the current status
+        return {"status": "processed", "update": self.get_config_update(update_id)}
+   
+    def update_config_read_model(self, update_id: str) -> None:
+        """Update the read model for a configuration update"""
+        try:
+            # Reconstruct the state machine from events
+            state_machine = ConfigUpdateStateMachine.reconstruct_from_events(
+                update_id=update_id,
+                db_path=self.db_path
+            )
+            
+            # Get the current status
+            status = state_machine.get_status()
+            
+            # Extract fields for the read model
+            ConfigUpdateStateMachine.update_config_read_model(
+                update_id=status["update_id"],
+                gateway_id=status["gateway_id"],
+                state=status["state"],
+                version=status.get("version"),
+                created_at=status.get("created_at"),
+                published_at=status.get("published_at"),
+                requested_at=status.get("requested_at"),
+                sent_at=status.get("sent_at"),
+                delivered_at=status.get("delivered_at"),
+                completed_at=status.get("completed_at"),
+                failed_at=status.get("failed_at"),
+                last_updated=status.get("last_updated"),
+                delivery_status=status.get("delivery_status"),
+                error=status.get("error"),
+                config_hash=status.get("config_hash"),
+                db_path=self.db_path
+            )
+            
+            logger.info(f"Read model updated for config update {update_id}: state={status['state']}")
+        except Exception as e:
+            logger.error(f"Error updating config read model: {str(e)}")
+            raise
+    
+    def get_config_update(self, update_id: str, include_config: bool = False) -> Optional[Dict[str, Any]]:
+        """Get a configuration update"""
+        try:
+            # Get the update from the read model
+            update = ConfigUpdateStateMachine.get_config_update_status(
+                update_id=update_id,
+                db_path=self.db_path
+            )
+            
+            if not update:
+                return None
+            
+            # Remove yaml_config if not requested to save bandwidth
+            if not include_config and "yaml_config" in update:
+                del update["yaml_config"]
+            
+            return update
+        except Exception as e:
+            logger.error(f"Error getting config update: {str(e)}")
+            return None
+    
+    def list_config_updates(
+        self, 
+        gateway_id: Optional[str] = None, 
+        include_completed: bool = True
+    ) -> List[Dict[str, Any]]:
+        """List configuration updates"""
+        try:
+            return ConfigUpdateStateMachine.list_config_updates(
+                gateway_id=gateway_id,
+                include_completed=include_completed,
+                db_path=self.db_path
+            )
+        except Exception as e:
+            logger.error(f"Error listing config updates: {str(e)}")
+            return []
+    
+    def get_latest_config(self, gateway_id: str, include_config: bool = True) -> Optional[Dict[str, Any]]:
+        """Get the latest configuration for a gateway"""
+        try:
+            update = ConfigUpdateStateMachine.get_latest_config_for_gateway(
+                gateway_id=gateway_id,
+                db_path=self.db_path
+            )
+            
+            if not update:
+                return None
+            
+            # Remove yaml_config if not requested to save bandwidth
+            if not include_config and "yaml_config" in update:
+                del update["yaml_config"]
+            
+            return update
+        except Exception as e:
+            logger.error(f"Error getting latest config: {str(e)}")
+            return None    

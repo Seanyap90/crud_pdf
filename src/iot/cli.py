@@ -6,6 +6,9 @@ import requests
 import socket
 import os
 import platform
+import json
+import yaml
+import time
 from enum import Enum
 from typing import Optional
 
@@ -663,6 +666,322 @@ def inject_cert(gateway_id: str):
             
     except Exception as e:
         click.echo(f"Error injecting certificate: {str(e)}")
+
+@cli.group()
+def config():
+    """Commands for managing end device configurations"""
+    pass
+
+@config.command()
+@click.argument('gateway_id')
+@click.option('--file', '-f', required=True, type=click.Path(exists=True, readable=True), 
+              help='YAML configuration file path')
+def upload_config(gateway_id: str, file: str):
+    """Upload a new configuration for a gateway's end devices"""
+    try:
+        # Read configuration file
+        with open(file, 'r') as f:
+            yaml_content = f.read()
+        
+        # Validate YAML syntax
+        try:
+            yaml.safe_load(yaml_content)
+        except yaml.YAMLError as e:
+            click.echo(f"Error parsing YAML file: {str(e)}")
+            return
+        
+        click.echo(f"Uploading configuration for gateway {gateway_id} from file {file}...")
+        
+        # First check if gateway exists and is in CONNECTED state
+        resp = requests.get(f"http://localhost:8000/api/gateways/{gateway_id}")
+        if resp.status_code != 200:
+            click.echo(click.style(f"Gateway {gateway_id} not found: {resp.text}", fg="red"))
+            return
+        
+        gateway = resp.json()
+        if gateway.get("status") != "connected":
+            click.echo(click.style(f"Gateway {gateway_id} is not in CONNECTED state", fg="yellow"))
+            click.confirm("Continue anyway?", abort=True)
+        
+        # Prepare API request
+        url = f"http://localhost:8000/api/config"
+        params = {'gateway_id': gateway_id}
+        data = {'yaml_config': yaml_content}
+        
+        resp = requests.post(url, params=params, data=data)
+        
+        if resp.status_code == 201:
+            result = resp.json()
+            click.echo(click.style("Configuration created successfully!", fg="green"))
+            click.echo(f"Update ID: {result['update_id']}")
+            click.echo(f"Gateway ID: {result['gateway_id']}")
+            click.echo(f"Config Hash: {result['config_hash']}")
+            
+            # Monitor the configuration update
+            click.echo("\nMonitoring update status...")
+            monitor_config_update(result['update_id'])
+        else:
+            click.echo(click.style(f"Failed to upload configuration: {resp.text}", fg="red"))
+    except Exception as e:
+        click.echo(f"Error: {str(e)}")
+
+@config.command()
+@click.argument('update_id')
+def get_status(update_id: str):
+    """Get the status of a configuration update"""
+    try:
+        resp = requests.get(f"http://localhost:8000/api/config/{update_id}")
+        
+        if resp.status_code == 200:
+            update = resp.json()
+            
+            # Format status with color
+            status = update.get('state', 'unknown')
+            if status == 'completed':
+                status_str = click.style(status, fg='green')
+            elif status == 'failed':
+                status_str = click.style(status, fg='red')
+            elif status in ['waiting', 'waiting_ack', 'notifying']:
+                status_str = click.style(status, fg='yellow')
+            else:
+                status_str = click.style(status, fg='blue')
+            
+            click.echo(f"Configuration Update: {update_id}")
+            click.echo(f"Gateway: {update.get('gateway_id')}")
+            click.echo(f"Status: {status_str}")
+            click.echo(f"Created: {update.get('created_at')}")
+            
+            # Show timing information
+            if 'published_at' in update:
+                click.echo(f"Published: {update.get('published_at')}")
+            if 'requested_at' in update:
+                click.echo(f"Requested: {update.get('requested_at')}")
+            if 'sent_at' in update:
+                click.echo(f"Sent: {update.get('sent_at')}")
+            if 'delivered_at' in update:
+                click.echo(f"Delivered: {update.get('delivered_at')}")
+            if 'completed_at' in update:
+                click.echo(f"Completed: {update.get('completed_at')}")
+            
+            # Show error if present
+            if 'error' in update and update['error']:
+                click.echo(f"Error: {click.style(update['error'], fg='red')}")
+        else:
+            click.echo(f"Failed to get update status: {resp.text}")
+    except Exception as e:
+        click.echo(f"Error: {str(e)}")
+
+@config.command()
+@click.option('--gateway-id', '-g', help='Filter by gateway ID')
+@click.option('--all/--pending', default=False, help='Show all updates or only pending ones')
+def list_updates(gateway_id: str, all: bool):
+    """List configuration updates"""
+    try:
+        params = {}
+        if gateway_id:
+            params['gateway_id'] = gateway_id
+        params['include_completed'] = all
+        
+        resp = requests.get(f"http://localhost:8000/api/config/", params=params)
+        
+        if resp.status_code == 200:
+            result = resp.json()
+            updates = result.get('updates', [])
+            
+            if not updates:
+                click.echo("No configuration updates found")
+                return
+            
+            click.echo(f"Found {len(updates)} configuration updates:")
+            for update in updates:
+                # Format status with color
+                status = update.get('state', 'unknown')
+                if status == 'completed':
+                    status_str = click.style(status, fg='green')
+                elif status == 'failed':
+                    status_str = click.style(status, fg='red')
+                elif status in ['waiting', 'waiting_ack', 'notifying']:
+                    status_str = click.style(status, fg='yellow')
+                else:
+                    status_str = click.style(status, fg='blue')
+                
+                created_at = update.get('created_at', 'Unknown')
+                if len(created_at) > 19:  # Truncate microseconds
+                    created_at = created_at[:19]
+                
+                click.echo(f"  - {update['update_id']}: Gateway {update['gateway_id']} ({status_str}) - Created: {created_at}")
+        else:
+            click.echo(f"Failed to list configuration updates: {resp.text}")
+    except Exception as e:
+        click.echo(f"Error: {str(e)}")
+
+@config.command()
+@click.argument('gateway_id')
+def get_latest(gateway_id: str):
+    """Get the latest configuration for a gateway"""
+    try:
+        resp = requests.get(f"http://localhost:8000/api/config/gateway/{gateway_id}/latest")
+        
+        if resp.status_code == 200:
+            update = resp.json()
+            
+            click.echo(f"Latest configuration for gateway {gateway_id}:")
+            click.echo(f"Update ID: {update.get('update_id')}")
+            click.echo(f"Created: {update.get('created_at')}")
+            click.echo(f"Completed: {update.get('completed_at')}")
+            
+            # Display configuration if available
+            if 'yaml_config' in update and update['yaml_config']:
+                click.echo("\nConfiguration:")
+                click.echo("-" * 40)
+                click.echo(update['yaml_config'])
+                click.echo("-" * 40)
+            else:
+                click.echo("\nConfiguration content not available")
+        else:
+            click.echo(f"Failed to get latest configuration: {resp.text}")
+    except Exception as e:
+        click.echo(f"Error: {str(e)}")
+
+@config.command()
+@click.argument('gateway_id')
+def test_flow(gateway_id: str):
+    """Test the full configuration update flow for a gateway"""
+    try:
+        # Step 1: Check gateway status
+        resp = requests.get(f"http://localhost:8000/api/gateways/{gateway_id}")
+        
+        if resp.status_code != 200:
+            click.echo(f"Failed to get gateway status: {resp.text}")
+            return
+        
+        gateway = resp.json()
+        click.echo(f"Current gateway status: {gateway.get('status')}")
+        
+        if gateway.get('status') != 'connected':
+            click.echo(click.style("Warning: Gateway is not in CONNECTED state", fg="yellow"))
+            click.confirm("Continue anyway?", abort=True)
+        
+        # Step 2: Create a test configuration file
+        test_config = {
+            "version": "1.0",
+            "timestamp": int(time.time()),
+            "description": "Test configuration for end devices",
+            "devices": {
+                "count": 3,
+                "behaviors": {
+                    "scale": {
+                        "measurement_frequency_seconds": 30
+                    }
+                }
+            },
+            "materials": [
+                {"name": "Plastic", "category": "Recyclable"},
+                {"name": "Paper", "category": "Recyclable"},
+                {"name": "Glass", "category": "Recyclable"},
+                {"name": "Metal", "category": "Recyclable"},
+                {"name": "Organic", "category": "Compostable"}
+            ],
+            "measurement": {
+                "min_weight_kg": 0.1,
+                "max_weight_kg": 25.0,
+                "precision": 0.1
+            },
+            "reporting": {
+                "upload_frequency_seconds": 60,
+                "batch_size": 10
+            }
+        }
+        
+        # Write the test configuration to a temporary file
+        temp_file = f"temp_config_{gateway_id}.yaml"
+        with open(temp_file, 'w') as f:
+            yaml.dump(test_config, f, default_flow_style=False)
+        
+        click.echo(f"Created temporary configuration file: {temp_file}")
+        
+        # Step 3: Upload the configuration
+        click.echo("\nStep 3: Uploading configuration...")
+        with open(temp_file, 'r') as f:
+            yaml_content = f.read()
+        
+        url = f"http://localhost:8000/api/config"
+        params = {'gateway_id': gateway_id}
+        data = {'yaml_config': yaml_content}
+        
+        resp = requests.post(url, params=params, data=data)
+        
+        if resp.status_code != 201:
+            click.echo(f"Failed to upload configuration: {resp.text}")
+            os.remove(temp_file)
+            return
+        
+        result = resp.json()
+        update_id = result['update_id']
+        click.echo(click.style(f"Configuration created with update ID: {update_id}", fg="green"))
+        
+        # Step 4: Monitor the configuration update
+        click.echo("\nStep 4: Monitoring configuration update...")
+        monitor_config_update(update_id)
+        
+        # Clean up temporary file
+        os.remove(temp_file)
+        click.echo(f"\nRemoved temporary configuration file: {temp_file}")
+        
+        # Step 5: Verify the latest configuration
+        click.echo("\nStep 5: Verifying latest configuration...")
+        resp = requests.get(f"http://localhost:8000/api/config/gateway/{gateway_id}/latest")
+        
+        if resp.status_code == 200:
+            latest = resp.json()
+            if latest.get('update_id') == update_id:
+                click.echo(click.style("Configuration update successful!", fg="green"))
+            else:
+                click.echo(click.style("Warning: Latest configuration does not match our update", fg="yellow"))
+        else:
+            click.echo(click.style(f"Failed to verify latest configuration: {resp.text}", fg="red"))
+    
+    except Exception as e:
+        click.echo(f"Error: {str(e)}")
+
+def monitor_config_update(update_id: str, max_attempts: int = 10, interval: int = 2):
+    """Monitor a configuration update until it completes or fails"""
+    for attempt in range(max_attempts):
+        try:
+            resp = requests.get(f"http://localhost:8000/api/config/{update_id}")
+            
+            if resp.status_code != 200:
+                click.echo(f"Failed to get update status: {resp.text}")
+                return
+            
+            update = resp.json()
+            state = update.get('state', 'unknown')
+            
+            # Format state with color
+            if state == 'completed':
+                state_str = click.style(state, fg='green')
+            elif state == 'failed':
+                state_str = click.style(state, fg='red')
+            elif state in ['waiting', 'waiting_ack', 'notifying']:
+                state_str = click.style(state, fg='yellow')
+            else:
+                state_str = click.style(state, fg='blue')
+            
+            click.echo(f"Update {update_id} - State: {state_str}")
+            
+            if state in ['completed', 'failed']:
+                if state == 'completed':
+                    click.echo(click.style("Configuration update completed successfully!", fg="green"))
+                else:
+                    click.echo(click.style(f"Configuration update failed: {update.get('error', 'Unknown error')}", fg="red"))
+                return
+            
+            time.sleep(interval)
+        except Exception as e:
+            click.echo(f"Error monitoring update: {str(e)}")
+            return
+    
+    click.echo("Monitoring timed out. Use 'config get-status' command to check the status later.")
 
 if __name__ == "__main__":
     cli()

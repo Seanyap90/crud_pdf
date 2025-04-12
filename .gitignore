@@ -18,3 +18,6 @@
 /iot-client-admin/.next
 /src/*.egg-info
 certs
+gateway-config-structure.yaml
+offload_folder
+queue_data
