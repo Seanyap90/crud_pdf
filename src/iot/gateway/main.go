@@ -127,6 +127,7 @@ var (
     currentConfig   Config                  // Store the current configuration
     configMutex     sync.RWMutex            // Mutex to protect access to the configuration
     endDeviceManager *DeviceManager
+    currentUpdateID string
 )
 
 func main() {
@@ -357,10 +358,32 @@ func requestConfig() {
 func storeConfig(yamlConfig string) {
     configMutex.Lock()
     defer configMutex.Unlock()
+
+    // Extract port from brokerAddress
+    brokerPort := "1883" // Default MQTT port
+    if strings.Contains(brokerAddress, ":") {
+        parts := strings.Split(brokerAddress, ":")
+        if len(parts) > 1 {
+            brokerPort = parts[1]
+        }
+    }
+
+    log.Printf("Storing configuration, broker address: %s, port: %s",
+                brokerAddress, brokerPort)
     
     currentConfig = Config{
         YAML:      yamlConfig,
         UpdatedAt: time.Now(),
+    }
+
+    // Extract update_id if this is a JSON payload with yaml_config
+    var configData map[string]interface{}
+    if err := json.Unmarshal([]byte(yamlConfig), &configData); err == nil {
+        // Check if there's an update_id in the JSON
+        if updateID, ok := configData["update_id"].(string); ok {
+            currentUpdateID = updateID
+            log.Printf("Extracted update_id: %s", currentUpdateID)
+        }
     }
     
     // Update device manager with the new configuration
@@ -400,6 +423,7 @@ func sendConfigAcknowledgment(status string) {
     payload := map[string]interface{}{
         "status": status,
         "timestamp": time.Now().Format(time.RFC3339),
+        "update_id": currentUpdateID,
     }
     
     jsonData, err := json.Marshal(payload)
@@ -1633,11 +1657,17 @@ func handleMQTTMessage(msg mqtt.Message) {
     topic := msg.Topic()
 
     // Check for configuration-related topics
-    if strings.Contains(topic, "/config/") {
-        if strings.HasSuffix(topic, "/config/update") {
-            eventChan <- Event{Type: EventConfigUpdate, Data: msg, Time: time.Now()}
-            return
+    if strings.Contains(topic, "/config/update") {
+        // Try to extract update_id from message
+        var configData map[string]interface{}
+        if err := json.Unmarshal(msg.Payload(), &configData); err == nil {
+            if updateID, ok := configData["update_id"].(string); ok {
+                currentUpdateID = updateID
+                log.Printf("Extracted update_id from message: %s", currentUpdateID)
+            }
         }
+        eventChan <- Event{Type: EventConfigUpdate, Data: msg, Time: time.Now()}
+        return
     }
 
     // Parse message

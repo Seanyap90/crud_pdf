@@ -620,8 +620,37 @@ func (engine *RulesEngine) handleConfigRequest(topic string, payload map[string]
     configTopic := fmt.Sprintf("gateway/%s/config/update", gatewayID)
     log.Printf("Sending configuration to gateway %s", gatewayID)
 
+	// Get yaml_config and update_id from wrapper
+    configToSend := yamlConfig
+    updateID := ""
+    
+    // Attempt to parse stored config as JSON to extract update_id
+    var configMap map[string]interface{}
+    if json.Unmarshal([]byte(yamlConfig), &configMap) == nil {
+        // If it's JSON, extract fields
+        if cfg, ok := configMap["yaml_config"].(string); ok {
+            configToSend = cfg
+        }
+        if id, ok := configMap["update_id"].(string); ok {
+            updateID = id
+        }
+    }
+    
+    // Create message that includes update_id
+    message := configToSend
+    if updateID != "" {
+        // Wrap in JSON if we have an update_id
+        wrapper := map[string]interface{}{
+            "yaml_config": configToSend,
+            "update_id": updateID,
+        }
+        if jsonData, err := json.Marshal(wrapper); err == nil {
+            message = string(jsonData)
+        }
+    }
+
     if engine.RepublishClient != nil && engine.RepublishClient.IsConnected() {
-        token := engine.RepublishClient.Publish(configTopic, 0, false, yamlConfig)
+        token := engine.RepublishClient.Publish(configTopic, 0, false, message)
         token.Wait()
 
         if token.Error() != nil {
@@ -645,16 +674,24 @@ func (engine *RulesEngine) handleNewConfig(topic string, payload map[string]inte
         log.Printf("Invalid config message: missing yaml_config")
         return
     }
-
+    
+    // Extract update_id
+    updateID, _ := payload["update_id"].(string)
+    
     log.Printf("Received new configuration for gateway %s (%d bytes)", 
                gatewayID, len(yamlConfig))
 
-    // Store the configuration
+    // Store the config and update_id together as JSON
+    configWrapper, _ := json.Marshal(map[string]interface{}{
+        "yaml_config": yamlConfig,
+        "update_id": updateID,
+    })
+    
     engine.ConfigMutex.Lock()
-    engine.ConfigStorage[gatewayID] = yamlConfig
+    engine.ConfigStorage[gatewayID] = string(configWrapper)
     engine.ConfigMutex.Unlock()
-
-    log.Printf("Configuration stored for gateway %s, waiting for gateway request", gatewayID)
+    
+    log.Printf("Configuration stored for gateway %s with update_id %s", gatewayID, updateID)
 }
 
 // loadConfig loads the configuration from a file

@@ -60,6 +60,7 @@ class MQTTClient:
         # Connection state
         self.is_connected = False
         self.connect_timeout = 10  # seconds to wait for initial connection
+        self.publish_timeout = 5.0 
         
         # Background loop control
         self._loop_started = False
@@ -131,7 +132,7 @@ class MQTTClient:
             
             # Wait for the message to be delivered with timeout
             if not result.is_published():
-                if not result.wait_for_publish(timeout=5.0):
+                if not result.wait_for_publish(timeout=self.publish_timeout):
                     logger.error(f"Failed to publish to {topic}: Timeout waiting for publish")
                     return False
             

@@ -50,6 +50,9 @@ class LocalWorker(BaseWorker):
                 username=settings.MQTT_USERNAME,
                 password=settings.MQTT_PASSWORD
             )
+
+            # Set longer timeout for large config messages
+            self.mqtt_client.publish_timeout = 10.0  # Increase timeout to 10 seconds
             
             # Attempt connection with explicit result checking
             if not self.mqtt_client.connect():
@@ -66,7 +69,7 @@ class LocalWorker(BaseWorker):
             logger.info(f"MQTT client initialized with broker {settings.MQTT_BROKER_HOST}:{settings.MQTT_BROKER_PORT}")
         except Exception as e:
             logger.error(f"MQTT client initialization failed: {str(e)}")
-            #self.mqtt_client = None
+            self.mqtt_client = None
     
     async def start(self) -> None:
         """Start the worker"""
@@ -520,6 +523,23 @@ class LocalWorker(BaseWorker):
             # Update read model
             self.update_read_model(gateway_id)
         
+        # Special handling for heartbeat or online status - resend pending configs
+        if event_type in ["heartbeat", "status"] and isinstance(payload, dict):
+            update_type_str = task_data.get("update_type")
+            if (update_type_str == "heartbeat" or 
+                (isinstance(update_type_str, str) and update_type_str.upper() == "HEARTBEAT") or 
+                payload.get("status") == "online"):
+                
+                # Check if gateway just reconnected
+                state_machine = GatewayStateMachine.reconstruct_from_events(
+                    gateway_id=gateway_id,
+                    db_path=self.db_path
+                )
+                
+                if state_machine.current_state == GatewayState.CONNECTED:
+                    # Look for pending config updates
+                    await self._check_pending_configs(gateway_id)
+        
         # Process different event types
         if event_type in ["heartbeat", "status"]:
             # Use the consolidated GATEWAY_UPDATED event
@@ -735,6 +755,48 @@ class LocalWorker(BaseWorker):
         except Exception as e:
             logger.error(f"Error handling config delivered message: {str(e)}")
     
+    async def _check_pending_configs(self, gateway_id: str):
+        """Check and resend any pending configurations for a gateway"""
+        try:
+            # Find pending configurations
+            pending_configs = self.list_config_updates(
+                gateway_id=gateway_id,
+                include_completed=False
+            )
+            
+            # Filter to configs in waiting state
+            waiting_configs = [cfg for cfg in pending_configs 
+                            if cfg.get("state") in ["stored", "waiting"]]
+            
+            if waiting_configs:
+                logger.info(f"Found {len(waiting_configs)} pending configs for gateway {gateway_id}")
+                
+                # For each pending config, republish to MQTT
+                for config in waiting_configs:
+                    update_id = config.get("update_id")
+                    
+                    # Get the full config including YAML
+                    full_config = self.get_config_update(update_id, include_config=True)
+                    if full_config and "yaml_config" in full_config:
+                        logger.info(f"Republishing config {update_id} for gateway {gateway_id}")
+                        
+                        # Use the improved publish method
+                        if self.mqtt_client:
+                            mqtt_payload = {
+                                "gateway_id": gateway_id,
+                                "yaml_config": full_config["yaml_config"],
+                                "update_id": update_id,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            
+                            if self.mqtt_client.publish("config/new", mqtt_payload):
+                                logger.info(f"Successfully republished config {update_id}")
+                            else:
+                                logger.warning(f"Failed to republish config {update_id}")
+        
+        except Exception as e:
+            logger.error(f"Error checking pending configs: {str(e)}")
+    
     async def stop(self) -> None:
         """Stop the worker and clean up resources
         
@@ -830,6 +892,9 @@ class LocalWorker(BaseWorker):
             # Reinitialize MQTT client if needed
             self._init_mqtt_client()
         
+        logger.info(f"Publishing configuration to MQTT broker: {settings.MQTT_BROKER_HOST}:{settings.MQTT_BROKER_PORT}")
+        logger.info(f"Configuration details - Gateway: {gateway_id}, Update ID: {update_id}")
+        
         if self.mqtt_client:
             # Prepare MQTT payload
             mqtt_payload = {
@@ -913,9 +978,42 @@ class LocalWorker(BaseWorker):
         event_type = task_data.get("event_type")
         topic = task_data.get("topic")
         payload = task_data.get("payload", {})
+        gateway_id = task_data.get("gateway_id")
+
+        # Extract gateway_id from topic if not provided directly
+        if not gateway_id and topic:
+            parts = topic.split('/')
+            if len(parts) > 1 and topic.startswith("gateway/"):
+                gateway_id = parts[1]
+        
+        # For delivered events with missing update_id, try harder to find the update_id
+        if ("delivered" in topic or event_type == "delivered") and not update_id:
+            try:
+                # Check for update_id in payload
+                if isinstance(payload, dict) and "update_id" in payload:
+                    update_id = payload["update_id"]
+                    logger.info(f"Found update_id in payload: {update_id}")
+                # If still not found, find the most recent pending update for this gateway
+                elif gateway_id:
+                    active_updates = self.list_config_updates(
+                        gateway_id=gateway_id, 
+                        include_completed=False
+                    )
+                    if active_updates:
+                        # Use the most recent update
+                        update_id = active_updates[0].get("update_id")
+                        logger.info(f"Using most recent pending update_id: {update_id}")
+                        
+                        # Update the task_data with the found update_id
+                        task_data["update_id"] = update_id
+            except Exception as e:
+                logger.error(f"Error finding update_id for delivered event: {str(e)}")
+
         
         if not update_id:
-            raise ValueError("update_id is required")
+            error_msg = f"Could not determine update_id for topic {topic}"
+            logger.warning(error_msg)
+            return {"status": "ignored", "reason": "No update_id found"}
         
         # Get current version
         current_version = event_store.get_current_version(
