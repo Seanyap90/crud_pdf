@@ -371,19 +371,29 @@ func storeConfig(yamlConfig string) {
     log.Printf("Storing configuration, broker address: %s, port: %s",
                 brokerAddress, brokerPort)
     
+    // Initialize update_id as empty
+    updateID := ""
+    
+    // First check if this is a JSON payload with yaml_config and update_id
+    var configData map[string]interface{}
+    if err := json.Unmarshal([]byte(yamlConfig), &configData); err == nil {
+        // Check for update_id in the JSON
+        if id, ok := configData["update_id"].(string); ok && id != "" {
+            updateID = id
+            currentUpdateID = id
+            log.Printf("Extracted update_id from config: %s", updateID)
+            
+            // If we found yaml_config in JSON, use that instead
+            if cfg, ok := configData["yaml_config"].(string); ok && cfg != "" {
+                yamlConfig = cfg
+                log.Printf("Extracted yaml_config from JSON wrapper")
+            }
+        }
+    }
+    
     currentConfig = Config{
         YAML:      yamlConfig,
         UpdatedAt: time.Now(),
-    }
-
-    // Extract update_id if this is a JSON payload with yaml_config
-    var configData map[string]interface{}
-    if err := json.Unmarshal([]byte(yamlConfig), &configData); err == nil {
-        // Check if there's an update_id in the JSON
-        if updateID, ok := configData["update_id"].(string); ok {
-            currentUpdateID = updateID
-            log.Printf("Extracted update_id: %s", currentUpdateID)
-        }
     }
     
     // Update device manager with the new configuration
@@ -421,34 +431,16 @@ func sendConfigAcknowledgment(status string) {
     
     topic := fmt.Sprintf("gateway/%s/config/delivered", gatewayID)
 
-    // Ensure we have an update_id
+    // Ensure we have the original update_id
     updateID := currentUpdateID
     if updateID == "" {
-        // Try to extract update_id from the stored config
-        configMutex.RLock()
-        config := currentConfig
-        configMutex.RUnlock()
-        
-        var configData map[string]interface{}
-        if err := json.Unmarshal([]byte(config.YAML), &configData); err == nil {
-            if id, ok := configData["update_id"].(string); ok {
-                updateID = id
-                currentUpdateID = id
-                log.Printf("Found update_id in config: %s", updateID)
-            }
-        }
-        
-        // If still empty, generate a placeholder
-        if updateID == "" {
-            updateID = fmt.Sprintf("gateway-%s-%d", gatewayID, time.Now().Unix())
-            log.Printf("Using generated update_id: %s", updateID)
-        }
+        log.Printf("Warning: Missing update_id, config acknowledgment may not be tracked properly")
     }
     
     payload := map[string]interface{}{
         "status": status,
         "timestamp": time.Now().Format(time.RFC3339),
-        "update_id": currentUpdateID,
+        "update_id": updateID,
     }
     
     jsonData, err := json.Marshal(payload)
@@ -527,8 +519,8 @@ func (dm *DeviceManager) UpdateDeviceConfig(gatewayConfig map[string]interface{}
             
             updatedAny = true
         }
+        log.Printf("Device %s assigned parameter set: %s", id, device.DeviceConfig["active_parameter_set"])
     }
-    
     return updatedAny
 }
 
@@ -630,6 +622,9 @@ func (dm *DeviceManager) updateDevices(config map[string]interface{}) {
 func getDeviceConfig(deviceID string, deviceType string, config map[string]interface{}) map[string]interface{} {
     // Initialize result with entire config (we'll selectively copy what's needed)
     result := make(map[string]interface{})
+
+    // Initialize parameterSets as an empty map
+    parameterSets := make(map[string]interface{})
     
     // Copy global measurement settings
     if measurement, ok := config["measurement"].(map[string]interface{}); ok {
@@ -654,14 +649,29 @@ func getDeviceConfig(deviceID string, deviceType string, config map[string]inter
         // Get parameter set assignment for this device
         activeParameterSet := ""
         if mappings, ok := devicesConfig["parameter_set_mappings"].(map[string]interface{}); ok {
-            if setName, ok := mappings[deviceID].(string); ok {
-                activeParameterSet = setName
+            // Extract device number suffix (e.g., "-1" from "scale-gateway-20250413-182940-1")
+            numSuffix := "-" + strings.Split(deviceID, "-")[len(strings.Split(deviceID, "-"))-1]
+            
+            // Try to find a mapping with the same suffix
+            for mappedID, setName := range mappings {
+                if strings.HasSuffix(mappedID, numSuffix) {
+                    if setNameStr, ok := setName.(string); ok {
+                        activeParameterSet = setNameStr
+                        log.Printf("Device %s matched pattern with suffix %s, assigned parameter set: %s", 
+                                deviceID, numSuffix, activeParameterSet)
+                        break
+                    }
+                }
             }
         }
         
-        // If no explicit mapping, determine based on device ID
-        if activeParameterSet == "" {
-            activeParameterSet = determineParameterSet(deviceID)
+        // If no pattern match found, use the first parameter set
+        if activeParameterSet == "" && len(parameterSets) > 0 {
+            for name := range parameterSets {
+                activeParameterSet = name
+                log.Printf("Device %s using default parameter set: %s", deviceID, activeParameterSet)
+                break
+            }
         }
         
         // Store active parameter set
@@ -680,24 +690,34 @@ func getDeviceConfig(deviceID string, deviceType string, config map[string]inter
 }
 
 // determineParameterSet decides which parameter set to use based on device ID
-func determineParameterSet(deviceID string) string {
-    // Simple logic: devices with odd numbers use waste, even use recyclables
+// determineParameterSet decides which parameter set to use based on device ID
+func determineParameterSet(deviceID string, parameterSets map[string]interface{}) string {
+    // Get all available parameter set names
+    availableSets := make([]string, 0, len(parameterSets))
+    for name := range parameterSets {
+        availableSets = append(availableSets, name)
+    }
+    
+    if len(availableSets) == 0 {
+        return "" // No parameter sets available
+    }
+    
+    // Extract numeric part from device ID for deterministic assignment
     numPart := ""
     parts := strings.Split(deviceID, "-")
     if len(parts) > 0 {
         numPart = parts[len(parts)-1]
     }
     
-    if num, err := strconv.Atoi(numPart); err == nil {
-        if num % 2 == 0 {
-            return "recyclables"
-        } else {
-            return "waste"
-        }
+    // Use numeric part to deterministically select a parameter set
+    if num, err := strconv.Atoi(numPart); err == nil && len(availableSets) > 0 {
+        // Use modulo to pick a parameter set based on device number
+        setIndex := num % len(availableSets)
+        return availableSets[setIndex]
     }
     
-    // Default to recyclables
-    return "recyclables"
+    // Default to first parameter set if we couldn't parse the number
+    return availableSets[0]
 }
 
 // applyDeviceOverrides applies device-specific overrides to the configuration
@@ -902,6 +922,8 @@ func (device *ConfiguredEndDevice) generateMeasurement() map[string]interface{} 
         paramValue := generateParameterValue(paramNameStr, paramDef, device.ID)
         payload[paramNameStr] = paramValue
     }
+
+    log.Printf("Generated measurement with parameter set: %s", payload["parameter_set"])
     
     // Create and return measurement event
     return createMeasurementEvent(device, timestamp, payload)
@@ -1039,25 +1061,38 @@ func (dm *DeviceManager) publishMeasurement(device *ConfiguredEndDevice, measure
             weight, _ := payload["weight_kg"].(float64)
             parameterSet, _ := payload["parameter_set"].(string)
             
-            // Log appropriate parameter details based on parameter set
-            if parameterSet == "recyclables" {
-                material, _ := payload["material_category"].(string)
-                vendor, _ := payload["vendor"].(string)
-                log.Printf("Published measurement from device %s: %.2f kg of %s from %s", 
-                    device.ID, weight, material, vendor)
-            } else if parameterSet == "waste" {
-                batchNumber, _ := payload["batch_number"].(string)
-                category, _ := payload["waste_category"].(string)
-                log.Printf("Published measurement from device %s: %.2f kg of %s (batch: %s)", 
-                    device.ID, weight, category, batchNumber)
-            } else if parameterSet == "airline" {
-                flightNumber, _ := payload["flight_number"].(string)
-                airline, _ := payload["airline_name"].(string)
-                log.Printf("Published measurement from device %s: %.2f kg luggage from %s (flight: %s)", 
-                    device.ID, weight, airline, flightNumber)
-            } else {
-                log.Printf("Published measurement from device %s: %.2f kg", device.ID, weight)
+            // Build log message with parameters
+            logMsg := fmt.Sprintf("Published measurement from device %s: %.2f kg (parameter set: %s", 
+                device.ID, weight, parameterSet)
+            
+            // Add actual parameter values
+            paramValues := []string{}
+            
+            // Get required parameters from the device's configuration
+            if paramDefs, ok := device.DeviceConfig["parameter_sets"].(map[string]interface{}); ok {
+                if activeSet, ok := paramDefs[parameterSet].(map[string]interface{}); ok {
+                    if required, ok := activeSet["required_parameters"].([]interface{}); ok {
+                        for _, param := range required {
+                            paramName, ok := param.(string)
+                            if !ok {
+                                continue
+                            }
+                            
+                            if value, exists := payload[paramName]; exists {
+                                paramValues = append(paramValues, fmt.Sprintf("%s: %v", paramName, value))
+                            }
+                        }
+                    }
+                }
             }
+            
+            // Add parameters to log message
+            if len(paramValues) > 0 {
+                logMsg += ", " + strings.Join(paramValues, ", ")
+            }
+            
+            logMsg += ")"
+            log.Printf(logMsg)
         }
     }
 }

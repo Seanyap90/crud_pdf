@@ -538,88 +538,6 @@ def get_measurements(
     finally:
         conn.close()
 
-def extract_measurement_field(
-    field_name: str,
-    device_id: Optional[str] = None,
-    gateway_id: Optional[str] = None,
-    measurement_type: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    db_path: str = "recycling.db"
-) -> List[Dict[str, Any]]:
-    """Extract and analyze a specific field from measurement payloads using JSON functions."""
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # Use SQLite JSON function to extract the field from the payload
-        # The approach differs based on where the field is in the payload structure
-        
-        # First try with direct field extraction
-        query = f'''
-            SELECT 
-                device_id, 
-                gateway_id,
-                measurement_type,
-                timestamp,
-                json_extract(payload, '$.{field_name}') as field_value
-            FROM measurements 
-            WHERE json_extract(payload, '$.{field_name}') IS NOT NULL
-        '''
-        
-        # Try with nested payload extraction if field not found directly
-        fallback_query = f'''
-            SELECT 
-                device_id, 
-                gateway_id,
-                measurement_type,
-                timestamp,
-                json_extract(payload, '$.payload.{field_name}') as field_value
-            FROM measurements 
-            WHERE json_extract(payload, '$.payload.{field_name}') IS NOT NULL
-        '''
-        
-        params = []
-        
-        if device_id:
-            query += ' AND device_id = ?'
-            fallback_query += ' AND device_id = ?'
-            params.append(device_id)
-            
-        if gateway_id:
-            query += ' AND gateway_id = ?'
-            fallback_query += ' AND gateway_id = ?'
-            params.append(gateway_id)
-            
-        if measurement_type:
-            query += ' AND measurement_type = ?'
-            fallback_query += ' AND measurement_type = ?'
-            params.append(measurement_type)
-            
-        if start_date:
-            query += ' AND timestamp >= ?'
-            fallback_query += ' AND timestamp >= ?'
-            params.append(start_date)
-            
-        if end_date:
-            query += ' AND timestamp <= ?'
-            fallback_query += ' AND timestamp <= ?'
-            params.append(end_date)
-            
-        # Try direct extraction first
-        cursor.execute(query, params)
-        results = cursor.fetchall()
-        
-        # If no results, try nested extraction
-        if not results:
-            cursor.execute(fallback_query, params)
-            results = cursor.fetchall()
-        
-        return [dict(row) for row in results]
-    finally:
-        conn.close()
-
 def get_measurement_summary(
     field_name: str,
     gateway_id: Optional[str] = None,
@@ -740,5 +658,39 @@ def get_measurement_summary(
         cursor.execute(query, params)
         summary = [dict(row) for row in cursor.fetchall()]
         return summary
+    finally:
+        conn.close()
+
+def update_device_parameter_set(
+    device_id: str,
+    parameter_set: str,
+    parameters: Dict[str, Any],
+    db_path: str = "recycling.db"
+) -> bool:
+    """Update a device's parameter set assignment and parameters."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Get current config
+        cursor.execute('SELECT device_config FROM end_devices WHERE device_id = ?', (device_id,))
+        result = cursor.fetchone()
+        if not result:
+            return False
+            
+        config = json.loads(result[0]) if result[0] else {}
+        
+        # Update parameter set
+        config['active_parameter_set'] = parameter_set
+        config['parameters'] = parameters
+        
+        # Store updated config
+        cursor.execute(
+            'UPDATE end_devices SET device_config = ?, last_config_fetch = ? WHERE device_id = ?',
+            (json.dumps(config), datetime.now().isoformat(), device_id)
+        )
+        
+        conn.commit()
+        return True
     finally:
         conn.close()
