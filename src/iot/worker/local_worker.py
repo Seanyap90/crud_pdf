@@ -26,6 +26,7 @@ class LocalWorker(BaseWorker):
         """
         self.db_path = db_path or settings.DB_PATH
         self.running = False
+        self.loop = None
         
         # Initialize Docker client for managing gateway containers
         try:
@@ -74,6 +75,7 @@ class LocalWorker(BaseWorker):
     async def start(self) -> None:
         """Start the worker"""
         self.running = True
+        self.loop = asyncio.get_running_loop()
         logger.debug("Worker started")
         
         # Start heartbeat checker task
@@ -735,7 +737,7 @@ class LocalWorker(BaseWorker):
         """Handle config delivered messages from MQTT
         
         This is called when a message is received on the config/delivered topic.
-        It asynchronously processes the message to update the config state machine.
+        It schedules the asynchronous processing in the main event loop.
         """
         try:
             update_id = payload.get("update_id")
@@ -743,15 +745,20 @@ class LocalWorker(BaseWorker):
                 logger.warning(f"Received config delivered message without update_id: {payload}")
                 return
                 
-            # Process the message asynchronously
-            asyncio.create_task(self.process_config_mqtt_event({
+            message = {
                 "type": "mqtt_config_event",
                 "topic": topic,
                 "payload": payload,
                 "update_id": update_id,
                 "event_type": "delivered"
-            }))
+            }
             
+            # Schedule the coroutine in the main event loop
+            if self.loop is not None:
+                asyncio.run_coroutine_threadsafe(self._handle_config_mqtt_event(message), self.loop)
+            else:
+                logger.error("Cannot schedule task: event loop not initialized")
+                
         except Exception as e:
             logger.error(f"Error handling config delivered message: {str(e)}")
     
@@ -1090,7 +1097,10 @@ class LocalWorker(BaseWorker):
         
         elif event_type == "delivered" or "config/delivered" in topic:
             # Gateway acknowledged delivery
-            if state_machine.current_state == ConfigUpdateState.WAITING_FOR_ACK:
+            if state_machine.current_state in [ConfigUpdateState.WAITING_FOR_ACK, 
+                                      ConfigUpdateState.WAITING_FOR_REQUEST,
+                                      ConfigUpdateState.NOTIFYING_GATEWAY,
+                                      ConfigUpdateState.CONFIGURATION_STORED]:
                 # Create and append CONFIG_DELIVERED event
                 event_data = {
                     "update_id": update_id,

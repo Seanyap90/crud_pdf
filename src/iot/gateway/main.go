@@ -1445,6 +1445,14 @@ func mainEventLoop() {
                 log.Printf("Processing configuration update")
                 
                 // Try to parse as JSON first
+                var originalData map[string]interface{}
+                if err := json.Unmarshal(msg.Payload(), &originalData); err == nil {
+                    if updateID, ok := originalData["update_id"].(string); ok && updateID != "" {
+                        currentUpdateID = updateID
+                        log.Printf("Captured update_id from message: %s", updateID)
+                    }
+                }
+
                 var configData map[string]interface{}
                 if err := json.Unmarshal(msg.Payload(), &configData); err == nil {
                     // Check if there's a yaml_config field in the JSON
