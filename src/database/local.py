@@ -2,6 +2,9 @@ import sqlite3
 import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
+import logging
+
+logger = logging.getLogger(__name__)
 
 def init_db(db_path: str = "recycling.db") -> None:
     """Initialize database with all required tables."""
@@ -692,5 +695,185 @@ def update_device_parameter_set(
         
         conn.commit()
         return True
+    finally:
+        conn.close()
+
+def initialize_config_tables(db_path: str = "recycling.db") -> None:
+    """Initialize configuration-specific tables in the database."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Check if config_updates table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='config_updates'")
+        table_exists = cursor.fetchone() is not None
+        
+        if not table_exists:
+            # Create config_updates table with streamlined schema
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS config_updates (
+                    update_id TEXT PRIMARY KEY,
+                    gateway_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    version TEXT,
+                    config_hash TEXT,  
+                    config_version TEXT,  
+                    created_at TEXT,
+                    published_at TEXT,
+                    requested_at TEXT,
+                    sent_at TEXT,
+                    delivered_at TEXT,
+                    completed_at TEXT,
+                    failed_at TEXT,
+                    last_updated TEXT,
+                    delivery_status TEXT,
+                    error TEXT
+                )
+            ''')
+            
+            conn.commit()
+            logger.info("Configuration tables initialized")
+        
+    except Exception as e:
+        logger.error(f"Error initializing configuration tables: {str(e)}")
+        raise
+    finally:
+        conn.close()
+
+def update_config_update(
+    update_id: str,
+    gateway_id: str,
+    state: str,
+    version: Optional[str] = None,
+    config_hash: Optional[str] = None,
+    config_version: Optional[str] = None,
+    created_at: Optional[str] = None,
+    published_at: Optional[str] = None,
+    requested_at: Optional[str] = None,
+    sent_at: Optional[str] = None,
+    delivered_at: Optional[str] = None,
+    completed_at: Optional[str] = None,
+    failed_at: Optional[str] = None,
+    last_updated: Optional[str] = None,
+    delivery_status: Optional[str] = None,
+    error: Optional[str] = None,
+    db_path: str = "recycling.db"
+) -> None:
+    """Update a configuration update entry."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO config_updates
+            (update_id, gateway_id, state, version, config_hash, config_version,
+            created_at, published_at, requested_at, sent_at, delivered_at,
+            completed_at, failed_at, last_updated, delivery_status, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            update_id, gateway_id, state, version, config_hash, config_version,
+            created_at, published_at, requested_at, sent_at, delivered_at,
+            completed_at, failed_at, last_updated, delivery_status, error
+        ))
+        
+        conn.commit()
+        logger.info(f"Updated config update {update_id} with state={state}")
+    except Exception as e:
+        logger.error(f"Error updating config update: {str(e)}")
+        raise
+    finally:
+        conn.close()
+
+def get_config_update(
+    update_id: str,
+    db_path: str = "recycling.db"
+) -> Optional[Dict[str, Any]]:
+    """Get a configuration update by ID."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM config_updates
+            WHERE update_id = ?
+        ''', (update_id,))
+        
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    except Exception as e:
+        logger.error(f"Error getting config update: {str(e)}")
+        return None
+    finally:
+        conn.close()
+
+def list_config_updates(
+    gateway_id: Optional[str] = None,
+    include_completed: bool = True,
+    db_path: str = "recycling.db"
+) -> List[Dict[str, Any]]:
+    """List configuration updates."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Build query based on filters
+        query = "SELECT * FROM config_updates"
+        params = []
+        
+        where_clauses = []
+        if gateway_id:
+            where_clauses.append("gateway_id = ?")
+            params.append(gateway_id)
+        
+        if not include_completed:
+            where_clauses.append("state NOT IN (?, ?)")
+            params.extend(["completed", "failed"])
+        
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+        
+        query += " ORDER BY last_updated DESC"
+        
+        cursor.execute(query, params)
+        
+        updates = []
+        for row in cursor.fetchall():
+            updates.append(dict(row))
+        
+        return updates
+    except Exception as e:
+        logger.error(f"Error listing config updates: {str(e)}")
+        return []
+    finally:
+        conn.close()
+
+def get_latest_config_for_gateway(
+    gateway_id: str,
+    db_path: str = "recycling.db"
+) -> Optional[Dict[str, Any]]:
+    """Get the latest completed configuration update for a gateway."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM config_updates
+            WHERE gateway_id = ? AND state = 'completed'
+            ORDER BY completed_at DESC
+            LIMIT 1
+        ''', (gateway_id,))
+        
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    except Exception as e:
+        logger.error(f"Error getting latest config: {str(e)}")
+        return None
     finally:
         conn.close()

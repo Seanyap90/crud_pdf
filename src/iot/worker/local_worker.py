@@ -837,7 +837,7 @@ class LocalWorker(BaseWorker):
         """Handle configuration update task"""
         update_id = task_data.get("update_id")
         gateway_id = task_data.get("gateway_id")
-        yaml_config = task_data.get("yaml_config")
+        yaml_config = task_data.get("yaml_config")  # Still receive this but don't store
         config_hash = task_data.get("config_hash")
         
         if not update_id or not gateway_id or not yaml_config:
@@ -863,10 +863,10 @@ class LocalWorker(BaseWorker):
             logger.info(f"Configuration update {update_id} already exists, returning existing state")
             return self.get_config_update(update_id)
         
-        # Store the configuration in the configs table
+        # Just register the config hash, don't store the YAML content
         ConfigUpdateStateMachine.store_config(
             config_hash=config_hash,
-            yaml_config=yaml_config,
+            yaml_config=yaml_config,  # Keeping for backward compatibility
             created_at=task_data.get("timestamp"),
             db_path=self.db_path
         )

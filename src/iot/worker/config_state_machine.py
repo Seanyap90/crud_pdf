@@ -4,7 +4,7 @@ import logging
 from enum import Enum
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from database import event_store
+from database import event_store, local
 
 logger = logging.getLogger(__name__)
 
@@ -238,53 +238,7 @@ class ConfigUpdateStateMachine:
     @staticmethod
     def initialize_config_tables(db_path: str = "recycling.db") -> None:
         """Initialize configuration-specific tables in the database."""
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Check if config_updates table exists
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='config_updates'")
-            table_exists = cursor.fetchone() is not None
-            
-            if not table_exists:
-                # Create config_updates table with schema
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS config_updates (
-                        update_id TEXT PRIMARY KEY,
-                        gateway_id TEXT NOT NULL,
-                        state TEXT NOT NULL,
-                        version TEXT,
-                        created_at TEXT,
-                        published_at TEXT,
-                        requested_at TEXT,
-                        sent_at TEXT,
-                        delivered_at TEXT,
-                        completed_at TEXT,
-                        failed_at TEXT,
-                        last_updated TEXT,
-                        delivery_status TEXT,
-                        error TEXT,
-                        config_hash TEXT
-                    )
-                ''')
-                
-                # Create configs table to store actual configuration YAML
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS configs (
-                        config_hash TEXT PRIMARY KEY,
-                        yaml_config TEXT NOT NULL,
-                        created_at TEXT NOT NULL
-                    )
-                ''')
-                
-                conn.commit()
-                logger.info("Configuration tables initialized")
-            
-        except Exception as e:
-            logger.error(f"Error initializing configuration tables: {str(e)}")
-            raise
-        finally:
-            conn.close()
+        local.initialize_config_tables(db_path)
     
     @classmethod
     def reconstruct_from_events(cls, update_id: str, db_path: str = "recycling.db") -> "ConfigUpdateStateMachine":
@@ -332,84 +286,81 @@ class ConfigUpdateStateMachine:
         db_path: str = "recycling.db"
     ) -> None:
         """Update the configuration update read model."""
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            logger.debug(f"Updating read model for config update {update_id} with state={state}")
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO config_updates
-                (update_id, gateway_id, state, version, created_at, published_at, 
-                requested_at, sent_at, delivered_at, completed_at, failed_at, 
-                last_updated, delivery_status, error, config_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                update_id, gateway_id, state, version, created_at, published_at,
-                requested_at, sent_at, delivered_at, completed_at, failed_at,
-                last_updated, delivery_status, error, config_hash
-            ))
-            
-            conn.commit()
-            logger.info(f"Read model updated for config update {update_id} with state={state}")
-        except Exception as e:
-            logger.error(f"Error updating read model: {str(e)}")
-            raise
-        finally:
-            conn.close()
+        # Generate config version based on timestamp if not available
+        config_version = version or f"v{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        local.update_config_update(
+            update_id=update_id,
+            gateway_id=gateway_id,
+            state=state,
+            version=version,
+            config_hash=config_hash,
+            config_version=config_version,
+            created_at=created_at,
+            published_at=published_at,
+            requested_at=requested_at,
+            sent_at=sent_at,
+            delivered_at=delivered_at,
+            completed_at=completed_at,
+            failed_at=failed_at,
+            last_updated=last_updated,
+            delivery_status=delivery_status,
+            error=error,
+            db_path=db_path
+        )
     
     @staticmethod
     def store_config(
         config_hash: str,
-        yaml_config: str,
+        yaml_config: str,  # Parameter kept for backward compatibility
         created_at: Optional[str] = None,
         db_path: str = "recycling.db"
     ) -> None:
-        """Store configuration YAML in the configs table."""
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Use current time if not provided
-            if created_at is None:
-                created_at = datetime.now().isoformat()
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO configs
-                (config_hash, yaml_config, created_at)
-                VALUES (?, ?, ?)
-            ''', (config_hash, yaml_config, created_at))
-            
-            conn.commit()
-            logger.info(f"Stored configuration with hash {config_hash}")
-        except Exception as e:
-            logger.error(f"Error storing configuration: {str(e)}")
-            raise
-        finally:
-            conn.close()
+        """Store configuration hash information.
+        
+        Note: The actual YAML content is not stored anymore,
+        only the hash for verification.
+        """
+        # We just need to log this - we're not storing full YAML anymore
+        logger.info(f"Configuration hash {config_hash} registered (YAML content not stored)")
     
     @staticmethod
     def get_config(
         config_hash: str,
         db_path: str = "recycling.db"
-    ) -> Optional[str]:
-        """Get configuration YAML from the configs table."""
+    ) -> Optional[Dict[str, Any]]:
+        """Get configuration metadata from the config_updates table.
+        
+        Instead of returning full YAML content, this returns metadata about
+        the configuration update including version, timestamps, and status.
+        
+        Args:
+            config_hash: Hash identifier of the configuration
+            db_path: Path to the database
+            
+        Returns:
+            Configuration metadata or None if not found
+        """
         try:
             conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT yaml_config 
-                FROM configs
+                SELECT update_id, gateway_id, state, version, config_version, 
+                    created_at, last_updated, config_hash
+                FROM config_updates
                 WHERE config_hash = ?
+                ORDER BY created_at DESC
+                LIMIT 1
             ''', (config_hash,))
             
-            result = cursor.fetchone()
-            if result:
-                return result[0]
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
             return None
         except Exception as e:
-            logger.error(f"Error getting configuration: {str(e)}")
+            logger.error(f"Error getting configuration metadata: {str(e)}")
             return None
         finally:
             conn.close()
@@ -419,37 +370,8 @@ class ConfigUpdateStateMachine:
         update_id: str,
         db_path: str = "recycling.db"
     ) -> Optional[Dict[str, Any]]:
-        """Get the current status of a configuration update from the read model."""
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT * FROM config_updates
-                WHERE update_id = ?
-            ''', (update_id,))
-            
-            row = cursor.fetchone()
-            if row:
-                update_dict = dict(row)
-                
-                # If we have a config_hash, get the actual config
-                if update_dict.get('config_hash'):
-                    yaml_config = ConfigUpdateStateMachine.get_config(
-                        update_dict['config_hash'],
-                        db_path
-                    )
-                    if yaml_config:
-                        update_dict['yaml_config'] = yaml_config
-                
-                return update_dict
-            return None
-        except Exception as e:
-            logger.error(f"Error getting config update status: {str(e)}")
-            return None
-        finally:
-            conn.close()
+        """Get the current status of a configuration update."""
+        return local.get_config_update(update_id, db_path)
     
     @staticmethod
     def list_config_updates(
@@ -457,46 +379,8 @@ class ConfigUpdateStateMachine:
         include_completed: bool = True,
         db_path: str = "recycling.db"
     ) -> List[Dict[str, Any]]:
-        """List all configuration updates from the read model."""
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            # Build query based on filters
-            query = "SELECT * FROM config_updates"
-            params = []
-            
-            where_clauses = []
-            if gateway_id:
-                where_clauses.append("gateway_id = ?")
-                params.append(gateway_id)
-            
-            if not include_completed:
-                where_clauses.append("state NOT IN (?, ?)")
-                params.extend([ConfigUpdateState.UPDATE_COMPLETED.value, ConfigUpdateState.UPDATE_FAILED.value])
-            
-            if where_clauses:
-                query += " WHERE " + " AND ".join(where_clauses)
-            
-            query += " ORDER BY last_updated DESC"
-            
-            cursor.execute(query, params)
-            
-            updates = []
-            for row in cursor.fetchall():
-                update_dict = dict(row)
-                
-                # We don't include the YAML config in listings to save bandwidth
-                # Instead, clients can fetch it separately if needed
-                updates.append(update_dict)
-            
-            return updates
-        except Exception as e:
-            logger.error(f"Error listing config updates: {str(e)}")
-            return []
-        finally:
-            conn.close()
+        """List all configuration updates."""
+        return local.list_config_updates(gateway_id, include_completed, db_path)
     
     @staticmethod
     def get_latest_config_for_gateway(
@@ -504,35 +388,4 @@ class ConfigUpdateStateMachine:
         db_path: str = "recycling.db"
     ) -> Optional[Dict[str, Any]]:
         """Get the latest completed configuration update for a gateway."""
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT * FROM config_updates
-                WHERE gateway_id = ? AND state = ?
-                ORDER BY completed_at DESC
-                LIMIT 1
-            ''', (gateway_id, ConfigUpdateState.UPDATE_COMPLETED.value))
-            
-            row = cursor.fetchone()
-            if row:
-                update_dict = dict(row)
-                
-                # Get the actual config
-                if update_dict.get('config_hash'):
-                    yaml_config = ConfigUpdateStateMachine.get_config(
-                        update_dict['config_hash'],
-                        db_path
-                    )
-                    if yaml_config:
-                        update_dict['yaml_config'] = yaml_config
-                
-                return update_dict
-            return None
-        except Exception as e:
-            logger.error(f"Error getting latest config: {str(e)}")
-            return None
-        finally:
-            conn.close()
+        return local.get_latest_config_for_gateway(gateway_id, db_path)
