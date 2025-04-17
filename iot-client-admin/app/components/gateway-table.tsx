@@ -22,6 +22,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../lib/api_client";
 import GatewayDetails from "./gateway-details";
+import ConfigUploadButton from './config-upload-button';
+import ConfigStatus from './config-status-component';
+import { Settings } from 'lucide-react';
 
 interface GatewayTableProps {
   gateways: Gateway[];
@@ -346,20 +349,33 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
               </div>
             </div>
             
-            {/* End Devices Firmware Section */}
-            <div className="border rounded-lg p-4">
+            {/* Device Configuration Section */}
+            <div className="border rounded-lg p-4 mt-4">
               <h3 className="font-medium mb-3 flex items-center">
-                <HardDrive size={16} className="mr-2 text-blue-500" />
-                End Devices Firmware
+                <Settings size={16} className="mr-2 text-blue-500" />
+                End Device Configuration
               </h3>
               
-              <div className="bg-gray-50 p-4 rounded-md text-center text-sm text-gray-500">
-                <p>No end devices connected to this gateway.</p>
-                <p className="text-xs mt-1">End device firmware information will appear here when available.</p>
-              </div>
+              {selectedFirmwareGateway && (
+                <div className="space-y-4">
+                  <div className="text-sm">
+                    <span className="block mb-2">Upload configuration for devices connected to this gateway</span>
+                    <ConfigUploadButton 
+                      gateway={selectedFirmwareGateway} 
+                      onSuccess={() => queryClient.invalidateQueries({ queryKey: ["gateways"] })}
+                    />
+                  </div>
+                  
+                  {selectedFirmwareGateway.id && (
+                    <div className="mt-2">
+                      <ConfigStatus gatewayId={selectedFirmwareGateway.id} />
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
-
+          
           <DialogFooter className="mt-6">
             <button 
               onClick={() => setFirmwareDialogOpen(false)}

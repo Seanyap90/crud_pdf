@@ -861,6 +861,7 @@ def get_latest_config_for_gateway(
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
+        # First try to get the completed config
         cursor.execute('''
             SELECT * FROM config_updates
             WHERE gateway_id = ? AND state = 'completed'
@@ -871,6 +872,19 @@ def get_latest_config_for_gateway(
         row = cursor.fetchone()
         if row:
             return dict(row)
+            
+        # If no completed config, get the most recent one in any state
+        cursor.execute('''
+            SELECT * FROM config_updates
+            WHERE gateway_id = ?
+            ORDER BY last_updated DESC
+            LIMIT 1
+        ''', (gateway_id,))
+        
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+            
         return None
     except Exception as e:
         logger.error(f"Error getting latest config: {str(e)}")

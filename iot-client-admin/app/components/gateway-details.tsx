@@ -7,7 +7,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "./ui/dialog";
-import { Info, Server, Clock, MapPin, Activity, Cpu, Cloud, Shield, HardDrive } from "lucide-react";
+import { Info, Server, Clock, MapPin, Activity, Cpu, Cloud, Shield, HardDrive, Settings } from "lucide-react";
 import StatusBadge from "./status-badge";
 import { Gateway } from "../../shared/schema";
 

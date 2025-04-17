@@ -293,6 +293,57 @@ export const api = {
         throw error;
       }
     }
+  },
+  
+  config: {
+    // Upload a configuration file
+    uploadFile: async (gatewayId: string, file: File): Promise<any> => {
+      try {
+        const formData = new FormData();
+        formData.append('gateway_id', gatewayId);
+        formData.append('file', file);
+        
+        const url = `${API_BASE_URL}/api/config`;
+        const response = await fetch(url, {
+          method: 'POST',
+          body: formData,
+          mode: 'cors',
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => 'No error details');
+          throw new Error(`Configuration file upload failed: ${response.status} - ${errorText}`);
+        }
+        
+        return await response.json();
+      } catch (error) {
+        console.error('Error uploading configuration file:', error);
+        throw error;
+      }
+    },
+    
+    // Get configuration update status
+    getStatus: async (updateId: string): Promise<any> => {
+      try {
+        const response = await apiClient.get(`/api/config/${updateId}`);
+        return response;
+      } catch (error) {
+        console.error(`Error fetching config update ${updateId}:`, error);
+        throw error;
+      }
+    },
+    
+    // Get the latest configuration for a gateway
+    getLatest: async (gatewayId: string): Promise<any> => {
+      try {
+        const url = `/api/config/gateway/${gatewayId}/latest`;
+        const response = await apiClient.get(url);
+        return response;
+      } catch (error) {
+        console.error(`Error fetching latest config for gateway ${gatewayId}:`, error);
+        throw error;
+      }
+    }
   }
 };
 

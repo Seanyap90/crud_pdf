@@ -78,7 +78,7 @@ export default function GatewayForm({ onSuccess }: GatewayFormProps) {
       <DialogHeader>
         <DialogTitle className="text-xl font-bold text-gray-900">Add New Gateway</DialogTitle>
         <DialogDescription className="text-gray-500">
-          Enter the details for the new gateway device.
+          Enter the details for the new gateway.
         </DialogDescription>
       </DialogHeader>
 

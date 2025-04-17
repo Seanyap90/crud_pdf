@@ -634,6 +634,46 @@ class LocalWorker(BaseWorker):
             # Update read model
             self.update_read_model(gateway_id)
         
+        elif "measurement" in event_type or (isinstance(payload, dict) and payload.get("type") == "weight_measurement"):
+            # Try to extract device_id from payload
+            device_id = None
+            if isinstance(payload, dict):
+                device_id = payload.get("device_id")
+            
+            # If we couldn't get device_id from payload, try other approaches
+            if not device_id and isinstance(payload, dict) and "measurement_id" in payload:
+                # Often measurement_id has format "{device_id}-{timestamp}"
+                parts = payload.get("measurement_id", "").split("-")
+                if len(parts) > 0:
+                    device_id = parts[0]
+            
+            if device_id:
+                # Register device if it doesn't exist
+                from database import local
+                measurement_type = payload.get("type", "weight_measurement")
+                
+                logger.info(f"Received measurement from device {device_id} via gateway {gateway_id}")
+                
+                local.register_end_device(
+                    device_id=device_id,
+                    gateway_id=gateway_id,
+                    device_type=payload.get("type", "scale"),
+                    status="online",
+                    db_path=self.db_path
+                )
+                
+                # Store the measurement
+                local.store_measurement(
+                    device_id=device_id,
+                    gateway_id=gateway_id,
+                    measurement_type=measurement_type,
+                    payload=payload,
+                    timestamp=task_data.get("timestamp"),
+                    db_path=self.db_path
+                )
+                
+                logger.info(f"Stored measurement from device {device_id}")
+        
         # Handle heartbeat events
         elif event_type == "heartbeat":
             # Already covered in the status/heartbeat handling above

@@ -210,6 +210,9 @@ async def process_mqtt_event(
             "payload": request.payload,
             "timestamp": request.timestamp
         }
+
+        if hasattr(request, 'topic') and request.topic:
+            task_data["topic"] = request.topic
         
         # For consolidated gateway updates, add update_type
         if request.event_type in ["heartbeat", "status"]:
