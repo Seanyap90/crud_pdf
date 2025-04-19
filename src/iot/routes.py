@@ -21,6 +21,7 @@ from .models import (
 )
 from .worker.base import BaseWorker
 from .worker.local_worker import LocalWorker
+from database import local
 
 logger = logging.getLogger(__name__)
 
@@ -655,4 +656,33 @@ async def process_config_mqtt_event(
         raise
     except Exception as e:
         logger.error(f"Error processing config MQTT event: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Add this to routes.py
+
+@router.get("/api/devices", response_model=List[Dict[str, Any]])
+async def list_devices(
+    gateway_id: Optional[str] = None,
+    include_offline: bool = True,
+    worker: BaseWorker = Depends(get_worker)
+):
+    """List devices connected to a gateway
+    
+    Returns a list of all end devices registered with the specified gateway.
+    
+    Args:
+        gateway_id: Optional gateway ID to filter by
+        include_offline: Whether to include offline devices in the response
+    """
+    try:
+        # Use the function from local.py
+        devices = local.list_end_devices(
+            gateway_id=gateway_id,
+            include_offline=include_offline,
+            db_path=worker.db_path
+        )
+        
+        return devices
+    except Exception as e:
+        logger.error(f"Error listing devices: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

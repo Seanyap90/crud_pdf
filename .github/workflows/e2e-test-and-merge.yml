@@ -1,15 +1,15 @@
 name: E2E Test and Merge
 
-on:
-  pull_request:
-    branches:
-      - main
-  workflow_dispatch:
-    inputs:
-      merge_if_successful:
-        description: 'Merge to main if tests pass'
-        type: boolean
-        default: true
+# on:
+#   pull_request:
+#     branches:
+#       - main
+#   workflow_dispatch:
+#     inputs:
+#       merge_if_successful:
+#         description: 'Merge to main if tests pass'
+#         type: boolean
+#         default: true
 
 permissions:
   contents: write

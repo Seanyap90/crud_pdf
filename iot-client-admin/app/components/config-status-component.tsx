@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Check, X, Clock, HelpCircle, AlertTriangle, Upload } from 'lucide-react';
+import { Check, X, Clock, HelpCircle, AlertTriangle, Upload, FileText } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -62,9 +62,9 @@ function ConfigStatusBadge({ state }: ConfigStatusBadgeProps) {
       case 'failed':
         return 'Failed';
       case 'waiting':
-        return 'Waiting';
+        return 'Waiting for Request';
       case 'waiting_ack':
-        return 'Waiting';
+        return 'Waiting for Ack';
       case 'notifying':
         return 'Sending to Device';
       case 'stored':
@@ -89,32 +89,52 @@ interface ConfigStatusProps {
   updateId?: string;
 }
 
-export default function ConfigStatus({ gatewayId, updateId }: ConfigStatusProps) {
+export default function EnhancedConfigStatus({ gatewayId, updateId }: ConfigStatusProps) {
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
+  const [configVersion, setConfigVersion] = useState<string | null>(null);
+  const [deviceCount, setDeviceCount] = useState<number | null>(null);
   
   // Function to fetch config status
-  // Add this function to your api_client.ts
-  const fetchLatestConfig = async (gatewayId: string) => {
-    try {
-      const response = await fetch(`http://localhost:8000/api/config/gateway/${gatewayId}/latest`);
-      if (!response.ok) {
-        throw new Error('Failed to fetch configuration status');
-      }
-      return response.json();
-    } catch (error) {
-      console.error('Error fetching config status:', error);
-      throw error;
-    }
-  };
-  
-  // Query for latest config
   const { data, isLoading, isError } = useQuery({
     queryKey: ['config', gatewayId],
-    queryFn: () => fetchLatestConfig(gatewayId),
+    queryFn: async () => {
+      try {
+        const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        const response = await fetch(`${API_BASE_URL}/api/config/gateway/${gatewayId}/latest`);
+        if (!response.ok) {
+          throw new Error('Failed to fetch configuration status');
+        }
+        return response.json();
+      } catch (error) {
+        console.error('Error fetching config status:', error);
+        throw error;
+      }
+    },
     enabled: !!gatewayId,
     refetchInterval: 10000, // Refetch every 10 seconds
   });
   
+  // Extract version and device count from YAML
+  useEffect(() => {
+    if (data?.yaml_config) {
+      try {
+        // Extract version from YAML content
+        const versionMatch = data.yaml_config.match(/version:\s*['"]?([0-9.]+)['"]?/);
+        if (versionMatch && versionMatch[1]) {
+          setConfigVersion(versionMatch[1]);
+        }
+        
+        // Extract device count from YAML content
+        const countMatch = data.yaml_config.match(/devices:\s*\n\s*count:\s*([0-9]+)/);
+        if (countMatch && countMatch[1]) {
+          setDeviceCount(parseInt(countMatch[1], 10));
+        }
+      } catch (e) {
+        console.error("Error parsing YAML:", e);
+      }
+    }
+  }, [data]);
+
   if (isLoading) {
     return <span className="text-sm text-gray-500">Loading config status...</span>;
   }
@@ -139,6 +159,16 @@ export default function ConfigStatus({ gatewayId, updateId }: ConfigStatusProps)
         </button>
       </div>
       
+      {configVersion && (
+        <div className="flex items-center gap-1 text-xs text-gray-600">
+          <FileText size={12} />
+          <span>Version: {configVersion}</span>
+          {deviceCount !== null && (
+            <span className="ml-1">({deviceCount} {deviceCount === 1 ? 'device' : 'devices'})</span>
+          )}
+        </div>
+      )}
+      
       <Dialog open={isDetailsOpen} onOpenChange={setIsDetailsOpen}>
         <DialogContent className="sm:max-w-lg bg-white">
           <DialogHeader>
@@ -157,6 +187,20 @@ export default function ConfigStatus({ gatewayId, updateId }: ConfigStatusProps)
             <div className="grid grid-cols-2 gap-y-2 text-sm">
               <span className="text-gray-500">Update ID:</span>
               <span className="font-mono">{data.update_id}</span>
+              
+              {configVersion && (
+                <>
+                  <span className="text-gray-500">Configuration Version:</span>
+                  <span className="font-medium">{configVersion}</span>
+                </>
+              )}
+              
+              {deviceCount !== null && (
+                <>
+                  <span className="text-gray-500">Device Count:</span>
+                  <span>{deviceCount}</span>
+                </>
+              )}
               
               <span className="text-gray-500">Created At:</span>
               <span>{new Date(data.created_at).toLocaleString()}</span>

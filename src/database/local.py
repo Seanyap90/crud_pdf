@@ -891,3 +891,57 @@ def get_latest_config_for_gateway(
         return None
     finally:
         conn.close()
+
+def list_end_devices(
+    gateway_id: Optional[str] = None,
+    include_offline: bool = True, 
+    db_path: str = "recycling.db"
+) -> List[Dict[str, Any]]:
+    """List end devices with optional filtering by gateway ID.
+    
+    Args:
+        gateway_id: Optional gateway ID to filter by
+        include_offline: Whether to include offline devices
+        db_path: Path to the database
+        
+    Returns:
+        List of device dictionaries
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Build the query based on filters
+        query = "SELECT * FROM end_devices WHERE 1=1"
+        params = []
+        
+        if gateway_id:
+            query += " AND gateway_id = ?"
+            params.append(gateway_id)
+            
+        if not include_offline:
+            query += " AND status = 'online'"
+            
+        cursor.execute(query, params)
+        
+        devices = []
+        for row in cursor.fetchall():
+            device = dict(row)
+            
+            # Parse device_config JSON if present
+            if device.get('device_config'):
+                try:
+                    device['device_config'] = json.loads(device['device_config'])
+                except:
+                    # If parsing fails, leave as string
+                    pass
+                    
+            devices.append(device)
+            
+        return devices
+    except Exception as e:
+        logger.error(f"Error listing end devices: {str(e)}")
+        return []
+    finally:
+        conn.close()

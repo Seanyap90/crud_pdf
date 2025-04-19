@@ -1,3 +1,4 @@
+import React, { useState } from 'react';
 import {
   Accordion,
   AccordionContent,
@@ -7,7 +8,6 @@ import {
 import { Gateway } from "../../shared/schema";
 import StatusBadge from "./status-badge";
 import { Skeleton } from "./ui/skeleton";
-import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Dialog,
@@ -17,13 +17,14 @@ import {
   DialogDescription,
   DialogFooter,
 } from "./ui/dialog";
-import { Info, Server, Clock, MapPin, Activity, Trash, RefreshCw, Eye, HardDrive } from "lucide-react";
+import { Info, Server, Clock, MapPin, Activity, Trash, RefreshCw, Eye, HardDrive, Laptop } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../lib/api_client";
 import GatewayDetails from "./gateway-details";
 import ConfigUploadButton from './config-upload-button';
-import ConfigStatus from './config-status-component';
+import EnhancedConfigStatus from './config-status-component';
+import ConnectedDevices from './connected-devices-component';
 import { Settings } from 'lucide-react';
 
 interface GatewayTableProps {
@@ -189,6 +190,17 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
                             <div>
                               <p className="font-medium text-gray-900">Location Information</p>
                               <p className="text-gray-500 mt-1">{gateway.location}</p>
+                            </div>
+                          </div>
+                          
+                          {/* New End Devices Section */}
+                          <div className="flex items-start space-x-2">
+                            <Laptop className="h-4 w-4 text-gray-500 mt-0.5" />
+                            <div>
+                              <p className="font-medium text-gray-900">End Devices</p>
+                              <div className="mt-1">
+                                <ConnectedDevices gateway_id={gateway.id} />
+                              </div>
                             </div>
                           </div>
                           
@@ -368,7 +380,7 @@ export default function GatewayTable({ gateways, isLoading }: GatewayTableProps)
                   
                   {selectedFirmwareGateway.id && (
                     <div className="mt-2">
-                      <ConfigStatus gatewayId={selectedFirmwareGateway.id} />
+                      <EnhancedConfigStatus gatewayId={selectedFirmwareGateway.id} />
                     </div>
                   )}
                 </div>

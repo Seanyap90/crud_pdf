@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   DialogContent,
@@ -8,7 +8,7 @@ import {
   DialogFooter,
 } from "./ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { Upload, AlertCircle } from "lucide-react";
+import { Upload, AlertCircle, FileText, Tag, Laptop } from "lucide-react";
 import { api } from "../lib/api_client";
 import type { Gateway } from "../../shared/schema";
 
@@ -21,9 +21,44 @@ export default function DeviceConfigForm({ gateway, onSuccess }: DeviceConfigFor
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [fileContent, setFileContent] = useState<string | null>(null);
+  const [configVersion, setConfigVersion] = useState<string | null>(null);
+  const [deviceCount, setDeviceCount] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
   const queryClient = useQueryClient();
+
+  // Parse YAML file when selected
+  useEffect(() => {
+    if (selectedFile) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        setFileContent(content);
+        
+        try {
+          // Extract version
+          const versionMatch = content.match(/version:\s*['"]?([0-9.]+)['"]?/);
+          if (versionMatch && versionMatch[1]) {
+            setConfigVersion(versionMatch[1]);
+          } else {
+            setConfigVersion(null);
+          }
+          
+          // Extract device count
+          const countMatch = content.match(/devices:\s*\n\s*count:\s*([0-9]+)/);
+          if (countMatch && countMatch[1]) {
+            setDeviceCount(parseInt(countMatch[1], 10));
+          } else {
+            setDeviceCount(null);
+          }
+        } catch (err) {
+          console.error("Error parsing YAML:", err);
+        }
+      };
+      reader.readAsText(selectedFile);
+    }
+  }, [selectedFile]);
 
   // Add this function to api_client.ts if not already present
   const uploadConfig = async (gatewayId: string, file: File) => {
@@ -62,6 +97,8 @@ export default function DeviceConfigForm({ gateway, onSuccess }: DeviceConfigFor
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["gateways"] });
+      queryClient.invalidateQueries({ queryKey: ["config", gateway.id] });
+      
       toast({
         title: "Configuration Uploaded",
         description: `Update ID: ${data.update_id}`,
@@ -138,6 +175,30 @@ export default function DeviceConfigForm({ gateway, onSuccess }: DeviceConfigFor
               )}
             </label>
           </div>
+          
+          {/* Show extracted configuration details */}
+          {selectedFile && (
+            <div className="mt-3 bg-blue-50 p-3 rounded-md border border-blue-100">
+              <h4 className="text-sm font-medium flex items-center gap-1 text-blue-700">
+                <FileText size={16} />
+                Configuration Details
+              </h4>
+              <div className="mt-2 text-xs space-y-1">
+                <div className="flex items-center gap-1">
+                  <Tag size={12} className="text-blue-500" />
+                  <span className="text-gray-600">Version:</span>
+                  <span className="font-medium">{configVersion || 'Unknown'}</span>
+                </div>
+                {deviceCount !== null && (
+                  <div className="flex items-center gap-1">
+                    <Laptop size={12} className="text-blue-500" />
+                    <span className="text-gray-600">End Devices:</span>
+                    <span className="font-medium">{deviceCount}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           
           {error && (
             <div className="text-sm text-red-500 flex items-center gap-1">
