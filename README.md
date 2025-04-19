@@ -8,4 +8,5 @@
 
 ![Upload Status Review Feature](Review.png)
 
-![IoT Administrator Dashboard for managing gateways and End Devices](IoTAdminPreview.png)
+[IoT Administrator Dashboard for managing gateways and End Devices](https://github.com/user-attachments/assets/ee58c146-f114-4bdc-8d97-9df7eb4414dd)
+
