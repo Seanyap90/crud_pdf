@@ -121,10 +121,9 @@ class QueueFactory:
     """Factory to initialize the correct queue handler based on deployment mode"""
 
     queue_classes = {
-        "local-mock": LocalQueue,
-        "local": LocalQueue,
-        "hybrid": SQSQueue,
-        "cloud": SQSQueue,
+        "local-dev": LocalQueue,
+        "aws-mock": SQSQueue,
+        "aws-prod": SQSQueue,
     }
 
     @staticmethod

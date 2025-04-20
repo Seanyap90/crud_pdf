@@ -29,11 +29,11 @@ function run {
 }
 
 # start the FastAPI app, pointed at a mocked aws endpoint
-function local-mock {
+function local-dev {
     set +e
     
     # Set queue type first
-    export QUEUE_TYPE="local-mock"
+    export QUEUE_TYPE="local-dev"
     
     # Set model loading behavior
     export DISABLE_DUPLICATE_LOADING="true"
@@ -57,7 +57,7 @@ function local-mock {
     
     # Start worker in background with lazy model loading
     echo "Starting Local Worker (with lazy model loading)"
-    python src/files_api/cli.py worker --mode local-mock --no-preload-models &
+    python src/files_api/cli.py worker --mode local-dev --no-preload-models &
     
     # Wait a moment to ensure worker has started
     sleep 2
@@ -66,6 +66,71 @@ function local-mock {
     python -m uvicorn files_api.main:create_app --reload
     
     wait
+}
+
+function aws-mock {
+    set +e
+    
+    echo "Setting up full AWS mock infrastructure for testing..."
+    
+    # Run deploy.py to set up infrastructure
+    python -m files_api.aws.deploy --mode aws-mock --keep-running &
+    DEPLOY_PID=$!
+    
+    # Wait for deployment to complete
+    sleep 5
+    
+    # Load environment variables from .env.aws
+    if [ -f ".env.aws" ]; then
+        set -a
+        source .env.aws
+        set +a
+        echo "Loaded environment from .env.aws"
+    else
+        echo "Warning: .env.aws not found"
+    fi
+    
+    # Ensure QUEUE_TYPE is set to aws-mock
+    export QUEUE_TYPE="aws-mock"
+    
+    # Add trap to clean up when exiting
+    trap 'echo "Shutting down..."; kill $DEPLOY_PID 2>/dev/null; kill $WORKER_PID 2>/dev/null' EXIT
+    
+    # Start worker with debug output
+    echo "Starting worker with SQS integration..."
+    python -c "
+import asyncio, logging, os
+from files_api.aws.utils import AWSClientManager
+from files_api.msg_queue import QueueFactory
+from files_api.vlm.aws_worker import AWSWorker
+
+async def main():
+    # Set up logging and clear any cached clients
+    logging.basicConfig(level=logging.INFO)
+    AWSClientManager().clear_clients()
+    
+    # Print configuration for debugging
+    print(f'AWS Endpoint: {os.environ.get(\"AWS_ENDPOINT_URL\")}')
+    print(f'SQS Queue URL: {os.environ.get(\"SQS_QUEUE_URL\")}')
+    
+    # Initialize queue and worker
+    queue = QueueFactory.get_queue_handler()
+    print(f'Using queue type: {queue.__class__.__name__}')
+    
+    # Create AWS-specific worker
+    worker = AWSWorker(queue, mode='aws-mock')
+    await worker.listen_for_tasks()
+
+asyncio.run(main())
+" &
+    WORKER_PID=$!
+    
+    # Wait for worker to initialize
+    sleep 2
+    
+    # Start FastAPI app
+    echo "Starting FastAPI app with mock AWS infrastructure..."
+    python -m uvicorn files_api.main:create_app --reload
 }
 
 # New function to install npm dependencies

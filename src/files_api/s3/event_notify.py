@@ -10,7 +10,7 @@ def enable_s3_notifications(bucket_name: str, s3_client: Optional[S3Client] = No
         Bucket=bucket_name,
         NotificationConfiguration={
             'QueueConfigurations': [{
-                'QueueArn': 'arn:aws:sqs:us-east-1:123456789012:test-queue',
+                'QueueArn': 'arn:aws:sqs:us-west-2:123456789012:test-queue',
                 'Events': ['s3:ObjectCreated:Put']
             }]
         }

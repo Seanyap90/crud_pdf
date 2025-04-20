@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-DEFAULT_REGION = "us-east-1"
+DEFAULT_REGION = "us-west-2"
 MOTO_SERVER_PORT = 5000
 S3_BUCKET_NAME = "rag-pdf-storage"
 SQS_QUEUE_NAME = "rag-task-queue"
@@ -61,8 +61,8 @@ class DeploymentStrategy:
         """Get user data script for EC2 instances."""
         pass
 
-class LocalMockStrategy(DeploymentStrategy):
-    """Strategy for local-mock deployment mode."""
+class MockAWSStrategy(DeploymentStrategy):
+    """Strategy for aws-mock deployment mode."""
     
     def __init__(self):
         self.endpoint_url = f"http://localhost:{MOTO_SERVER_PORT}"
@@ -118,14 +118,14 @@ class LocalMockStrategy(DeploymentStrategy):
     def get_user_data_script(self, resources: Dict[str, Any]) -> str:
         """Get user data script for EC2 instances in mock mode."""
         return f"""#!/bin/bash
-echo "Starting RAG Worker in local-mock mode..."
+echo "Starting RAG Worker in aws-mock mode..."
 export AWS_DEFAULT_REGION={DEFAULT_REGION}
 export AWS_ACCESS_KEY_ID=mock
 export AWS_SECRET_ACCESS_KEY=mock
 export AWS_ENDPOINT_URL={self.endpoint_url}
 export S3_BUCKET_NAME={resources['s3_bucket_name']}
 export SQS_QUEUE_URL={resources['sqs_queue_url']}
-export QUEUE_TYPE=local-mock
+export QUEUE_TYPE=aws-mock
 export DISABLE_DUPLICATE_LOADING=true
 
 echo "Starting Docker container..."
@@ -138,13 +138,13 @@ docker run -d \\
   -e AWS_ENDPOINT_URL={self.endpoint_url} \\
   -e S3_BUCKET_NAME={resources['s3_bucket_name']} \\
   -e SQS_QUEUE_URL={resources['sqs_queue_url']} \\
-  -e QUEUE_TYPE=local-mock \\
+  -e QUEUE_TYPE=aws-mock \\
   -e DISABLE_DUPLICATE_LOADING=true \\
   -p 8000:8000 \\
   {resources['ecr_repository_uri']}:latest
 """
 
-class CloudStrategy(DeploymentStrategy):
+class ProductionAWSStrategy(DeploymentStrategy):
     """Strategy for cloud deployment mode."""
     
     def setup_clients(self) -> None:
@@ -153,9 +153,9 @@ class CloudStrategy(DeploymentStrategy):
         pass
     
     def get_user_data_script(self, resources: Dict[str, Any]) -> str:
-        """Get user data script for EC2 instances in cloud mode."""
+        """Get user data script for EC2 instances in aws-prod mode."""
         return f"""#!/bin/bash
-echo "Starting RAG Worker in cloud mode..."
+echo "Starting RAG Worker in aws-prod mode..."
 
 # Get instance region from metadata service
 REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
@@ -177,7 +177,7 @@ docker run -d \\
   -e AWS_DEFAULT_REGION=$REGION \\
   -e S3_BUCKET_NAME={resources['s3_bucket_name']} \\
   -e SQS_QUEUE_URL={resources['sqs_queue_url']} \\
-  -e QUEUE_TYPE=cloud \\
+  -e QUEUE_TYPE=aws-prod \\
   -e DISABLE_DUPLICATE_LOADING=true \\
   -p 8000:8000 \\
   {resources['ecr_repository_uri']}:latest
@@ -202,6 +202,23 @@ def log_operation(description: str):
         return wrapper
     return decorator
 
+def get_ami_id(mode: str, region: str) -> str:
+    """Select an appropriate AMI ID based on deployment mode and region."""
+    if mode == "aws-mock":
+        # For moto mock testing - use one of the valid AMIs we found
+        if region == "us-west-2":
+            return "ami-0bae969d1b995ad03"  # Amazon Linux 2 AMI in us-west-2
+        else:
+            return "ami-12345678"  # Fallback mock AMI
+    else:
+        # Production AMIs by region with GPU support
+        gpu_amis = {
+            "us-west-2": "ami-0a1b648e2a346a535",  # Deep Learning AMI with GPU support
+            "us-east-1": "ami-0b0af3577fe5e3532",
+            # Add more regions as needed
+        }
+        return gpu_amis.get(region, "ami-0a1b648e2a346a535")  # Default to us-west-2 if region not found
+
 # Builder pattern for AWS environment
 class AWSEnvironmentBuilder:
     """Builder for AWS deployment environment.
@@ -210,11 +227,11 @@ class AWSEnvironmentBuilder:
     AWS resources for the application deployment.
     """
     
-    def __init__(self, mode: str = "local-mock", region: str = DEFAULT_REGION):
+    def __init__(self, mode: str = "aws-mock", region: str = DEFAULT_REGION):
         """Initialize the builder.
         
         Args:
-            mode: Deployment mode ('local-mock' or 'cloud')
+            mode: Deployment mode ('aws-mock' or 'aws-prod')
             region: AWS region
         """
         self.region = region
@@ -222,31 +239,31 @@ class AWSEnvironmentBuilder:
         self.resources = {}
         
         # Create appropriate strategy based on mode
-        if mode == "local-mock":
-            self.strategy = LocalMockStrategy()
+        if mode == "aws-mock":
+            self.strategy = MockAWSStrategy()
         else:
-            self.strategy = CloudStrategy()
+            self.strategy = ProductionAWSStrategy()
         
         # Initialize environment
         self.strategy.setup_clients()
         
         # Start moto server if needed
-        if mode == "local-mock":
+        if mode == "aws-mock":
             self.strategy.start_moto_server()
     
     @log_operation("Setting up network resources")
     def build_network(self) -> 'AWSEnvironmentBuilder':
         """Build VPC and network components."""
-        # Skip network setup in local-mock mode
-        if self.mode == "local-mock":
-            logger.info("Skipping detailed network setup in local-mock mode")
-            self.resources['vpc_id'] = "mock-vpc"
-            self.resources['public_subnet_id'] = "mock-public-subnet"
-            self.resources['private_subnet_id'] = "mock-private-subnet"
-            return self
+        # Skip network setup in aws-mock mode
+        # if self.mode == "aws-mock":
+        #     logger.info("Skipping detailed network setup in aws-mock mode")
+        #     self.resources['vpc_id'] = "mock-vpc"
+        #     self.resources['public_subnet_id'] = "mock-public-subnet"
+        #     self.resources['private_subnet_id'] = "mock-private-subnet"
+        #     return self
         
-        # Get EC2 client
-        ec2_client = get_ec2_client()
+        """Build VPC and network components."""
+        ec2_client = get_ec2_client()  # Assumes this returns a Moto-configured client in aws-mock mode
         
         # Create VPC
         vpc_response = ec2_client.create_vpc(CidrBlock="10.0.0.0/16")
@@ -271,11 +288,7 @@ class AWSEnvironmentBuilder:
         # Create and attach Internet Gateway
         igw_response = ec2_client.create_internet_gateway()
         igw_id = igw_response['InternetGateway']['InternetGatewayId']
-        
-        ec2_client.attach_internet_gateway(
-            InternetGatewayId=igw_id,
-            VpcId=vpc_id
-        )
+        ec2_client.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
         
         # Create route tables and routes
         public_route_table = ec2_client.create_route_table(VpcId=vpc_id)
@@ -284,7 +297,6 @@ class AWSEnvironmentBuilder:
         private_route_table = ec2_client.create_route_table(VpcId=vpc_id)
         private_route_table_id = private_route_table['RouteTable']['RouteTableId']
         
-        # Create public route
         ec2_client.create_route(
             RouteTableId=public_route_table_id,
             DestinationCidrBlock='0.0.0.0/0',
@@ -292,15 +304,8 @@ class AWSEnvironmentBuilder:
         )
         
         # Associate route tables
-        ec2_client.associate_route_table(
-            RouteTableId=public_route_table_id,
-            SubnetId=public_subnet_id
-        )
-        
-        ec2_client.associate_route_table(
-            RouteTableId=private_route_table_id,
-            SubnetId=private_subnet_id
-        )
+        ec2_client.associate_route_table(RouteTableId=public_route_table_id, SubnetId=public_subnet_id)
+        ec2_client.associate_route_table(RouteTableId=private_route_table_id, SubnetId=private_subnet_id)
         
         # Store resources
         self.resources['vpc_id'] = vpc_id
@@ -334,9 +339,9 @@ class AWSEnvironmentBuilder:
     @log_operation("Creating IAM role")
     def build_iam_role(self) -> 'AWSEnvironmentBuilder':
         """Build IAM role for EC2 instances."""
-        # Skip detailed IAM setup in local-mock mode
-        if self.mode == "local-mock":
-            logger.info("Using simplified IAM setup for local-mock mode")
+        # Skip detailed IAM setup in aws-mock mode
+        if self.mode == "aws-mock":
+            logger.info("Using simplified IAM setup for aws-mock mode")
             self.resources['iam_role_name'] = IAM_ROLE_NAME
             self.resources['iam_instance_profile'] = IAM_INSTANCE_PROFILE
             return self
@@ -400,9 +405,9 @@ class AWSEnvironmentBuilder:
     @log_operation("Creating security group")
     def build_security_group(self) -> 'AWSEnvironmentBuilder':
         """Build security group for EC2 instances."""
-        # Skip detailed setup in local-mock mode
-        if self.mode == "local-mock":
-            logger.info("Using simplified security group for local-mock mode")
+        # Skip detailed setup in aws-mock mode
+        if self.mode == "aws-mock":
+            logger.info("Using simplified security group for aws-mock mode")
             self.resources['security_group_id'] = "mock-sg"
             return self
         
@@ -444,9 +449,9 @@ class AWSEnvironmentBuilder:
     @log_operation("Creating ECR repository")
     def build_ecr_repository(self) -> 'AWSEnvironmentBuilder':
         """Build ECR repository for Docker images."""
-        # Use mock for local-mock mode
-        if self.mode == "local-mock":
-            logger.info("Using mock ECR repository URI for local-mock mode")
+        # Use mock for aws-mock mode
+        if self.mode == "aws-mock":
+            logger.info("Using mock ECR repository URI for aws-mock mode")
             self.resources['ecr_repository_uri'] = f"{DEFAULT_REGION}.dkr.ecr.mock/{ECR_REPO_NAME}"
             return self
         
@@ -479,16 +484,18 @@ class AWSEnvironmentBuilder:
     @log_operation("Creating launch template")
     def build_launch_template(self) -> 'AWSEnvironmentBuilder':
         """Build launch template for EC2 instances."""
-        # Skip for local-mock mode
-        if self.mode == "local-mock":
-            logger.info("Skipping launch template for local-mock mode")
-            self.resources['launch_template_id'] = "mock-lt"
-            return self
-        
         ec2_client = get_ec2_client()
         
         # Get user data script from the strategy
         user_data = self.strategy.get_user_data_script(self.resources)
+        
+        # Get appropriate AMI ID
+        ami_id = get_ami_id(self.mode, self.region)
+        
+        # Select instance type based on deployment mode
+        instance_type = 'g4dn.xlarge' if self.mode == "aws-prod" else 't2.micro'
+        
+        logger.info(f"Creating launch template with AMI: {ami_id} and instance type: {instance_type}")
         
         try:
             # Create launch template
@@ -496,8 +503,8 @@ class AWSEnvironmentBuilder:
                 LaunchTemplateName="rag-worker-template",
                 VersionDescription='Initial version',
                 LaunchTemplateData={
-                    'ImageId': 'ami-12345678',  # This should be a real AMI in cloud mode
-                    'InstanceType': 'g4dn.xlarge',  # GPU instance
+                    'ImageId': ami_id,
+                    'InstanceType': instance_type,
                     'KeyName': 'rag-worker-key',
                     'SecurityGroupIds': [self.resources['security_group_id']],
                     'IamInstanceProfile': {
@@ -506,7 +513,7 @@ class AWSEnvironmentBuilder:
                     'UserData': user_data,
                     'BlockDeviceMappings': [
                         {
-                            'DeviceName': '/dev/sda1',
+                            'DeviceName': '/dev/xvda' if self.mode == "aws-mock" else '/dev/sda1',
                             'Ebs': {
                                 'VolumeSize': 100,  # GB
                                 'VolumeType': 'gp3',
@@ -519,6 +526,7 @@ class AWSEnvironmentBuilder:
             
             template_id = response['LaunchTemplate']['LaunchTemplateId']
             self.resources['launch_template_id'] = template_id
+            logger.info(f"Created launch template with ID: {template_id}")
             
         except ec2_client.exceptions.ClientError as e:
             if 'InvalidLaunchTemplateName.AlreadyExistsException' in str(e):
@@ -529,7 +537,9 @@ class AWSEnvironmentBuilder:
                 )
                 template_id = response['LaunchTemplates'][0]['LaunchTemplateId']
                 self.resources['launch_template_id'] = template_id
+                logger.info(f"Using existing launch template with ID: {template_id}")
             else:
+                logger.error(f"Error creating launch template: {str(e)}")
                 raise
         
         return self
@@ -537,11 +547,11 @@ class AWSEnvironmentBuilder:
     @log_operation("Creating auto scaling group")
     def build_auto_scaling_group(self) -> 'AWSEnvironmentBuilder':
         """Build auto scaling group for worker instances."""
-        # Skip for local-mock mode
-        if self.mode == "local-mock":
-            logger.info("Skipping ASG for local-mock mode")
-            self.resources['auto_scaling_group_name'] = "mock-asg"
-            return self
+        # Skip for aws-mock mode
+        # if self.mode == "aws-mock":
+        #     logger.info("Skipping ASG for aws-mock mode")
+        #     self.resources['auto_scaling_group_name'] = "mock-asg"
+        #     return self
         
         asg_client = get_asg_client()
         
@@ -573,16 +583,16 @@ class AWSEnvironmentBuilder:
         except asg_client.exceptions.AlreadyExistsFault:
             logger.info("Auto scaling group already exists")
             self.resources['auto_scaling_group_name'] = "rag-worker-asg"
-        
+    
         return self
     
     @log_operation("Creating CloudWatch alarms")
     def build_cloudwatch_alarms(self) -> 'AWSEnvironmentBuilder':
         """Build CloudWatch alarms for monitoring."""
-        # Skip detailed setup for local-mock mode
-        if self.mode == "local-mock":
-            logger.info("Skipping CloudWatch alarms for local-mock mode")
-            return self
+        # Skip detailed setup for aws-mock mode
+        # if self.mode == "aws-mock":
+        #     logger.info("Skipping CloudWatch alarms for aws-mock mode")
+        #     return self
         
         cloudwatch_client = get_cloudwatch_client()
         
@@ -631,12 +641,12 @@ class AWSEnvironmentBuilder:
         # Create content
         env_content = f"""# AWS Resource Configuration - Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}
 AWS_DEFAULT_REGION={self.region}
-AWS_ACCESS_KEY_ID={"mock" if self.mode == "local-mock" else ""}
-AWS_SECRET_ACCESS_KEY={"mock" if self.mode == "local-mock" else ""}
+AWS_ACCESS_KEY_ID={"mock" if self.mode == "aws-mock" else ""}
+AWS_SECRET_ACCESS_KEY={"mock" if self.mode == "aws-mock" else ""}
 """
         
-        # Add endpoint URL for local-mock mode
-        if self.mode == "local-mock":
+        # Add endpoint URL for aws-mock mode
+        if self.mode == "aws-mock":
             env_content += f"AWS_ENDPOINT_URL={self.strategy.endpoint_url}\n"
         
         # Add resource info
@@ -661,7 +671,7 @@ AWS_SECRET_ACCESS_KEY={"mock" if self.mode == "local-mock" else ""}
         logger.info("Cleaning up AWS resources...")
         
         # Clean up in reverse order
-        if self.mode != "local-mock":
+        if self.mode != "aws-mock":
             self._cleanup_cloudwatch_alarms()
             self._cleanup_auto_scaling_group()
             self._cleanup_launch_template()
@@ -862,14 +872,14 @@ AWS_SECRET_ACCESS_KEY={"mock" if self.mode == "local-mock" else ""}
             logger.warning(f"Error deleting S3 bucket: {str(e)}")
 
 @contextmanager
-def aws_environment(mode: str = "local-mock", cleanup: bool = True):
+def aws_environment(mode: str = "aws-mock", cleanup: bool = True):
     """Context manager for AWS environment.
     
     Creates a complete AWS environment for the application and cleans up
     when done.
     
     Args:
-        mode: Deployment mode ('local-mock' or 'cloud')
+        mode: Deployment mode ('aws-mock' or 'aws-prod')
         cleanup: Whether to clean up resources when done
     
     Yields:
@@ -894,19 +904,19 @@ def aws_environment(mode: str = "local-mock", cleanup: bool = True):
         if cleanup:
             builder.cleanup()
 
-def deploy_environment(mode: str = "local-mock", no_cleanup: bool = False, keep_running: bool = False):
+def deploy_environment(mode: str = "aws-mock", no_cleanup: bool = False, keep_running: bool = False):
     """Deploy AWS environment and optionally keep it running.
     
     Args:
-        mode: Deployment mode ('local-mock' or 'cloud')
+        mode: Deployment mode ('aws-mock' or 'aws-prod')
         no_cleanup: If True, don't clean up resources
         keep_running: If True, keep resources running until interrupted
     """
     with aws_environment(mode=mode, cleanup=not no_cleanup) as resources:
         logger.info("AWS environment deployed successfully")
         
-        if mode == "local-mock":
-            # Print instructions for local-mock mode
+        if mode == "aws-mock":
+            # Print instructions for aws-mock mode
             logger.info("\nLocal mock AWS environment ready!")
             logger.info("You can use the following environment variables in your application:")
             logger.info(f"  AWS_DEFAULT_REGION={DEFAULT_REGION}")
@@ -915,7 +925,7 @@ def deploy_environment(mode: str = "local-mock", no_cleanup: bool = False, keep_
             logger.info(f"  SQS_QUEUE_URL={resources.get('sqs_queue_url')}")
             logger.info("\nThese variables have been saved to .env.aws")
         else:
-            # Print instructions for cloud mode
+            # Print instructions for aws-prod mode
             logger.info("\nCloud AWS environment ready!")
             logger.info(f"Auto Scaling Group: {resources.get('auto_scaling_group_name')}")
             logger.info(f"S3 Bucket: {resources.get('s3_bucket_name')}")
@@ -934,8 +944,8 @@ def deploy_environment(mode: str = "local-mock", no_cleanup: bool = False, keep_
 def main():
     """Command-line interface for AWS deployment."""
     parser = argparse.ArgumentParser(description='Deploy AWS environment for Files API application')
-    parser.add_argument('--mode', choices=['local-mock', 'cloud'], default='local-mock',
-                        help='Deployment mode (default: local-mock)')
+    parser.add_argument('--mode', choices=['aws-mock', 'aws-prod'], default='aws-mock',
+                        help='Deployment mode (default: aws-mock)')
     parser.add_argument('--no-cleanup', action='store_true',
                         help='Skip cleanup of AWS resources')
     parser.add_argument('--keep-running', action='store_true',

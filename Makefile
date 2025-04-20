@@ -10,8 +10,16 @@ build:
 run:
 	bash run.sh run
 
-local-mock:
-	bash run.sh local-mock
+local-dev:
+	bash run.sh local-dev
+
+# Test full AWS infrastructure deployment locally
+aws-mock:
+	bash run.sh aws-mock
+
+# Deploy to real AWS
+aws-prod:
+	bash run.sh aws-prod
 
 iot-backend-start:
 	bash run.sh iot-backend-start

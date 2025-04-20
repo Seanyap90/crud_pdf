@@ -14,7 +14,7 @@ class Config:
     AWS_ENDPOINT_URL = os.getenv("AWS_ENDPOINT_URL")  # For moto mock server
 
     # Queue Configuration
-    QUEUE_TYPE = os.getenv("EXEC_MODE", "local-mock")  # Uses the mode from CLI
+    QUEUE_TYPE = os.getenv("EXEC_MODE", "local-dev")  # Uses the mode from CLI
     SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL")
 
 config = Config()

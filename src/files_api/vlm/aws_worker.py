@@ -129,7 +129,7 @@ class LoggingObserver(WorkerObserver):
 class AWSWorker(Worker):
     """AWS-specific worker implementation with enhanced monitoring."""
     
-    def __init__(self, queue, observers: Optional[List[WorkerObserver]] = None):
+    def __init__(self, queue, observers: Optional[List[WorkerObserver]] = None, mode: str = "aws-prod"):
         """Initialize AWS worker with queue and observers.
         
         Args:
@@ -137,12 +137,13 @@ class AWSWorker(Worker):
             observers: Optional list of observers for monitoring
         """
         super().__init__(queue)
+        self.mode = mode
         
         # Initialize observers
-        self.observers = observers or [
-            LoggingObserver(),
-            CloudWatchObserver()
-        ]
+        if mode == "aws-mock":
+            self.observers = observers or [LoggingObserver()]
+        else:  # aws-prod
+            self.observers = observers or [LoggingObserver(), CloudWatchObserver()]
         
         # Log initialization
         logger.info("AWS Worker initialized with enhanced monitoring")

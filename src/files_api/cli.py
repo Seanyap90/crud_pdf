@@ -18,8 +18,8 @@ def cli():
 
 @cli.command()
 @click.option("--mode", 
-              type=click.Choice(["local-mock", "local", "hybrid", "cloud"]), 
-              default="local-mock")
+              type=click.Choice(["local-dev", "aws-mock", "aws-prod"]), 
+              default="local-dev")
 @click.option("--preload-models/--no-preload-models", default=False, 
               help="Preload ML models during startup")
 def worker(mode, preload_models):

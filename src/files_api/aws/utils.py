@@ -49,7 +49,7 @@ class AWSClientManager:
         }
         
         # Add endpoint URL for local-mock mode
-        if self.endpoint_url and self.mode in ['local-mock', 'local']:
+        if self.endpoint_url and self.mode in ['local-dev', 'aws-mock']:
             client_kwargs['endpoint_url'] = self.endpoint_url
         
         try:
@@ -107,7 +107,15 @@ def create_s3_bucket(bucket_name: str) -> bool:
     """
     try:
         s3_client = get_s3_client()
-        s3_client.create_bucket(Bucket=bucket_name)
+        region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+        
+        if region == 'us-east-1':
+            s3_client.create_bucket(Bucket=bucket_name)
+        else:
+            s3_client.create_bucket(
+                Bucket=bucket_name,
+                CreateBucketConfiguration={'LocationConstraint': region}
+            )
         logger.info(f"Created S3 bucket: {bucket_name}")
         return True
     except s3_client.exceptions.BucketAlreadyExists:
