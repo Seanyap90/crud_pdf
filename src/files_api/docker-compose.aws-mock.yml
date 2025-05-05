@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  moto:
+    image: motoserver/moto:latest
+    container_name: moto-server
+    ports:
+      - "5000:5000"
+    networks:
+      - rag-network
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Simplified moto command that works with the image
+    command: ["-H", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build:
+      context: ../../  # Navigate to project root
+      dockerfile: src/files_api/vlm/Dockerfile  # Point to our minimal Dockerfile
+    environment:
+      - AWS_ENDPOINT_URL=http://moto:5000  # Use container name for networking
+      - AWS_ACCESS_KEY_ID=mock
+      - AWS_SECRET_ACCESS_KEY=mock
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-rag-pdf-storage}
+      - SQS_QUEUE_URL=${SQS_QUEUE_URL:-http://moto:5000/queue/rag-task-queue}
+      - DISABLE_DUPLICATE_LOADING=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 8G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+          devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      moto:
+        condition: service_healthy
+    networks:
+      - rag-network
+    # Will be managed by container_scaler.py
+
+networks:
+  rag-network:
+    driver: bridge

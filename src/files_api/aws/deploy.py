@@ -143,6 +143,74 @@ docker run -d \\
   -p 8000:8000 \\
   {resources['ecr_repository_uri']}:latest
 """
+    def setup_asg(self, resources):
+        """Setup mock auto scaling group with Docker container integration."""
+        asg_client = get_asg_client()
+        ec2_client = get_ec2_client()
+        
+        # Get or create VPC and subnet
+        vpc_id = resources.get('vpc_id')
+        if not vpc_id:
+            # Create VPC
+            vpc_response = ec2_client.create_vpc(CidrBlock="10.0.0.0/16")
+            vpc_id = vpc_response['Vpc']['VpcId']
+            resources['vpc_id'] = vpc_id
+            
+            # Create private subnet
+            subnet_response = ec2_client.create_subnet(
+                VpcId=vpc_id,
+                CidrBlock="10.0.2.0/24",
+                AvailabilityZone="us-east-1a"
+            )
+            subnet_id = subnet_response['Subnet']['SubnetId']
+            resources['private_subnet_id'] = subnet_id
+            
+            logger.info(f"Created mock VPC {vpc_id} with private subnet {subnet_id}")
+        
+        # Create launch configuration
+        asg_client.create_launch_configuration(
+            LaunchConfigurationName="rag-worker-config",
+            ImageId="ami-mock",
+            InstanceType="t2.large"
+        )
+        
+        # Create auto scaling group
+        asg_client.create_auto_scaling_group(
+            AutoScalingGroupName="rag-worker-asg",
+            LaunchConfigurationName="rag-worker-config",
+            MinSize=1,
+            MaxSize=5,
+            DesiredCapacity=2,  # Start with 2 worker containers
+            VPCZoneIdentifier=resources['private_subnet_id']
+        )
+        
+        # Create scaling policies
+        asg_client.put_scaling_policy(
+            AutoScalingGroupName="rag-worker-asg",
+            PolicyName="scale-out-policy",
+            PolicyType="SimpleScaling",
+            AdjustmentType="ChangeInCapacity",
+            ScalingAdjustment=1
+        )
+        
+        asg_client.put_scaling_policy(
+            AutoScalingGroupName="rag-worker-asg",
+            PolicyName="scale-in-policy",
+            PolicyType="SimpleScaling",
+            AdjustmentType="ChangeInCapacity",
+            ScalingAdjustment=-1
+        )
+        
+        logger.info("Created auto scaling group and policies")
+        resources['asg_name'] = "rag-worker-asg"
+        
+        # Start container scaler
+        from files_api.aws.container_scaler import ContainerScaler
+        container_scaler = ContainerScaler(asg_name="rag-worker-asg")
+        container_scaler.start()
+        resources['container_scaler'] = container_scaler
+        
+        return resources
 
 class ProductionAWSStrategy(DeploymentStrategy):
     """Strategy for cloud deployment mode."""
@@ -636,6 +704,33 @@ class AWSEnvironmentBuilder:
         
         return self
     
+    # Add the new build method here, after all individual build methods
+    def build(self) -> 'AWSEnvironmentBuilder':
+        """Build all AWS resources."""
+        try:
+            self.build_network()
+            self.build_s3_bucket()
+            self.build_sqs_queue()
+            
+            if self.mode == "aws-mock":
+                # Initialize ASG and container scaler for mock mode
+                self.strategy.setup_asg(self.resources)
+            else:
+                # Normal AWS deployment
+                self.build_iam_role()
+                self.build_security_group()
+                self.build_ecr_repository()
+                self.build_launch_template()
+                self.build_auto_scaling_group()
+            
+            self.build_cloudwatch_alarms()
+            self.create_env_file()
+            
+            return self
+        except Exception as e:
+            logger.error(f"Error building AWS environment: {e}")
+            raise
+    
     def create_env_file(self, path: str = ".env.aws") -> 'AWSEnvironmentBuilder':
         """Create environment file with resource information."""
         # Create content
@@ -897,6 +992,7 @@ def aws_environment(mode: str = "aws-mock", cleanup: bool = True):
                .build_launch_template() \
                .build_auto_scaling_group() \
                .build_cloudwatch_alarms() \
+               .build() \
                .create_env_file()
         
         yield builder.get_resources()

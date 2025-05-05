@@ -71,66 +71,120 @@ function local-dev {
 function aws-mock {
     set +e
     
-    echo "Setting up full AWS mock infrastructure for testing..."
+    echo "Setting up full AWS mock infrastructure..."
+
+    # Get absolute path to project root
+    PROJECT_ROOT="$(pwd)"
     
-    # Run deploy.py to set up infrastructure
-    python -m files_api.aws.deploy --mode aws-mock --keep-running &
-    DEPLOY_PID=$!
-    
-    # Wait for deployment to complete
-    sleep 5
-    
-    # Load environment variables from .env.aws
-    if [ -f ".env.aws" ]; then
-        set -a
-        source .env.aws
-        set +a
-        echo "Loaded environment from .env.aws"
-    else
-        echo "Warning: .env.aws not found"
+    # Check dependencies
+    if ! command -v docker-compose &> /dev/null; then
+        echo "Error: docker-compose is required but not installed"
+        exit 1
     fi
     
-    # Ensure QUEUE_TYPE is set to aws-mock
+    # Define variables
+    export S3_BUCKET_NAME="${S3_BUCKET_NAME:-rag-pdf-storage}"
+    export SQS_QUEUE_URL="${SQS_QUEUE_URL:-http://localhost:5000/queue/rag-task-queue}"
+    export AWS_ENDPOINT_URL="http://localhost:5000"
+    export AWS_ACCESS_KEY_ID="mock"
+    export AWS_SECRET_ACCESS_KEY="mock"
+    export AWS_DEFAULT_REGION="us-east-1"
     export QUEUE_TYPE="aws-mock"
     
-    # Add trap to clean up when exiting
-    trap 'echo "Shutting down..."; kill $DEPLOY_PID 2>/dev/null; kill $WORKER_PID 2>/dev/null' EXIT
-    
-    # Start worker with debug output
-    echo "Starting worker with SQS integration..."
-    python -c "
-import asyncio, logging, os
-from files_api.aws.utils import AWSClientManager
-from files_api.msg_queue import QueueFactory
-from files_api.vlm.aws_worker import AWSWorker
+    # Start Moto server first to ensure it's available for deploy.py
+    echo "Starting Moto server..."
+    cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.aws-mock.yml up -d moto
 
-async def main():
-    # Set up logging and clear any cached clients
-    logging.basicConfig(level=logging.INFO)
-    AWSClientManager().clear_clients()
+    # Return to project root
+    cd "$PROJECT_ROOT"
     
-    # Print configuration for debugging
-    print(f'AWS Endpoint: {os.environ.get(\"AWS_ENDPOINT_URL\")}')
-    print(f'SQS Queue URL: {os.environ.get(\"SQS_QUEUE_URL\")}')
+    # Wait for Moto server to be ready
+    echo -n "Waiting for Moto server to start"
+    max_retries=10
+    counter=0
+    while [ $counter -lt $max_retries ]; do
+        echo -n "."
+        if curl -s http://localhost:5000 &> /dev/null; then
+            echo " ✓"
+            echo "Moto server is ready!"
+            break
+        fi
+        
+        # Show logs every 15 seconds to help diagnose issues
+        if [ $((counter % 5)) -eq 0 ] && [ $counter -gt 0 ]; then
+            echo ""
+            echo "Checking Moto server logs (attempt $counter of $max_retries):"
+            docker logs moto-server --tail 10 2>/dev/null || echo "No logs available yet"
+        fi
+        
+        sleep 3
+        counter=$((counter + 1))
+    done
     
-    # Initialize queue and worker
-    queue = QueueFactory.get_queue_handler()
-    print(f'Using queue type: {queue.__class__.__name__}')
+    if [ $counter -eq $max_retries ]; then
+        echo ""
+        echo "Error: Moto server failed to start within timeout"
+        docker logs moto-server
+        aws-mock-down
+        exit 1
+    fi
     
-    # Create AWS-specific worker
-    worker = AWSWorker(queue, mode='aws-mock')
-    await worker.listen_for_tasks()
+    # Run deploy.py to create AWS resources
+    echo "Creating AWS mock resources (VPC, ASG, etc.)..."
+    python -m files_api.aws.deploy --mode aws-mock --no-cleanup
+    
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to create AWS mock resources"
+        aws-mock-down
+        exit 1
+    fi
+    
+    # Start the worker containers
+    echo "Starting worker containers..."
+    cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.aws-mock.yml up -d worker
+    cd "$PROJECT_ROOT"
 
-asyncio.run(main())
-" &
-    WORKER_PID=$!
+    # Start container scaler
+    echo "Starting container scaler in the background..."
+    python -m files_api.aws.container_scaler &
+    SCALER_PID=$!
     
-    # Wait for worker to initialize
-    sleep 2
+    # Print environment details
+    echo -e "\n AWS mock environment is now running!"
+    echo "- Moto server: http://localhost:5000"
+    echo "- S3 bucket: $S3_BUCKET_NAME"
+    echo "- SQS queue: $SQS_QUEUE_URL"
+    echo -e "\nUse the following commands to interact with the environment:"
+    echo "- make aws-mock-logs     : View container logs"
+    echo "- make aws-mock-status   : Check environment status"
+    echo "- make aws-mock-scale workers=N : Manually set number of workers"
+    echo "- make aws-mock-down     : Shut down the environment"
     
-    # Start FastAPI app
-    echo "Starting FastAPI app with mock AWS infrastructure..."
-    python -m uvicorn files_api.main:create_app --reload
+    # NEW: Start FastAPI application
+    echo -e "\nStarting FastAPI application..."
+    
+    # Trap Ctrl+C to gracefully shutdown everything
+    trap 'echo "Shutting down AWS mock environment..."; kill $SCALER_PID 2>/dev/null; aws-mock-down; exit 0' INT
+    
+    # Start FastAPI with uvicorn
+    python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000
+    
+    # If FastAPI exits, clean up
+    echo "FastAPI server exited, cleaning up environment"
+    kill $SCALER_PID 2>/dev/null
+    aws-mock-down
+}
+
+function aws-mock-down {
+    echo "Shutting down AWS mock environment..."
+    
+    # Kill any running scaler process
+    pkill -f "python -m files_api.aws.container_scaler" || true
+    
+    # Stop all containers
+    cd src/files_api && docker-compose -f docker-compose.aws-mock.yml down
+    
+    echo "AWS mock environment shut down successfully"
 }
 
 # New function to install npm dependencies

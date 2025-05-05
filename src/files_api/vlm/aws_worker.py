@@ -1,6 +1,9 @@
 """AWS-specific worker implementation for the VLM+RAG pipeline."""
 import logging
 import time
+import os
+import gc
+import torch
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
@@ -171,6 +174,7 @@ class AWSWorker(Worker):
         
         start_time = time.time()
         success = False
+        self._check_memory_limits()
         
         try:
             # Process task with parent implementation
@@ -208,6 +212,8 @@ class AWSWorker(Worker):
             if current_time - self.last_health_report >= self.health_report_interval:
                 self._report_health()
                 self.last_health_report = current_time
+            
+            self._check_memory_limits()
     
     def _report_health(self) -> None:
         """Report worker health metrics to CloudWatch."""
@@ -260,3 +266,46 @@ class AWSWorker(Worker):
             logger.warning(f"Worker reported as unhealthy: {reason}")
         except Exception as e:
             logger.warning(f"Failed to report unhealthy status: {str(e)}")
+    
+    def _check_memory_limits(self):
+        """Check memory limits from cgroups and handle potential OOM."""
+        try:
+            # Check cgroups v2 first
+            if os.path.exists("/sys/fs/cgroup/memory.current"):
+                with open("/sys/fs/cgroup/memory.current", "r") as f:
+                    current = int(f.read().strip())
+                with open("/sys/fs/cgroup/memory.max", "r") as f:
+                    max_str = f.read().strip()
+                    maximum = int(max_str) if max_str != "max" else float('inf')
+                
+                if maximum != float('inf'):
+                    mem_percent = (current / maximum) * 100
+                    if mem_percent > 85:
+                        logger.warning(f"High memory usage: {mem_percent:.1f}% ({current/(1024*1024):.1f}MB/{maximum/(1024*1024):.1f}MB)")
+                        
+                        if mem_percent > 95:
+                            logger.error("Critical memory usage - forcing garbage collection!")
+                            # Force aggressive memory cleanup
+                            gc.collect(generation=2)
+                            torch.cuda.empty_cache()
+            
+            # Check cgroups v1 if v2 not found
+            elif os.path.exists("/sys/fs/cgroup/memory/memory.usage_in_bytes"):
+                with open("/sys/fs/cgroup/memory/memory.usage_in_bytes", "r") as f:
+                    current = int(f.read().strip())
+                with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r") as f:
+                    maximum = int(f.read().strip())
+                
+                if maximum < 9223372036854775807:  # Not max int64
+                    mem_percent = (current / maximum) * 100
+                    if mem_percent > 85:
+                        logger.warning(f"High memory usage: {mem_percent:.1f}% ({current/(1024*1024):.1f}MB/{maximum/(1024*1024):.1f}MB)")
+                        
+                        if mem_percent > 95:
+                            logger.error("Critical memory usage - forcing garbage collection!")
+                            # Force aggressive memory cleanup
+                            gc.collect(generation=2)
+                            torch.cuda.empty_cache()
+        
+        except Exception as e:
+            logger.warning(f"Error checking memory limits: {str(e)}")

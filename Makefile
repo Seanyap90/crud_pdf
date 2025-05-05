@@ -17,6 +17,9 @@ local-dev:
 aws-mock:
 	bash run.sh aws-mock
 
+aws-mock-down:
+	bash run.sh aws-mock-down
+
 # Deploy to real AWS
 aws-prod:
 	bash run.sh aws-prod

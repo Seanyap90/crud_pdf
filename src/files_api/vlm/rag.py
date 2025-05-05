@@ -15,9 +15,7 @@ from files_api.vlm.load_models import ModelManager, model_on_device
 from files_api.config import config
 from database.local import update_invoice_processing_status, update_invoice_with_extracted_data
 from typing import Optional, List, Tuple, Dict, Any
-from transformers import BitsAndBytesConfig, GenerationConfig
-import psutil
-from byaldi import RAGMultiModalModel
+from transformers import GenerationConfig
 
 # Configure logging
 logging.basicConfig(
@@ -25,22 +23,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-def log_memory_usage(message="Current memory usage"):
-    """Log current CPU and GPU memory usage"""
-    # Log CPU memory
-    process = psutil.Process(os.getpid())
-    cpu_mem = process.memory_info().rss / (1024 * 1024)  # Convert to MB
-    
-    # Log GPU memory if available
-    gpu_mem = "N/A"
-    if torch.cuda.is_available():
-        gpu_mem = torch.cuda.memory_allocated() / (1024 * 1024)  # Convert to MB
-        gpu_mem_reserved = torch.cuda.memory_reserved() / (1024 * 1024)  # Convert to MB
-        
-        logger.info(f"{message}: CPU: {cpu_mem:.2f}MB, GPU allocated: {gpu_mem:.2f}MB, GPU reserved: {gpu_mem_reserved:.2f}MB")
-    else:
-        logger.info(f"{message}: CPU: {cpu_mem:.2f}MB, GPU: {gpu_mem}")
 
 def parse_invoice_data(response: str) -> tuple[Optional[float], Optional[float]]:
     """Parse both weight and price from the VLM response."""
@@ -73,34 +55,18 @@ def parse_invoice_data(response: str) -> tuple[Optional[float], Optional[float]]
                                 except ValueError:
                                     logger.warning(f"Could not convert price '{price_str}' to float")
                                 
-                        # Parse weight - handle both simple value and nested object structure
+                        # Parse weight
                         weight = None
                         if 'weight' in data:
-                            weight_data = data['weight']
-                            
-                            # Case 1: weight is a simple value (number or string)
-                            if isinstance(weight_data, (int, float)):
-                                weight = float(weight_data)
-                            elif isinstance(weight_data, str):
-                                weight_str = str(weight_data).replace('kg', '').replace(',', '.').strip()
+                            # Handle both string and numeric values
+                            if isinstance(data['weight'], (int, float)):
+                                weight = float(data['weight'])
+                            else:
+                                weight_str = str(data['weight']).replace('kg', '').replace(',', '.').strip()
                                 try:
                                     weight = float(weight_str)
                                 except ValueError:
-                                    logger.warning(f"Could not convert weight string '{weight_str}' to float")
-                            
-                            # Case 2: weight is a nested object with "value" field
-                            elif isinstance(weight_data, dict) and 'value' in weight_data:
-                                weight_value = weight_data['value']
-                                if isinstance(weight_value, (int, float)):
-                                    weight = float(weight_value)
-                                else:
-                                    weight_str = str(weight_value).replace('kg', '').replace(',', '.').strip()
-                                    try:
-                                        weight = float(weight_str)
-                                    except ValueError:
-                                        logger.warning(f"Could not convert weight value '{weight_str}' to float")
-                            else:
-                                logger.warning(f"Unexpected weight format: {weight_data}")
+                                    logger.warning(f"Could not convert weight '{weight_str}' to float")
                                 
                         return total_amount, weight
                 except json.JSONDecodeError:
@@ -168,25 +134,8 @@ class PDFProcessor:
 
         # Track current index
         self.current_index_name = None
-
-        # Add helper methods for GPU management
-        self._ensure_gpu_available()
         
         logger.info("PDF Processor initialized")
-    
-    def _ensure_gpu_available(self):
-        """Check GPU availability and log information"""
-        if torch.cuda.is_available():
-            device_count = torch.cuda.device_count()
-            gpu_info = []
-            for i in range(device_count):
-                prop = torch.cuda.get_device_properties(i)
-                total_memory = prop.total_memory / (1024**3)  # Convert to GB
-                gpu_info.append(f"GPU {i}: {prop.name}, {total_memory:.2f}GB memory")
-            
-            logger.info(f"Found {device_count} GPU(s): {', '.join(gpu_info)}")
-        else:
-            logger.warning("No GPU detected. Processing will be slower on CPU.")
 
     def download_from_s3(self, filepath):
         """Download file from S3 to temp directory"""
@@ -211,55 +160,36 @@ class PDFProcessor:
         images = None
         
         try:
-            # Log memory before starting
-            log_memory_usage("Before processing PDF")
-
             # Download the file
             local_path = self.download_from_s3(filepath)
             logger.info(f"Processing PDF: {local_path}")
             
-            # Create a completely new model instance for GPU usage
-            logger.info("Creating RAG model instance for indexing")
-                
+            # IMPORTANT: Create a completely new RAG model instance for each PDF
+            # This ensures no document ID collision occurs
+            logger.info("Creating fresh RAG model instance to avoid index conflicts")
+            from byaldi import RAGMultiModalModel
+            
             # Force cleanup before creating new model
             if self.rag is not None:
                 del self.rag
                 gc.collect()
                 torch.cuda.empty_cache()
             
-            # Load RAG model with simpler approach - byaldi doesn't support device_map
-            rag_start_time = time.time()
-            
-            # Simple loading - byaldi package has different API requirements
+            # Create a completely new model instance
             self.rag = RAGMultiModalModel.from_pretrained("vidore/colpali")
-            
-            # After loading, check if we need to move to GPU
-            if torch.cuda.is_available():
-                logger.info("Moving RAG model to GPU after loading")
-                # Check if model has a move_to method or needs device parameter
-                if hasattr(self.rag, 'to'):
-                    self.rag.to('cuda')
-                elif hasattr(self.rag, 'model') and hasattr(self.rag.model, 'to'):
-                    self.rag.model.to('cuda')
-            
-            rag_load_time = time.time() - rag_start_time
-            logger.info(f"RAG model loaded in {rag_load_time:.2f} seconds")
             
             # Clean old indices first to prevent buildup
             self._clear_old_indices()
             
             # Convert PDF to images with memory-efficient settings
-            image_start_time = time.time()
             images = convert_from_path(
                 str(local_path),
-                dpi=600,  # Lower DPI to save memory
+                dpi=500,  # Lower DPI to save memory
                 thread_count=1,  # Single thread is more memory efficient
                 use_pdftocairo=True,  # Generally more memory-efficient than pdf2image
                 grayscale=False
             )
-            image_time = time.time() - image_start_time
-            logger.info(f"PDF converted to {len(images)} images in {image_time:.2f} seconds")
-    
+            
             # Create unique index name with additional randomness
             unique_id = uuid.uuid4().hex
             timestamp = int(time.time())
@@ -268,18 +198,12 @@ class PDFProcessor:
             logger.info(f"Creating new index: {index_name}")
             
             # Index with unique name to avoid collisions
-            index_start_time = time.time()
             self.rag.index(
                 input_path=str(local_path),
                 index_name=index_name,
                 store_collection_with_index=True,
                 overwrite=True
             )
-            index_time = time.time() - index_start_time
-            logger.info(f"Document indexed in {index_time:.2f} seconds")
-            
-            # Log memory after indexing
-            log_memory_usage("After indexing")
             
             # Force garbage collection
             gc.collect()
@@ -302,158 +226,116 @@ class PDFProcessor:
                     logger.warning(f"Could not delete temp file {local_path}: {str(e)}")
 
     def generate_response(self, images: List, query: str) -> str:
-        """Generate response based on query with fixed image processing"""
+        """Generate response based on query with guaranteed single inference"""
         logger.info(f"Generating response for query: {query}")
         
+        # Track inference to ensure it happens only once
+        inference_completed = False
+        result = None
+        
         try:
-            # Log memory at start
-            log_memory_usage("Before response generation")
-
-            # Load VLM and processor if not already loaded - use lazy loading
+            # Load VLM and processor if needed, without using a non-existent lock
             if self.vlm is None or self.processor is None:
-                logger.info("Loading VLM model and processor")
-                vlm_start_time = time.time()
+                logger.info("Lazily loading VLM model")
                 self.vlm, self.processor = self.model_manager.get_vlm_model()
-                vlm_load_time = time.time() - vlm_start_time
-                logger.info(f"VLM model loaded in {vlm_load_time:.2f} seconds")
-                
-                # Check if model loading succeeded
                 if self.vlm is None or self.processor is None:
-                    logger.error("Failed to load VLM model from ModelManager")
-                    return "Error: VLM model could not be loaded. Please check system resources."
+                    return "Error: VLM model could not be loaded."
             
-            # Log index name but don't try to use it directly
-            if self.current_index_name:
-                logger.info(f"Searching in index: {self.current_index_name}")
-            
-            # Find relevant page using RAG search (minimize memory usage)
-            page_num = 0  # Default to first page
+            # Perform RAG search once and cache results
+            page_num = 0
             try:
-                search_start_time = time.time()
+                logger.info(f"Performing single RAG search with index: {self.current_index_name}")
                 results = self.rag.search(query, k=1)
-                search_time = time.time() - search_start_time
-                logger.info(f"RAG search completed in {search_time:.2f} seconds")
                 
                 if results:
                     try:
                         page_num = results[0]['page_num'] - 1
                         if page_num < 0 or page_num >= len(images):
-                            logger.warning(f"Invalid page number {page_num+1}, using first page")
                             page_num = 0
                     except Exception as e:
-                        logger.warning(f"Error extracting page number: {str(e)}, using first page")
+                        logger.warning(f"Error extracting page number: {str(e)}")
                 else:
                     logger.warning("No results from RAG search, using first page")
             except Exception as e:
-                logger.warning(f"Error in RAG search: {str(e)}, using first page")
+                logger.warning(f"Error in RAG search: {str(e)}")
             
-            # Get only the relevant page to save memory
-            logger.info(f"Using page {page_num+1} for VLM generation")
+            # Process single page for efficiency
             retrieved_page = images[page_num].copy()
             
-            # Save a reference to images and then clear it to save memory during generation
-            images_copy = images
-            images = None
-            gc.collect()
-
-            # Create chat content for the VLM
-            logger.info("Preparing input for VLM")
+            # Prepare inputs
             chat_content = [
                 {"type": "image", "image": retrieved_page},
                 {"type": "text", "text": f"Based on this image, {query}"}
             ]
-            
             chat = [{"role": "user", "content": chat_content}]
-
-            try:
-                text = self.processor.apply_chat_template(chat, add_generation_prompt=True)
-            except Exception as template_error:
-                logger.error(f"Error applying chat template: {str(template_error)}")
-                # Restore images
-                images = images_copy
-                return f"Error processing the document: {str(template_error)[:100]}..."
-
-            # Clear GPU memory before inference
-            torch.cuda.empty_cache()
-            log_memory_usage("Before VLM inference")
-
-            # IMPORTANT: Keep the image until after processing
-            # Process inputs WITH the image parameter
-            try:
-                logger.info("Processing inference request")
-                inputs = self.processor(
-                    text=text, 
-                    images=[retrieved_page],  # Pass the image here
-                    return_tensors="pt"
-                )
-                
-                # Now we can free the image memory
-                retrieved_page = None
-                gc.collect()
-                
-                # Check device and move inputs
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                logger.info(f"Running inference on {device}")
-                
-                # Move inputs to device
-                cuda_inputs = {k: v.to(device) for k, v in inputs.items()}
-                
-                # Configure generation with offloaded KV-cache
-                gen_cfg = GenerationConfig(
-                    max_new_tokens=500,
-                    pad_token_id=self.processor.tokenizer.pad_token_id,
-                    use_cache=True,
-                    cache_implementation="offloaded",  # Use offloaded cache implementation
-                    do_sample=False,
-                    num_beams=1
-                )
-                
-                # Generate with optimized settings
-                generation_start_time = time.time()
-                with torch.no_grad():
-                    # Generate with optimized settings
+            
+            # Apply template once
+            text = self.processor.apply_chat_template(chat, add_generation_prompt=True)
+            
+            # Free page memory
+            retrieved_page = None
+            
+            # Prepare for inference
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            logger.info(f"Preparing for inference on {device}")
+            
+            # Process inputs once
+            inputs = self.processor(
+                text=text,
+                images=[images[page_num]],  # Use original image directly
+                return_tensors="pt"
+            )
+            
+            # Configure generation once
+            gen_cfg = GenerationConfig(
+                max_new_tokens=500,
+                pad_token_id=self.processor.tokenizer.pad_token_id,
+                use_cache=True,
+                cache_implementation="offloaded",  # FIXED: Using "offloaded" for memory efficiency
+                do_sample=False,
+                num_beams=1
+            )
+            
+            # Move inputs to device
+            cuda_inputs = {k: v.to(device) for k, v in inputs.items()}
+            
+            # Run inference ONCE with proper logging
+            logger.info("Starting VLM inference (single operation)")
+            with torch.no_grad():
+                if not inference_completed:  # Extra safety check
                     generated_ids = self.vlm.generate(
                         **cuda_inputs,
                         generation_config=gen_cfg
                     )
                     
-                    # Extract output from generated ids
+                    # Process output once
                     if 'input_ids' in inputs:
-                        output = self.processor.batch_decode(
-                            generated_ids[:, inputs['input_ids'].shape[1]:], 
+                        result = self.processor.batch_decode(
+                            generated_ids[:, inputs['input_ids'].shape[1]:],
                             skip_special_tokens=True
                         )[0]
                     else:
-                        output = self.processor.batch_decode(
-                            generated_ids, 
+                        result = self.processor.batch_decode(
+                            generated_ids,
                             skip_special_tokens=True
                         )[0]
-                
-                generation_time = time.time() - generation_start_time
-                logger.info(f"VLM generation completed in {generation_time:.2f} seconds")
-                
-                # Clean up and free memory
-                del inputs, cuda_inputs, generated_ids
-                torch.cuda.empty_cache()
-                gc.collect()
-                
-                # Restore images reference for other functions
-                images = images_copy
-                
-                # Log memory after generation
-                log_memory_usage("After VLM generation")
-                
-                return output
-            except Exception as processing_error:
-                logger.error(f"Error during processing: {str(processing_error)}", exc_info=True)
-                images = images_copy
-                return f"Error processing the image: {str(processing_error)[:100]}..."
                     
+                    inference_completed = True
+                    logger.info("VLM inference completed successfully (single pass)")
+            
+            # Clean up resources
+            del inputs, cuda_inputs, generated_ids
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+            return result
+            
         except Exception as e:
-            logger.error(f"Unexpected error in generate_response: {str(e)}", exc_info=True)
-            return f"An error occurred while processing the document: {str(e)[:100]}..."
+            logger.error(f"Error during single inference: {str(e)}", exc_info=True)
+            return f"Error processing document: {str(e)[:100]}..."
+        
         finally:
-            # Always try to free memory
+            # Always clean up
             torch.cuda.empty_cache()
             gc.collect()
 
