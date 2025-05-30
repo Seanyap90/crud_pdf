@@ -3,15 +3,12 @@ import os
 import boto3
 import logging
 from typing import Dict, Optional, Any
+from files_api.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 class AWSClientManager:
-    """Singleton manager for AWS service clients.
-    
-    Ensures only one instance of each AWS client exists, properly configured
-    for the current execution mode (local-mock, cloud, etc.).
-    """
+    """Singleton manager for AWS service clients."""
     _instance = None
     _clients = {}
     
@@ -22,33 +19,38 @@ class AWSClientManager:
         return cls._instance
     
     def _initialize(self):
-        """Initialize the client manager with execution mode settings."""
-        self.region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
-        self.endpoint_url = os.environ.get('AWS_ENDPOINT_URL')
-        self.mode = os.environ.get('QUEUE_TYPE', 'local-mock')
+        """Initialize the client manager with settings."""
+        # Get settings once during initialization
+        self.settings = get_settings()
         
-        logger.info(f"Initializing AWSClientManager in {self.mode} mode")
-        logger.info(f"Region: {self.region}, Endpoint: {self.endpoint_url}")
+        # Cache commonly used values
+        self.region = self.settings.aws_region
+        self.endpoint_url = self.settings.aws_endpoint_url
+        self.mode = self.settings.deployment_mode
+        
+        logger.info(f"Initializing AWSClientManager")
+        logger.info(f"  Mode: {self.mode}")
+        logger.info(f"  Region: {self.region}")
+        logger.info(f"  Endpoint: {self.endpoint_url}")
     
     def get_client(self, service_name: str) -> Any:
-        """Get or create an AWS service client.
-        
-        Args:
-            service_name: AWS service name (e.g., 's3', 'sqs', 'cloudwatch')
-            
-        Returns:
-            Boto3 client for the requested service
-        """
+        """Get or create an AWS service client."""
         # Return existing client if already created
         if service_name in self._clients:
             return self._clients[service_name]
         
-        # Create client with appropriate configuration
+        # Create client with settings-based configuration
         client_kwargs = {
             'region_name': self.region
         }
         
-        # Add endpoint URL for local-mock mode
+        # Add credentials from settings
+        if self.settings.aws_access_key_id:
+            client_kwargs['aws_access_key_id'] = self.settings.aws_access_key_id
+        if self.settings.aws_secret_access_key:
+            client_kwargs['aws_secret_access_key'] = self.settings.aws_secret_access_key
+        
+        # Add endpoint URL for local/mock modes
         if self.endpoint_url and self.mode in ['local-dev', 'aws-mock']:
             client_kwargs['endpoint_url'] = self.endpoint_url
         
@@ -96,18 +98,18 @@ def get_asg_client():
     """Get the Auto Scaling Group client."""
     return AWSClientManager().get_client('autoscaling')
 
-def create_s3_bucket(bucket_name: str) -> bool:
-    """Create an S3 bucket with proper error handling.
+def get_elasticbeanstalk_client():
+    """Get the Elastic Beanstalk client."""
+    return AWSClientManager().get_client('elasticbeanstalk')
+
+def create_s3_bucket(bucket_name: str = None) -> bool:
+    """Create an S3 bucket with proper error handling."""
+    settings = get_settings()
+    bucket_name = bucket_name or settings.s3_bucket_name
     
-    Args:
-        bucket_name: Name of the bucket to create
-        
-    Returns:
-        True if bucket was created or already exists, False otherwise
-    """
     try:
         s3_client = get_s3_client()
-        region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+        region = settings.aws_region
         
         if region == 'us-east-1':
             s3_client.create_bucket(Bucket=bucket_name)
@@ -128,16 +130,11 @@ def create_s3_bucket(bucket_name: str) -> bool:
         logger.error(f"Error creating S3 bucket {bucket_name}: {str(e)}")
         return False
 
-def create_sqs_queue(queue_name: str, attributes: Optional[Dict[str, str]] = None) -> Optional[str]:
-    """Create an SQS queue with proper error handling.
+def create_sqs_queue(queue_name: str = None, attributes: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """Create an SQS queue with proper error handling."""
+    settings = get_settings()
+    queue_name = queue_name or settings.sqs_queue_name
     
-    Args:
-        queue_name: Name of the queue to create
-        attributes: Optional queue attributes
-        
-    Returns:
-        Queue URL if created successfully, None otherwise
-    """
     try:
         sqs_client = get_sqs_client()
         
@@ -156,6 +153,12 @@ def create_sqs_queue(queue_name: str, attributes: Optional[Dict[str, str]] = Non
         queue_url = response.get('QueueUrl')
         if queue_url:
             logger.info(f"Created SQS queue: {queue_name} ({queue_url})")
+            
+            # For mock mode, adjust the URL format if needed
+            if settings.deployment_mode == 'aws-mock':
+                # Keep the original URL from moto, it will be normalized elsewhere
+                pass
+            
             return queue_url
         else:
             logger.error(f"Failed to create SQS queue: {queue_name}")

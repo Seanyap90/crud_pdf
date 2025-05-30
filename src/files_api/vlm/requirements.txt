@@ -1,0 +1,12 @@
+# for docker container
+pdf2image
+torch>=2.2.0
+transformers==4.47.1
+git+https://github.com/sergiopaniego/byaldi.git@colsmolvlm-support
+datasets>=2.16.0
+Pillow>=10.0.0
+bitsandbytes>=0.41.0
+accelerate==1.6.0
+peft==0.14.0
+huggingface_hub[cli]
+boto3

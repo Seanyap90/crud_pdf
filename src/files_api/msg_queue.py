@@ -1,11 +1,12 @@
 import asyncio
 import boto3
-from files_api.config import config
 import logging
 import os
 import time
 from pathlib import Path
 import json
+# Change: Use settings instead of config
+from files_api.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,10 @@ class BaseQueue:
 class LocalQueue(BaseQueue):
     """Handles local queue using file system for IPC"""
     def __init__(self):
-        self.queue_dir = Path("queue_data")
-        self.queue_dir.mkdir(exist_ok=True)
+        settings = get_settings()
+        # Use storage_dir from settings
+        self.queue_dir = Path(settings.storage_dir) / "queue_data"
+        self.queue_dir.mkdir(parents=True, exist_ok=True)
         logger.info("LocalQueue initialized at: %s", self.queue_dir)
 
     async def add_task(self, task):
@@ -89,18 +92,37 @@ class LocalQueue(BaseQueue):
 class SQSQueue(BaseQueue):
     """Handles AWS SQS queue"""
     def __init__(self):
+        # Get settings
+        settings = get_settings()
+        
+        # Create SQS client with settings
         self.sqs = boto3.client(
             "sqs",
-            aws_access_key_id=config.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
+            endpoint_url=settings.aws_endpoint_url,
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_secret_access_key,
+            region_name=settings.aws_region
         )
-        self.queue_url = config.SQS_QUEUE_URL
+        
+        self.queue_url = settings.sqs_queue_url
+        
+        logger.info(f"SQSQueue initialized")
+        logger.info(f"  Endpoint: {settings.aws_endpoint_url}")
+        logger.info(f"  Queue URL: {self.queue_url}")
+        logger.info(f"  Region: {settings.aws_region}")
 
     async def add_task(self, task):
-        self.sqs.send_message(
-            QueueUrl=self.queue_url,
-            MessageBody=str(task),
-        )
+        """Add a task to the SQS queue."""
+        try:
+            response = self.sqs.send_message(
+                QueueUrl=self.queue_url,
+                MessageBody=json.dumps(task),  # Convert dict to JSON string
+            )
+            logger.info(f"Task added to SQS queue with ID: {response.get('MessageId')}")
+            return True
+        except Exception as e:
+            logger.error(f"Error adding task to SQS queue: {str(e)}")
+            return False
 
     async def get_task(self):
         messages = self.sqs.receive_message(
@@ -114,24 +136,34 @@ class SQSQueue(BaseQueue):
                 QueueUrl=self.queue_url,
                 ReceiptHandle=message["ReceiptHandle"],
             )
-            return message["Body"]
+            # Parse the JSON message
+            task = json.loads(message["Body"])
+            logger.info(f"Retrieved task from SQS queue: {task}")
+            return task
         return None
 
 class QueueFactory:
     """Factory to initialize the correct queue handler based on deployment mode"""
 
-    queue_classes = {
-        "local-dev": LocalQueue,
-        "aws-mock": SQSQueue,
-        "aws-prod": SQSQueue,
-    }
-
     @staticmethod
     def get_queue_handler():
-        queue_type = config.QUEUE_TYPE
-        if queue_type not in QueueFactory.queue_classes:
-            raise ValueError(f"Invalid QUEUE_TYPE: {queue_type}. Choose from {list(QueueFactory.queue_classes.keys())}")
-        return QueueFactory.queue_classes[queue_type]()  # Dynamically instantiate the correct class
+        settings = get_settings()
+        
+        queue_classes = {
+            "local-dev": LocalQueue,
+            "aws-mock": SQSQueue,
+            "aws-prod": SQSQueue,
+        }
+        
+        deployment_mode = settings.deployment_mode
+        if deployment_mode not in queue_classes:
+            raise ValueError(
+                f"Invalid deployment_mode: {deployment_mode}. "
+                f"Choose from {list(queue_classes.keys())}"
+            )
+        
+        logger.info(f"Creating queue handler for mode: {deployment_mode}")
+        return queue_classes[deployment_mode]()
 
 # Initialize queue handler (used throughout the app)
 queue_handler = QueueFactory.get_queue_handler()

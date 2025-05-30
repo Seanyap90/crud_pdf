@@ -9,6 +9,7 @@ import argparse
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from contextlib import contextmanager
+from files_api.settings import get_settings
 
 # Import AWS utilities
 from files_api.aws.utils import (
@@ -32,14 +33,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Constants
-DEFAULT_REGION = "us-west-2"
-MOTO_SERVER_PORT = 5000
-S3_BUCKET_NAME = "rag-pdf-storage"
-SQS_QUEUE_NAME = "rag-task-queue"
-ECR_REPO_NAME = "rag-worker"
-IAM_ROLE_NAME = "rag-worker-role"
-IAM_INSTANCE_PROFILE = "rag-worker-profile"
+# Get settings instance
+settings = get_settings()
+
+# Constants from settings (no more hardcoding!)
+DEFAULT_REGION = settings.aws_region
+MOTO_SERVER_PORT = 5000  # This can stay hardcoded as it's moto-specific
+S3_BUCKET_NAME = settings.s3_bucket_name
+SQS_QUEUE_NAME = settings.sqs_queue_name
+ECR_REPO_NAME = settings.ecr_repo_name
+IAM_ROLE_NAME = settings.iam_role_name
+IAM_INSTANCE_PROFILE = settings.iam_instance_profile
 
 # Strategy pattern for different deployment modes
 class DeploymentStrategy:
@@ -76,45 +80,6 @@ class MockAWSStrategy(DeploymentStrategy):
         os.environ["AWS_SECRET_ACCESS_KEY"] = "mock"
         os.environ["AWS_ENDPOINT_URL"] = self.endpoint_url
     
-    def start_moto_server(self) -> None:
-        """Start moto server in background thread."""
-        logger.info(f"Starting moto server on port {MOTO_SERVER_PORT}...")
-        
-        def run_server():
-            try:
-                subprocess.call([
-                    "python", "-m", "moto.server", 
-                    "-p", str(MOTO_SERVER_PORT)
-                ])
-            except Exception as e:
-                logger.error(f"Error in moto server: {str(e)}")
-        
-        self.moto_server = threading.Thread(target=run_server)
-        self.moto_server.daemon = True
-        self.moto_server.start()
-        
-        # Wait for server to start
-        max_tries = 10
-        for i in range(max_tries):
-            try:
-                import requests
-                response = requests.get(f"{self.endpoint_url}/moto-api/")
-                if response.status_code == 200:
-                    logger.info("Moto server started successfully")
-                    return
-            except Exception:
-                pass
-            
-            logger.info(f"Waiting for moto server ({i+1}/{max_tries})...")
-            time.sleep(2)
-    
-    def stop_moto_server(self) -> None:
-        """Stop moto server if running."""
-        if self.moto_server and self.moto_server.is_alive():
-            logger.info("Stopping moto server...")
-            # There's no clean way to stop the thread, but we signal this
-            # when the main script exits the daemon thread will terminate
-    
     def get_user_data_script(self, resources: Dict[str, Any]) -> str:
         """Get user data script for EC2 instances in mock mode."""
         return f"""#!/bin/bash
@@ -122,7 +87,7 @@ echo "Starting RAG Worker in aws-mock mode..."
 export AWS_DEFAULT_REGION={DEFAULT_REGION}
 export AWS_ACCESS_KEY_ID=mock
 export AWS_SECRET_ACCESS_KEY=mock
-export AWS_ENDPOINT_URL={self.endpoint_url}
+export AWS_ENDPOINT_URL=http://host.docker.internal:5000
 export S3_BUCKET_NAME={resources['s3_bucket_name']}
 export SQS_QUEUE_URL={resources['sqs_queue_url']}
 export QUEUE_TYPE=aws-mock
@@ -294,6 +259,34 @@ class AWSEnvironmentBuilder:
     Implements the Builder pattern to provide a structured way to create
     AWS resources for the application deployment.
     """
+
+    def export_environment(self) -> 'AWSEnvironmentBuilder':
+        """Export configuration to environment variables instead of file."""
+        # Set environment variables for docker-compose and other tools
+        os.environ['DEPLOYMENT_MODE'] = self.mode
+        os.environ['AWS_DEFAULT_REGION'] = self.region
+        os.environ['S3_BUCKET_NAME'] = self.resources.get('s3_bucket_name', S3_BUCKET_NAME)
+        os.environ['SQS_QUEUE_URL'] = self.resources.get('sqs_queue_url', '')
+        os.environ['SQS_QUEUE_NAME'] = SQS_QUEUE_NAME
+        os.environ['ASG_NAME'] = self.resources.get('asg_name', '')
+        
+        if self.mode == "aws-mock":
+            os.environ['AWS_ENDPOINT_URL'] = self.strategy.endpoint_url
+            os.environ['AWS_ACCESS_KEY_ID'] = 'mock'
+            os.environ['AWS_SECRET_ACCESS_KEY'] = 'mock'
+        
+        # Additional configuration
+        os.environ['MODEL_MEMORY_LIMIT'] = settings.model_memory_limit
+        os.environ['DISABLE_DUPLICATE_LOADING'] = str(settings.disable_duplicate_loading).lower()
+        os.environ['LOG_LEVEL'] = settings.log_level
+        os.environ['STORAGE_DIR'] = settings.storage_dir
+        
+        # Decoupling-specific variables
+        os.environ['SQS_RESULT_QUEUE_URL'] = self.resources.get('sqs_queue_url', '').replace('task-queue', 'result-queue')
+        os.environ['DB_ACCESS_ENABLED'] = 'false'
+        
+        logger.info("Exported configuration to environment variables")
+        return self
     
     def __init__(self, mode: str = "aws-mock", region: str = DEFAULT_REGION):
         """Initialize the builder.
@@ -395,9 +388,22 @@ class AWSEnvironmentBuilder:
         """Build SQS queue for task processing."""
         queue_url = create_sqs_queue(queue_name)
         if queue_url:
-            self.resources['sqs_queue_url'] = queue_url
+            # Extract just the queue name from the URL
+            # Original format: http://localhost:5000/123456789012/rag-task-queue
+            queue_name = queue_url.split('/')[-1]
             
-            # Get queue ARN
+            # Create a normalized URL that will work in Docker network
+            if self.mode == "aws-mock":
+                normalized_url = f"http://localhost:5000/{queue_name}"
+            else:
+                # For production, use the original URL
+                normalized_url = queue_url
+                
+            # Store the normalized URL
+            self.resources['sqs_queue_url'] = normalized_url
+            logger.info(f"Using normalized SQS queue URL: {normalized_url}")
+            
+            # Get queue ARN (still using original URL for this API call)
             queue_arn = get_queue_arn(queue_url)
             if queue_arn:
                 self.resources['sqs_queue_arn'] = queue_arn
@@ -724,7 +730,13 @@ class AWSEnvironmentBuilder:
                 self.build_auto_scaling_group()
             
             self.build_cloudwatch_alarms()
-            self.create_env_file()
+            
+            # Export to environment variables instead of file
+            self.export_environment()
+            
+            # Optionally create env file if requested
+            if os.environ.get('CREATE_ENV_FILE', 'false').lower() == 'true':
+                self.create_env_file()
             
             return self
         except Exception as e:
@@ -735,10 +747,10 @@ class AWSEnvironmentBuilder:
         """Create environment file with resource information."""
         # Create content
         env_content = f"""# AWS Resource Configuration - Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}
-AWS_DEFAULT_REGION={self.region}
-AWS_ACCESS_KEY_ID={"mock" if self.mode == "aws-mock" else ""}
-AWS_SECRET_ACCESS_KEY={"mock" if self.mode == "aws-mock" else ""}
-"""
+    AWS_DEFAULT_REGION={self.region}
+    AWS_ACCESS_KEY_ID={"mock" if self.mode == "aws-mock" else ""}
+    AWS_SECRET_ACCESS_KEY={"mock" if self.mode == "aws-mock" else ""}
+    """
         
         # Add endpoint URL for aws-mock mode
         if self.mode == "aws-mock":
@@ -749,6 +761,12 @@ AWS_SECRET_ACCESS_KEY={"mock" if self.mode == "aws-mock" else ""}
         env_content += f"SQS_QUEUE_URL={self.resources.get('sqs_queue_url', '')}\n"
         env_content += f"QUEUE_TYPE={self.mode}\n"
         env_content += "DISABLE_DUPLICATE_LOADING=true\n"
+        
+        # Add decoupling-specific variables
+        env_content += f"SQS_RESULT_QUEUE_URL={self.resources.get('sqs_queue_url', '').replace('task-queue', 'result-queue')}\n"
+        env_content += "DB_ACCESS_ENABLED=false\n"  # Disable direct DB access in containers
+        env_content += "STORAGE_DIR=storage\n"      # For local-dev fallback
+        env_content += "LOG_LEVEL=INFO\n"           # Set logging level
         
         # Write to file
         with open(path, "w") as f:
@@ -1046,7 +1064,13 @@ def main():
                         help='Skip cleanup of AWS resources')
     parser.add_argument('--keep-running', action='store_true',
                         help='Keep the environment running until Ctrl+C')
+    parser.add_argument('--create-env-file', action='store_true',
+                        help='Create .env.aws file (optional)')
     args = parser.parse_args()
+    
+    # Set environment variable if --create-env-file is specified
+    if args.create_env_file:
+        os.environ['CREATE_ENV_FILE'] = 'true'
     
     deploy_environment(
         mode=args.mode,

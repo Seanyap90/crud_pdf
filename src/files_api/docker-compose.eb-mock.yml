@@ -1,22 +1,20 @@
 version: '3.8'
 
 services:
-  worker:
+  # VLM+RAG Worker - simulates EB worker environment
+  eb-worker:
     build:
-      context: ../../  # Navigate to project root
+      context: ../../
       dockerfile: src/files_api/vlm/Dockerfile
-    # Load environment from .env.aws file created by deploy.py
-    env_file:
-      - ../../.env.aws
     environment:
       # Core deployment configuration
-      - DEPLOYMENT_MODE=aws-mock
+      - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-aws-mock}
+      - QUEUE_TYPE=${DEPLOYMENT_MODE:-aws-mock} 
       
-      # AWS Configuration
+      # AWS Configuration (from environment or defaults)
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-mock}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-mock}
-      # Use host.docker.internal for container-to-host communication
       - AWS_ENDPOINT_URL=http://host.docker.internal:5000
       
       # S3 Configuration
@@ -24,14 +22,11 @@ services:
       
       # SQS Configuration
       - SQS_QUEUE_NAME=${SQS_QUEUE_NAME:-rag-task-queue}
-      # Override the queue URL for docker environment
       - SQS_QUEUE_URL=http://host.docker.internal:5000/queue/${SQS_QUEUE_NAME:-rag-task-queue}
       
-      # Model Configuration (from settings/env)
+      # Model Configuration (from settings or defaults)
       - MODEL_MEMORY_LIMIT=${MODEL_MEMORY_LIMIT:-7GiB}
       - DISABLE_DUPLICATE_LOADING=${DISABLE_DUPLICATE_LOADING:-true}
-      
-      # Memory management flags
       - MAX_CONTENT_LENGTH=256
       - LOW_MEMORY=true
       - OFFLOAD_TO_CPU=true
@@ -49,43 +44,55 @@ services:
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       
-      # Transformers cache location
+      # Transformers cache
       - TRANSFORMERS_CACHE=/app/cache
       - HF_HOME=/app/cache
-
+      
+      # EB-specific environment variables (optional)
+      - EB_APP_NAME=${EB_APP_NAME:-}
+      - EB_ENV_NAME=${EB_ENV_NAME:-}
+    
     deploy:
+      mode: replicated
+      replicas: ${EB_WORKER_REPLICAS:-1}  # Can be scaled to simulate EB auto-scaling
       resources:
         reservations:
-          # Reserve all GPU resources
           devices:
             - driver: nvidia
               count: all
               capabilities: [gpu]
         limits:
-          # Limit container memory to avoid OOM
-          memory: 26G 
+          memory: 26G
     
-    # Improved container performance for high-res processing
     shm_size: 8gb
     cpuset: "0-11"
     mem_swappiness: 60
     ulimits:
-      memlock: -1  # Unlimited memlock for CUDA operations
+      memlock: -1
+    
+    runtime: nvidia
+    
+    networks:
+      - eb-network
+    
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
     restart: unless-stopped
     
-    # Healthcheck with longer timeout for high-res processing
+    # No ports exposed - this is not an HTTP service
+    # The worker polls SQS directly
+    
     healthcheck:
       test: ["CMD-SHELL", "ps aux | grep python | grep -v grep || exit 1"]
       interval: 60s
       timeout: 20s
       retries: 3
       start_period: 300s
-    
-    runtime: nvidia
-    
-    networks:
-      - rag-network
 
 networks:
-  rag-network:
+  eb-network:
     driver: bridge
+
+# To simulate EB auto-scaling locally, you can scale the worker:
+# docker-compose -f docker-compose.eb-mock.yml up --scale eb-worker=3

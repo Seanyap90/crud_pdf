@@ -84,8 +84,8 @@ class ContainerScaler:
     def _scale_containers(self, desired_count):
         """Scale containers to match desired count."""
         try:
-            # Use docker-compose to scale
-            cmd = f"docker-compose -f {self.compose_file} up -d --scale worker={desired_count}"
+            # Use docker-compose to scale with env file
+            cmd = f"docker-compose -f {self.compose_file} --env-file .env.aws up -d --scale worker={desired_count}"
             subprocess.run(cmd, shell=True)
             logger.info(f"Scaled to {desired_count} containers")
         except Exception as e:

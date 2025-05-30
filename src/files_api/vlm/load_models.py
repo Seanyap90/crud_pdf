@@ -191,7 +191,7 @@ class ModelManager:
         try:
             processor = AutoProcessor.from_pretrained(
                 "HuggingFaceTB/SmolVLM-Instruct", 
-                local_files_only=True
+                local_files_only=False
             )
         except Exception as e:
             logger.error(f"Error loading processor: {str(e)}")

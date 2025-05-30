@@ -52,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],  # Allow all headers
     )
     app.state.settings = settings
+    logger.info("creating db")
     init_db()
 
     app.include_router(ROUTER)
