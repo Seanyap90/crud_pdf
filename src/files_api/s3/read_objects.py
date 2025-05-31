@@ -27,7 +27,12 @@ def object_exists_in_s3(bucket_name: str, object_key: str, s3_client: Optional["
 
     :return: True if the object exists, False otherwise.
     """
-    s3_client = s3_client or boto3.client("s3")
+    #s3_client = s3_client or boto3.client("s3")
+    if s3_client is None:
+        # Use the centralized client that respects mock settings
+        from files_api.aws.utils import get_s3_client
+        s3_client = get_s3_client()
+    
     try:
         s3_client.head_object(Bucket=bucket_name, Key=object_key)
         return True
@@ -52,7 +57,11 @@ def fetch_s3_object(
 
     :return: Metadata of the object.
     """
-    s3_client = s3_client or boto3.client("s3")
+    #s3_client = s3_client or boto3.client("s3")
+    if s3_client is None:
+        # Use the centralized client that respects mock settings
+        from files_api.aws.utils import get_s3_client
+        s3_client = get_s3_client()
     response = s3_client.get_object(Bucket=bucket_name, Key=object_key)
     return response
 
@@ -75,7 +84,12 @@ def fetch_s3_objects_using_page_token(
         1. Possibly empty list of objects in the current page.
         2. Next continuation token if there are more pages, otherwise None.
     """
-    s3_client = s3_client or boto3.client("s3")
+    #s3_client = s3_client or boto3.client("s3")
+    if s3_client is None:
+        # Use the centralized client that respects mock settings
+        from files_api.aws.utils import get_s3_client
+        s3_client = get_s3_client()
+
     response: "ListObjectsV2OutputTypeDef" = s3_client.list_objects_v2(
         Bucket=bucket_name,
         ContinuationToken=continuation_token,
@@ -105,7 +119,11 @@ def fetch_s3_objects_metadata(
         1. Possibly empty list of objects in the current page.
         2. Next continuation token if there are more pages, otherwise None.
     """
-    s3_client = s3_client or boto3.client("s3")
+    #s3_client = s3_client or boto3.client("s3")
+    if s3_client is None:
+        # Use the centralized client that respects mock settings
+        from files_api.aws.utils import get_s3_client
+        s3_client = get_s3_client()
     response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix or "", MaxKeys=max_keys)
     files: list["ObjectTypeDef"] = response.get("Contents", [])
     next_page_token: str | None = response.get("NextContinuationToken")

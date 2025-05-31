@@ -64,6 +64,10 @@ class Config:
         get_settings.cache_clear()  # Clear the cache
         _settings = get_settings()
         self._refresh_from_settings()
+    
+    def export_to_environment(self):
+        """Export configuration to environment variables."""
+        return _settings.export_environment_variables()
 
 
 # Create global instance for backwards compatibility

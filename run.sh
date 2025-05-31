@@ -167,93 +167,12 @@ function local-dev {
 #     aws-mock-down
 # }
 
-# function aws-mock {
-#     set +e
-    
-#     echo "Setting up AWS mock infrastructure with Elastic Beanstalk Worker..."
-
-#     # Get absolute path to project root
-#     PROJECT_ROOT="$(pwd)"
-    
-#     # Start Moto server locally
-#     echo "Starting Moto server on localhost:5000..."
-#     python -m moto.server -p 5000 &
-#     MOTO_PID=$!
-    
-#     # Wait for Moto server to be ready
-#     echo -n "Waiting for Moto server to start"
-#     max_retries=10
-#     counter=0
-#     while [ $counter -lt $max_retries ]; do
-#         echo -n "."
-#         if curl -s http://localhost:5000 &> /dev/null; then
-#             echo " ✓"
-#             echo "Moto server is ready!"
-#             break
-#         fi
-#         sleep 1
-#         counter=$((counter + 1))
-#     done
-    
-#     if [ $counter -eq $max_retries ]; then
-#         echo ""
-#         echo "Error: Moto server failed to start within timeout"
-#         kill $MOTO_PID 2>/dev/null
-#         exit 1
-#     fi
-    
-#     # Define variables
-#     export S3_BUCKET_NAME="${S3_BUCKET_NAME:-rag-pdf-storage}"
-#     export SQS_QUEUE_NAME="${SQS_QUEUE_NAME:-rag-task-queue}"
-#     export AWS_ENDPOINT_URL="http://localhost:5000"
-#     export AWS_ACCESS_KEY_ID="mock"
-#     export AWS_SECRET_ACCESS_KEY="mock"
-#     export AWS_DEFAULT_REGION="us-east-1"
-#     export QUEUE_TYPE="aws-mock"
-    
-#     # Run deploy script to create AWS resources
-#     echo "Creating AWS mock resources (S3, SQS)..."
-#     python -m files_api.aws.deploy_eb --mode aws-mock --no-cleanup
-    
-#     if [ $? -ne 0 ]; then
-#         echo "Error: Failed to create AWS mock resources"
-#         kill $MOTO_PID 2>/dev/null
-#         exit 1
-#     fi
-    
-#     # Start the EB worker containers
-#     echo "Starting EB worker containers..."
-#     cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.eb-mock.yml up -d --build
-#     cd "$PROJECT_ROOT"
-    
-#     # Trap Ctrl+C to gracefully shutdown everything
-#     trap 'echo "Shutting down AWS mock environment..."; kill $MOTO_PID 2>/dev/null; docker-compose -f docker-compose.eb-mock.yml down; exit 0' INT
-    
-#     # Start FastAPI with uvicorn
-#     echo "Starting FastAPI application..."
-#     python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000
-    
-#     # If FastAPI exits, clean up
-#     echo "FastAPI server exited, cleaning up environment"
-#     kill $MOTO_PID 2>/dev/null
-#     docker-compose -f docker-compose.eb-mock.yml down
-# }
-
 # Unified aws-mock function with deployment type selection
+# Simplified aws-mock function - only EB deployment
 function aws-mock {
     set +e
     
-    # Check for deployment type argument
-    local DEPLOY_TYPE="${1:-ec2}"  # Default to EC2 if not specified
-    
-    if [ "$DEPLOY_TYPE" != "ec2" ] && [ "$DEPLOY_TYPE" != "eb" ]; then
-        echo "Error: Invalid deployment type '$DEPLOY_TYPE'. Use 'ec2' or 'eb'"
-        echo "Usage: run.sh aws-mock [ec2|eb]"
-        exit 1
-    fi
-    
-    echo "Setting up AWS mock infrastructure with local Moto server..."
-    echo "Deployment type: $DEPLOY_TYPE"
+    echo "Setting up AWS mock infrastructure with Elastic Beanstalk worker..."
     
     # Set deployment mode
     export DEPLOYMENT_MODE="aws-mock"
@@ -288,60 +207,23 @@ function aws-mock {
         exit 1
     fi
     
-    # Get configuration from Python settings
-    eval $(get_settings_as_env)
+    # Deploy EB infrastructure using deploy_eb.py
+    echo "Creating EB mock resources (S3, SQS, etc.)..."
+    python -m files_api.aws.deploy_eb --mode aws-mock --no-cleanup
     
-    # Deploy based on type
-    if [ "$DEPLOY_TYPE" == "ec2" ]; then
-        echo "Deploying EC2/ASG infrastructure..."
-        
-        # Run deploy.py to create AWS resources
-        echo "Creating AWS mock resources (S3, SQS, etc.)..."
-        python -m files_api.aws.deploy --mode aws-mock --no-cleanup
-        
-        if [ $? -ne 0 ]; then
-            echo "Error: Failed to create AWS mock resources"
-            kill $MOTO_PID 2>/dev/null
-            exit 1
-        fi
-        
-        # Start the worker containers
-        echo "Starting worker containers..."
-        cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.aws-mock.yml up -d
-        cd "$PROJECT_ROOT"
-
-        # Start container scaler
-        echo "Starting container scaler in the background..."
-        python -m files_api.aws.container_scaler &
-        SCALER_PID=$!
-        
-        # Trap Ctrl+C to gracefully shutdown everything
-        trap 'echo "Shutting down AWS mock environment..."; kill $MOTO_PID $SCALER_PID 2>/dev/null; aws-mock-down ec2; exit 0' INT
-        
-    else  # eb deployment
-        echo "Deploying Elastic Beanstalk infrastructure..."
-        
-        # Run deploy_eb.py to create AWS resources
-        echo "Creating EB mock resources (S3, SQS, etc.)..."
-        python -m files_api.aws.deploy_eb --mode aws-mock --no-cleanup
-        
-        if [ $? -ne 0 ]; then
-            echo "Error: Failed to create EB mock resources"
-            kill $MOTO_PID 2>/dev/null
-            exit 1
-        fi
-        
-        # Start the EB worker containers
-        echo "Starting EB worker containers..."
-        cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.eb-mock.yml up -d
-        cd "$PROJECT_ROOT"
-        
-        # No container scaler needed for EB
-        SCALER_PID=""
-        
-        # Trap Ctrl+C to gracefully shutdown everything
-        trap 'echo "Shutting down EB mock environment..."; kill $MOTO_PID 2>/dev/null; aws-mock-down eb; exit 0' INT
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to create EB mock resources"
+        kill $MOTO_PID 2>/dev/null
+        exit 1
     fi
+    
+    # Start the EB worker containers
+    echo "Starting EB worker containers..."
+    cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.eb-mock.yml up -d
+    cd "$PROJECT_ROOT"
+    
+    # Trap Ctrl+C to gracefully shutdown everything
+    trap 'echo "Shutting down EB mock environment..."; kill $MOTO_PID 2>/dev/null; aws-mock-down; exit 0' INT
     
     # Start FastAPI with uvicorn
     echo "Starting FastAPI application..."
@@ -349,40 +231,21 @@ function aws-mock {
     
     # If FastAPI exits, clean up
     echo "FastAPI server exited, cleaning up environment"
-    kill $MOTO_PID $SCALER_PID 2>/dev/null
-    aws-mock-down $DEPLOY_TYPE
+    kill $MOTO_PID 2>/dev/null
+    aws-mock-down
 }
 
 function aws-mock-down {
-    local DEPLOY_TYPE="${1:-ec2}"  # Default to EC2 if not specified
-    
-    echo "Shutting down AWS mock environment (type: $DEPLOY_TYPE)..."
+    echo "Shutting down AWS mock environment..."
     
     # Kill any running processes
     pkill -f "python -m moto.server" || true
     
-    if [ "$DEPLOY_TYPE" == "ec2" ]; then
-        pkill -f "python -m files_api.aws.container_scaler" || true
-        
-        # Stop worker containers
-        cd src/files_api && docker-compose -f docker-compose.aws-mock.yml down
-    else  # eb
-        # Stop EB worker containers
-        cd src/files_api && docker-compose -f docker-compose.eb-mock.yml down
-    fi
+    # Stop EB worker containers
+    cd src/files_api && docker-compose -f docker-compose.eb-mock.yml down
     
     echo "AWS mock environment shut down successfully"
 }
-
-# New helper functions for specific deployments
-function aws-mock-ec2 {
-    aws-mock ec2
-}
-
-function aws-mock-eb {
-    aws-mock eb
-}
-
 
 # New function to install npm dependencies
 function npm-install {
@@ -440,7 +303,7 @@ function dev {
     
     # Start FastAPI app in background
     echo "Starting FastAPI app"
-    python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000 &
+    python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000 --log-level debug &
     
     # Wait for the API to be ready
     echo "Waiting for FastAPI to be ready..."

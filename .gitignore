@@ -25,3 +25,4 @@ gateway-config-structure-2.yaml
 src/files_api/sample
 .env.aws
 /rag_offload
+/storage

@@ -13,29 +13,13 @@ run:
 local-dev:
 	bash run.sh local-dev
 
-# Test AWS infrastructure deployment locally (default to EC2)
-aws-mock:
-	bash run.sh aws-mock ec2
-
-# Test AWS EC2/ASG infrastructure deployment locally
-aws-mock-ec2:
-	bash run.sh aws-mock ec2
-
 # Test AWS Elastic Beanstalk deployment locally  
-aws-mock-eb:
-	bash run.sh aws-mock eb
+aws-mock:
+	bash run.sh aws-mock
 
-# Shutdown AWS mock (default to EC2)
+# Shutdown AWS mock
 aws-mock-down:
-	bash run.sh aws-mock-down ec2
-
-# Shutdown AWS mock EC2
-aws-mock-ec2-down:
-	bash run.sh aws-mock-down ec2
-
-# Shutdown AWS mock EB
-aws-mock-eb-down:
-	bash run.sh aws-mock-down eb
+	bash run.sh aws-mock-down
 
 # Deploy to real AWS
 aws-prod:

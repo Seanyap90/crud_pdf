@@ -1,4 +1,5 @@
 # src/files_api/settings.py
+import os
 from typing import Optional
 from pydantic import Field, validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -11,9 +12,8 @@ class Settings(BaseSettings):
     
     Configuration precedence:
     1. Environment variables (highest priority)
-    2. .env.aws file (if exists)
-    3. .env file
-    4. Default values in this class (lowest priority)
+    2. .env file (if exists)
+    3. Default values in this class (lowest priority)
     
     Usage:
         from files_api.settings import get_settings
@@ -176,9 +176,52 @@ class Settings(BaseSettings):
             # For aws-prod, the URL will be set after queue creation
         return v
 
+    def export_environment_variables(self) -> None:
+        """Export configuration as environment variables.
+        
+        This replaces the old get_settings_as_env helper function from run.sh
+        """
+        env_vars = {
+            'DEPLOYMENT_MODE': self.deployment_mode,
+            'S3_BUCKET_NAME': self.s3_bucket_name,
+            'SQS_QUEUE_NAME': self.sqs_queue_name,
+            'AWS_DEFAULT_REGION': self.aws_region,
+            'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
+            'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
+            'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
+            'SQS_QUEUE_URL': self.sqs_queue_url or '',
+            'MODEL_MEMORY_LIMIT': self.model_memory_limit,
+            'DISABLE_DUPLICATE_LOADING': str(self.disable_duplicate_loading).lower(),
+            'LOG_LEVEL': self.log_level,
+        }
+        
+        for key, value in env_vars.items():
+            if value:  # Only set non-empty values
+                os.environ[key] = str(value)
+
+    def get_environment_dict(self) -> dict:
+        """Get configuration as a dictionary suitable for docker-compose or subprocess.
+        
+        Returns:
+            Dictionary of environment variables
+        """
+        return {
+            'DEPLOYMENT_MODE': self.deployment_mode,
+            'S3_BUCKET_NAME': self.s3_bucket_name,
+            'SQS_QUEUE_NAME': self.sqs_queue_name,
+            'AWS_DEFAULT_REGION': self.aws_region,
+            'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
+            'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
+            'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
+            'SQS_QUEUE_URL': self.sqs_queue_url or '',
+            'MODEL_MEMORY_LIMIT': self.model_memory_limit,
+            'DISABLE_DUPLICATE_LOADING': str(self.disable_duplicate_loading).lower(),
+            'LOG_LEVEL': self.log_level,
+        }
+
     model_config = SettingsConfigDict(
         case_sensitive=False,
-        env_file=(".env", ".env.aws"),  # Load both files, .env.aws takes precedence
+        env_file=(".env", ".env.aws"),  # Read both .env and .env.aws (aws takes precedence)
         env_file_encoding="utf-8",
         extra="allow",  # Allow extra fields for backwards compatibility
         # Allow reading from environment variables with different names

@@ -27,7 +27,11 @@ def upload_s3_object(
     :param s3_client: An optional boto3 S3 client. If not provided, one will be created.
     """
     content_type = content_type or "application/octet-stream"
-    s3_client = s3_client or boto3.client("s3")
+    #s3_client = s3_client or boto3.client("s3")
+    if s3_client is None:
+        # Use the centralized client that respects mock settings
+        from files_api.aws.utils import get_s3_client
+        s3_client = get_s3_client()
     s3_client.put_object(
         Bucket=bucket_name,
         Key=object_key,
