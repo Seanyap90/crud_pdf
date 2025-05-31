@@ -10,3 +10,5 @@ accelerate==1.6.0
 peft==0.14.0
 huggingface_hub[cli]
 boto3
+pydantic
+pydantic-settings

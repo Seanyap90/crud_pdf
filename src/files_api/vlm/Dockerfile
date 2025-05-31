@@ -100,6 +100,7 @@ RUN touch /app/files_api/__init__.py \
 
 # Copy application modules - copy these layers last as they change most frequently
 COPY src/files_api/config.py /app/files_api/
+COPY src/files_api/settings.py /app/files_api/
 COPY src/files_api/msg_queue.py /app/files_api/
 COPY src/files_api/storage_adapter.py /app/files_api/
 COPY src/files_api/vlm/load_models_eb.py /app/files_api/vlm/
