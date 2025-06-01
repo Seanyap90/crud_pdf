@@ -54,22 +54,31 @@ function run {
 function local-dev {
     set +e
     
-    # Set queue type first
-    export QUEUE_TYPE="local-dev"
-    
-    # Set model loading behavior
-    export DISABLE_DUPLICATE_LOADING="true"
-    export MODEL_MEMORY_LIMIT="24GiB"  # Adjust based on your available GPU memory
-    
-    # Start moto server
-    python -m moto.server -p 5000 &
-    MOTO_PID=$!
-    
+    # Create .env.local to override any aws-mock settings
+    cat > .env.local << EOF
+DEPLOYMENT_MODE=local-dev
+QUEUE_TYPE=local-dev
+AWS_ENDPOINT_URL=http://localhost:5000
+AWS_ACCESS_KEY_ID=mock
+AWS_SECRET_ACCESS_KEY=mock
+S3_BUCKET_NAME=some-bucket
+MODEL_MEMORY_LIMIT=24GiB
+DISABLE_DUPLICATE_LOADING=true
+EOF
+
     # Configure AWS mock environment
+    export DEPLOYMENT_MODE="local-dev"
+    export QUEUE_TYPE="local-dev"
+    export DISABLE_DUPLICATE_LOADING="true"
+    export MODEL_MEMORY_LIMIT="24GiB"
     export AWS_ENDPOINT_URL="http://localhost:5000"
     export AWS_SECRET_ACCESS_KEY="mock"
     export AWS_ACCESS_KEY_ID="mock"
     export S3_BUCKET_NAME="some-bucket"
+
+    # Start moto server
+    python -m moto.server -p 5000 &
+    MOTO_PID=$!
     
     # Create mock bucket
     aws s3 mb "s3://$S3_BUCKET_NAME"

@@ -164,10 +164,10 @@ class ModelManager:
         )
         self.rag = RAGMultiModalModel.from_pretrained(
             "vidore/colpali",
-            device_map="auto",
-            torch_dtype=torch.float16,
-            max_memory={0: "24GiB"},
-            quantization_config=quantization_config,
+            #device_map="auto",
+            #torch_dtype=torch.float16,
+            #max_memory={0: "24GiB"},
+            #quantization_config=quantization_config,
         )
         self._is_rag_initialized = True
         logger.info("RAG model initialized successfully")
@@ -191,7 +191,7 @@ class ModelManager:
         try:
             processor = AutoProcessor.from_pretrained(
                 "HuggingFaceTB/SmolVLM-Instruct", 
-                local_files_only=False
+                local_files_only=True
             )
         except Exception as e:
             logger.error(f"Error loading processor: {str(e)}")
