@@ -99,11 +99,15 @@ EOF
     wait
 }
 
+# Simplified aws-mock function - only EB deployment
 # function aws-mock {
 #     set +e
     
-#     echo "Setting up AWS mock infrastructure with local Moto server..."
-
+#     echo "Setting up AWS mock infrastructure with Elastic Beanstalk worker..."
+    
+#     # Set deployment mode
+#     export DEPLOYMENT_MODE="aws-mock"
+    
 #     # Get absolute path to project root
 #     PROJECT_ROOT="$(pwd)"
     
@@ -134,37 +138,23 @@ EOF
 #         exit 1
 #     fi
     
-#     # Define variables
-#     export S3_BUCKET_NAME="${S3_BUCKET_NAME:-rag-pdf-storage}"
-#     export SQS_QUEUE_URL="${SQS_QUEUE_URL:-http://localhost:5000/queue/rag-task-queue}"
-#     export AWS_ENDPOINT_URL="http://localhost:5000"
-#     export AWS_ACCESS_KEY_ID="mock"
-#     export AWS_SECRET_ACCESS_KEY="mock"
-#     export AWS_DEFAULT_REGION="us-east-1"
-#     export QUEUE_TYPE="aws-mock"
-    
-#     # Run deploy.py to create AWS resources
-#     echo "Creating AWS mock resources (S3, SQS, etc.)..."
-#     python -m files_api.aws.deploy --mode aws-mock --no-cleanup
+#     # Deploy EB infrastructure using deploy_eb.py
+#     echo "Creating EB mock resources (S3, SQS, etc.)..."
+#     python -m files_api.aws.deploy_eb --mode aws-mock --no-cleanup
     
 #     if [ $? -ne 0 ]; then
-#         echo "Error: Failed to create AWS mock resources"
+#         echo "Error: Failed to create EB mock resources"
 #         kill $MOTO_PID 2>/dev/null
 #         exit 1
 #     fi
     
-#     # Start the worker containers
-#     echo "Starting worker containers..."
-#     cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.aws-mock.yml up -d --build
+#     # Start the EB worker containers
+#     echo "Starting EB worker containers..."
+#     cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.eb-mock.yml up -d
 #     cd "$PROJECT_ROOT"
-
-#     # Start container scaler
-#     echo "Starting container scaler in the background..."
-#     python -m files_api.aws.container_scaler &
-#     SCALER_PID=$!
     
 #     # Trap Ctrl+C to gracefully shutdown everything
-#     trap 'echo "Shutting down AWS mock environment..."; kill $MOTO_PID $SCALER_PID 2>/dev/null; aws-mock-down; exit 0' INT
+#     trap 'echo "Shutting down EB mock environment..."; kill $MOTO_PID 2>/dev/null; aws-mock-down; exit 0' INT
     
 #     # Start FastAPI with uvicorn
 #     echo "Starting FastAPI application..."
@@ -172,16 +162,27 @@ EOF
     
 #     # If FastAPI exits, clean up
 #     echo "FastAPI server exited, cleaning up environment"
-#     kill $MOTO_PID $SCALER_PID 2>/dev/null
+#     kill $MOTO_PID 2>/dev/null
 #     aws-mock-down
 # }
 
-# Unified aws-mock function with deployment type selection
-# Simplified aws-mock function - only EB deployment
+# function aws-mock-down {
+#     echo "Shutting down AWS mock environment..."
+    
+#     # Kill any running processes
+#     pkill -f "python -m moto.server" || true
+    
+#     # Stop EB worker containers
+#     cd src/files_api && docker-compose -f docker-compose.eb-mock.yml down
+    
+#     echo "AWS mock environment shut down successfully"
+# }
+
+# with autoscaling simulation
 function aws-mock {
     set +e
     
-    echo "Setting up AWS mock infrastructure with Elastic Beanstalk worker..."
+    echo "Setting up AWS mock infrastructure with EB worker autoscaling simulation..."
     
     # Set deployment mode
     export DEPLOYMENT_MODE="aws-mock"
@@ -226,21 +227,41 @@ function aws-mock {
         exit 1
     fi
     
-    # Start the EB worker containers
-    echo "Starting EB worker containers..."
+    # Get SQS queue URL from environment (set by deploy_eb.py)
+    SQS_QUEUE_URL="${SQS_QUEUE_URL:-http://localhost:5000/queue/rag-task-queue}"
+    
+    # Start the single EB worker container (representing one instance)
+    echo "Starting EB worker container (representing 1 instance)..."
     cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.eb-mock.yml up -d
     cd "$PROJECT_ROOT"
     
-    # Trap Ctrl+C to gracefully shutdown everything
-    trap 'echo "Shutting down EB mock environment..."; kill $MOTO_PID 2>/dev/null; aws-mock-down; exit 0' INT
+    # Start autoscaling simulator in background
+    echo "Starting EB Autoscaling Simulator..."
+    python -m files_api.aws.eb_scale_sim \
+        --queue-url "$SQS_QUEUE_URL" \
+        --min-instances 1 \
+        --max-instances 5 \
+        --scale-up-threshold 2 \
+        --scale-down-threshold 1 \
+        --cooldown 60 \
+        --evaluation-interval 15 \
+        --evaluation-periods 1 &
+    SIMULATOR_PID=$!
+    
+    # Enhanced trap to kill all processes
+    trap 'echo "Shutting down EB mock environment..."; kill $MOTO_PID $SIMULATOR_PID 2>/dev/null; aws-mock-down; exit 0' INT
     
     # Start FastAPI with uvicorn
     echo "Starting FastAPI application..."
+    echo "📊 Monitor autoscaling decisions in the logs above"
+    echo "📈 Upload PDFs to trigger queue activity and observe scaling behavior"
+    echo "🛑 Press Ctrl+C to shutdown everything"
+    
     python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000
     
     # If FastAPI exits, clean up
     echo "FastAPI server exited, cleaning up environment"
-    kill $MOTO_PID 2>/dev/null
+    kill $MOTO_PID $SIMULATOR_PID 2>/dev/null
     aws-mock-down
 }
 
@@ -249,6 +270,7 @@ function aws-mock-down {
     
     # Kill any running processes
     pkill -f "python -m moto.server" || true
+    pkill -f "eb_autoscaling_simulator" || true
     
     # Stop EB worker containers
     cd src/files_api && docker-compose -f docker-compose.eb-mock.yml down
