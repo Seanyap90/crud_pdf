@@ -27,3 +27,6 @@ src/files_api/sample
 .env.local
 /rag_offload
 /storage
+/src/files_api/s3/__pycache__/*
+/src/files_api/aws/__pycache__/*
+/src/files_api/__pycache__/*
