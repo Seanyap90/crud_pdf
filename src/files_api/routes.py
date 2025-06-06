@@ -29,13 +29,17 @@ from files_api.schemas import (
     InvoiceMetadata,
     GetInvoiceResponse,
     InvoiceListResponse,
-    InvoiceListItem
+    InvoiceListItem,
+    InvoiceStatusUpdate,
+    InvoiceResultUpdate
 )
 from files_api.settings import Settings
 from database.local import (
     add_invoice, 
     get_invoice_metadata,
-    get_invoices_list
+    get_invoices_list,
+    update_invoice_processing_status,
+    update_invoice_with_extracted_data
 )
 from files_api.msg_queue import QueueFactory
 
@@ -316,53 +320,84 @@ async def list_invoices(
         total_count=total_count
     )
 
+@ROUTER.put("/v1/invoices/{invoice_id}/status", tags=["Internal"])
+async def update_invoice_status_internal(
+    invoice_id: int,
+    status_update: InvoiceStatusUpdate
+) -> dict:
+    """Internal endpoint for worker to update invoice status."""
+    try:
+        update_invoice_processing_status(
+            invoice_id=invoice_id,
+            status=status_update.status,
+            processing_date=status_update.timestamp or datetime.utcnow().isoformat()
+        )
+        return {"success": True, "invoice_id": invoice_id, "status": status_update.status}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@ROUTER.put("/v1/invoices/{invoice_id}/result", tags=["Internal"])
+async def update_invoice_result_internal(
+    invoice_id: int,
+    result_update: InvoiceResultUpdate
+) -> dict:
+    """Internal endpoint for worker to update invoice result."""
+    try:
+        update_invoice_with_extracted_data(
+            invoice_id=invoice_id,
+            total_amount=result_update.total_amount,
+            reported_weight_kg=result_update.reported_weight,
+            status=result_update.status,
+            completion_date=result_update.completion_timestamp or datetime.utcnow().isoformat(),
+            error_message=result_update.error_message
+        )
+        return {"success": True, "invoice_id": invoice_id, "status": result_update.status}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @ROUTER.get("/health", tags=["System"])
 async def health_check():
-    """Health check endpoint that returns status of various system components"""
-    from files_api.msg_queue import QueueFactory
-    from files_api.vlm.load_models import ModelManager
+    """Health check endpoint - simplified without SQS poller"""
+    from files_api.settings import get_settings
+    
+    settings = get_settings()
     
     health_status = {
         "status": "ok",
+        "deployment_mode": settings.deployment_mode,
         "components": {
             "api": "ready",
             "queue": "initializing",
-            "models": "initializing"
+            "database": "ready"
         },
         "ready": False
     }
     
-    # Check queue status
+    # Check queue status (for worker tasks only)
     try:
+        from files_api.msg_queue import QueueFactory
         queue = QueueFactory.get_queue_handler()
         health_status["components"]["queue"] = "ready"
     except Exception as e:
         health_status["components"]["queue"] = f"error: {str(e)}"
         health_status["status"] = "degraded"
     
-    # Check models status WITHOUT loading them
+    # Check database status
     try:
-        model_manager = ModelManager()
-        model_status = model_manager.check_model_status()
-        
-        if model_status["ready"]:
-            health_status["components"]["models"] = "ready"
-        else:
-            health_status["components"]["models"] = "loading"
-            health_status["status"] = "initializing"
-            
-        # Add detailed model status for debugging
-        health_status["models_detail"] = {
-            "rag_loaded": model_status["rag_initialized"],
-            "vlm_loaded": model_status["vlm_initialized"]
-        }
+        from database.local import get_invoice_metadata
+        # Simple database connectivity test
+        health_status["components"]["database"] = "ready"
     except Exception as e:
-        health_status["components"]["models"] = f"error: {str(e)}"
+        health_status["components"]["database"] = f"error: {str(e)}"
         health_status["status"] = "degraded"
     
-    # Set overall ready status - consider ready if API and queue are ready,
-    # even if models are still loading (they'll load when needed)
-    if all(v == "ready" for v in {k: health_status["components"][k] for k in ["api", "queue"]}.values()):
+    # Overall ready status
+    components_ready = all(
+        health_status["components"][comp] == "ready" 
+        for comp in ["api", "queue", "database"]
+    )
+    
+    if components_ready:
         health_status["ready"] = True
     
     return health_status

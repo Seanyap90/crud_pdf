@@ -203,3 +203,14 @@ class InvoiceListResponse(BaseModel):
             }
         }
     )
+
+class InvoiceStatusUpdate(BaseModel):
+    status: str
+    timestamp: Optional[str] = None
+
+class InvoiceResultUpdate(BaseModel):
+    status: str
+    total_amount: Optional[float] = None
+    reported_weight: Optional[float] = None
+    completion_timestamp: Optional[str] = None
+    error_message: Optional[str] = None

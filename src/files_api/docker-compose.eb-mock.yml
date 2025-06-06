@@ -10,6 +10,7 @@ services:
       # Core deployment configuration
       - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-aws-mock}
       - QUEUE_TYPE=${DEPLOYMENT_MODE:-aws-mock} 
+      - HF_HUB_DOWNLOAD_TIMEOUT=300
       
       # AWS Configuration (from environment or defaults)
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
@@ -51,6 +52,9 @@ services:
       # EB-specific environment variables (optional)
       - EB_APP_NAME=${EB_APP_NAME:-}
       - EB_ENV_NAME=${EB_ENV_NAME:-}
+
+      # worker to call FastAPI
+      - API_BASE_URL=http://host.docker.internal:8000
     
     deploy:
       mode: replicated
