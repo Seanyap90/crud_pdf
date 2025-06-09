@@ -32,10 +32,34 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 # Copy only requirements file for better caching
 COPY src/files_api/vlm/requirements.txt .
 
-# Install dependencies
+# Install dependencies into a virtual environment
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Final stage: Runtime environment (worker-focused, no models)
+# Stage 3: Model files download
+FROM python-deps as model-download
+
+WORKDIR /models
+
+# Create cache directory
+RUN mkdir -p /models/cache
+
+# Download model files
+RUN echo "Downloading model files..." && \
+    python -c "from huggingface_hub import snapshot_download; \
+    print('Downloading SmolVLM-Instruct files...'); \
+    snapshot_download(repo_id='HuggingFaceTB/SmolVLM-Instruct', cache_dir='/models/cache', local_files_only=False); \
+    print('SmolVLM-Instruct files downloaded successfully!')" && \
+    python -c "from huggingface_hub import snapshot_download; \
+    print('Downloading Colpali RAG model files...'); \
+    snapshot_download(repo_id='vidore/colpali', cache_dir='/models/cache', local_files_only=False); \
+    print('Colpali model files downloaded successfully!')" && \
+    python -c "from huggingface_hub import snapshot_download; \
+    print('Downloading Colpaligemma model files...'); \
+    snapshot_download(repo_id='vidore/colpaligemma-3b-mix-448-base', cache_dir='/models/cache', local_files_only=False); \
+    print('Colpaligemma model files downloaded successfully!')" && \
+    echo "All model files downloaded successfully!"
+
+# Final stage: Runtime environment
 FROM base AS runtime
 
 # Set CUDA and performance environment variables
@@ -63,8 +87,11 @@ WORKDIR /app
 COPY --from=python-deps /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
 COPY --from=python-deps /usr/local/bin /usr/local/bin
 
-# Create necessary directories (cache will be mounted as volume)
-RUN mkdir -p /app/cache /app/temp_pdfs /app/.byaldi /app/offload_folder /app/logs \
+# Copy model files from model-download stage
+COPY --from=model-download /models/cache /app/cache
+
+# Create necessary directories
+RUN mkdir -p /app/temp_pdfs /app/.byaldi /app/offload_folder /app/logs \
     && mkdir -p /app/files_api/vlm
 
 # Create package structure
@@ -78,7 +105,6 @@ COPY src/files_api/msg_queue.py /app/files_api/
 COPY src/files_api/storage_adapter.py /app/files_api/
 COPY src/files_api/vlm/load_models_eb.py /app/files_api/vlm/
 COPY src/files_api/vlm/worker.py /app/files_api/vlm/
-COPY src/files_api/vlm/download_models.py /app/files_api/vlm/
 
 # Copy startup script
 COPY src/files_api/vlm/start-worker.sh /app/start-worker.sh

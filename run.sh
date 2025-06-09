@@ -99,11 +99,11 @@ EOF
     wait
 }
 
-# Simplified aws-mock function - only EB deployment
+# with autoscaling simulation
 # function aws-mock {
 #     set +e
     
-#     echo "Setting up AWS mock infrastructure with Elastic Beanstalk worker..."
+#     echo "Setting up AWS mock infrastructure with EB worker autoscaling simulation..."
     
 #     # Set deployment mode
 #     export DEPLOYMENT_MODE="aws-mock"
@@ -148,41 +148,50 @@ EOF
 #         exit 1
 #     fi
     
-#     # Start the EB worker containers
-#     echo "Starting EB worker containers..."
+#     # Get SQS queue URL from environment (set by deploy_eb.py)
+#     SQS_QUEUE_URL="${SQS_QUEUE_URL:-http://localhost:5000/queue/rag-task-queue}"
+    
+#     # Start the single EB worker container (representing one instance)
+#     echo "Starting EB worker container (representing 1 instance)..."
 #     cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.eb-mock.yml up -d
 #     cd "$PROJECT_ROOT"
     
-#     # Trap Ctrl+C to gracefully shutdown everything
-#     trap 'echo "Shutting down EB mock environment..."; kill $MOTO_PID 2>/dev/null; aws-mock-down; exit 0' INT
+#     # Start autoscaling simulator in background
+#     echo "Starting EB Autoscaling Simulator..."
+#     python -m files_api.aws.eb_scale_sim \
+#         --queue-url "$SQS_QUEUE_URL" \
+#         --min-instances 1 \
+#         --max-instances 5 \
+#         --scale-up-threshold 2 \
+#         --scale-down-threshold 1 \
+#         --cooldown 60 \
+#         --evaluation-interval 15 \
+#         --evaluation-periods 1 &
+#     SIMULATOR_PID=$!
+    
+#     # Enhanced trap to kill all processes
+#     trap 'echo "Shutting down EB mock environment..."; kill $MOTO_PID $SIMULATOR_PID 2>/dev/null; aws-mock-down; exit 0' INT
     
 #     # Start FastAPI with uvicorn
 #     echo "Starting FastAPI application..."
+#     echo "📊 Monitor autoscaling decisions in the logs above"
+#     echo "📈 Upload PDFs to trigger queue activity and observe scaling behavior"
+#     echo "🛑 Press Ctrl+C to shutdown everything"
+    
 #     python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000
     
 #     # If FastAPI exits, clean up
 #     echo "FastAPI server exited, cleaning up environment"
-#     kill $MOTO_PID 2>/dev/null
+#     kill $MOTO_PID $SIMULATOR_PID 2>/dev/null
 #     aws-mock-down
 # }
 
-# function aws-mock-down {
-#     echo "Shutting down AWS mock environment..."
-    
-#     # Kill any running processes
-#     pkill -f "python -m moto.server" || true
-    
-#     # Stop EB worker containers
-#     cd src/files_api && docker-compose -f docker-compose.eb-mock.yml down
-    
-#     echo "AWS mock environment shut down successfully"
-# }
-
-# with autoscaling simulation
 function aws-mock {
     set +e
     
     echo "Setting up AWS mock infrastructure with EB worker autoscaling simulation..."
+    echo "🚀 Using decoupled architecture: separate model downloader + worker containers"
+    echo "📦 Models downloaded once by dedicated container, then used by worker"
     
     # Set deployment mode
     export DEPLOYMENT_MODE="aws-mock"
@@ -230,9 +239,48 @@ function aws-mock {
     # Get SQS queue URL from environment (set by deploy_eb.py)
     SQS_QUEUE_URL="${SQS_QUEUE_URL:-http://localhost:5000/queue/rag-task-queue}"
     
-    # Start the single EB worker container (representing one instance)
-    echo "Starting EB worker container (representing 1 instance)..."
-    cd "$PROJECT_ROOT/src/files_api" && docker-compose -f docker-compose.eb-mock.yml up -d
+    # Build images and start model downloader first
+    echo "📥 Step 1: Building Docker images and downloading models..."
+    echo "💡 This will run the model-downloader service first, then start the worker"
+    cd "$PROJECT_ROOT/src/files_api"  # Updated path - docker-compose is now here
+    
+    # Use docker-compose up with dependency management
+    # The model-downloader will run first and download models to the volume
+    # Then eb-worker will start automatically once downloader completes successfully
+    docker-compose -f docker-compose.eb-mock.yml up -d --build
+    
+    # Check if model downloader completed successfully
+    echo "🔍 Checking model downloader completion status..."
+    if docker-compose -f docker-compose.eb-mock.yml ps model-downloader | grep -q "Exit 0"; then
+        echo "✅ Model downloader completed successfully!"
+    elif docker-compose -f docker-compose.eb-mock.yml ps model-downloader | grep -q "Exit [1-9]"; then
+        exit_code=$(docker-compose -f docker-compose.eb-mock.yml ps model-downloader | grep "Exit" | sed 's/.*Exit \([0-9]*\).*/\1/')
+        echo "❌ Model downloader failed with exit code: $exit_code"
+        echo "🔍 Check logs: docker-compose -f docker-compose.eb-mock.yml logs model-downloader"
+        cd "$PROJECT_ROOT"
+        kill $MOTO_PID 2>/dev/null
+        aws-mock-down
+        exit 1
+    else
+        echo "⚠️  Model downloader status unclear, but continuing..."
+    fi
+    
+    # Verify worker container is running
+    echo "🔍 Verifying worker container is running..."
+    sleep 5  # Give worker a moment to start
+    
+    worker_status=$(docker-compose -f docker-compose.eb-mock.yml ps -q eb-worker | xargs docker inspect --format='{{.State.Status}}' 2>/dev/null || echo "not_found")
+    
+    if [ "$worker_status" != "running" ]; then
+        echo "❌ Worker container failed to start (status: $worker_status)"
+        echo "🔍 Check logs: docker-compose -f docker-compose.eb-mock.yml logs eb-worker"
+        cd "$PROJECT_ROOT"
+        kill $MOTO_PID 2>/dev/null
+        aws-mock-down
+        exit 1
+    fi
+    
+    echo "✅ EB Worker container is running and ready for inference!"
     cd "$PROJECT_ROOT"
     
     # Start autoscaling simulator in background
@@ -255,6 +303,9 @@ function aws-mock {
     echo "Starting FastAPI application..."
     echo "📊 Monitor autoscaling decisions in the logs above"
     echo "📈 Upload PDFs to trigger queue activity and observe scaling behavior"
+    echo "🔧 Container logs:"
+    echo "   - Model downloads: docker-compose -f src/files_api/docker-compose.eb-mock.yml logs model-downloader"
+    echo "   - Worker activity: docker-compose -f src/files_api/docker-compose.eb-mock.yml logs eb-worker"
     echo "🛑 Press Ctrl+C to shutdown everything"
     
     python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000
@@ -272,10 +323,14 @@ function aws-mock-down {
     pkill -f "python -m moto.server" || true
     pkill -f "eb_autoscaling_simulator" || true
     
-    # Stop EB worker containers
+    # Stop and remove containers, networks, and volumes
     cd src/files_api && docker-compose -f docker-compose.eb-mock.yml down
     
-    echo "AWS mock environment shut down successfully"
+    # Force remove any remaining containers
+    docker rm -f model-downloader eb-worker 2>/dev/null || true
+    
+    echo "✅ AWS mock environment completely cleaned up"
+    echo "💡 All containers, volumes, and networks removed"
 }
 
 # New function to install npm dependencies

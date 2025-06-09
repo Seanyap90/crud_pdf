@@ -21,6 +21,9 @@ aws-mock:
 aws-mock-down:
 	bash run.sh aws-mock-down
 
+clean-model-cache:
+	bash run.sh clean-model-cache
+
 # Deploy to real AWS
 aws-prod:
 	bash run.sh aws-prod
