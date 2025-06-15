@@ -3,7 +3,6 @@ import logging
 import docker
 import asyncio
 from datetime import datetime, timedelta
-import sqlite3
 from typing import Dict, Any, List, Optional
 
 from .base import BaseWorker
@@ -12,6 +11,7 @@ from .config_state_machine import ConfigUpdateStateMachine, ConfigUpdateState, C
 from database import event_store
 from iot.config import settings
 from .mqtt_client import MQTTClient
+from ..db_layer import get_gateway_service, get_device_service, get_measurement_service
 
 logger = logging.getLogger(__name__)
 
@@ -98,19 +98,9 @@ class LocalWorker(BaseWorker):
         logger.debug("Checking for missed heartbeats")
         
         try:
-            # Get all connected gateways
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT gateway_id, last_heartbeat 
-                FROM gateways 
-                WHERE status = ?
-            """, (GatewayState.CONNECTED.value,))
-            
-            connected_gateways = [dict(row) for row in cursor.fetchall()]
-            conn.close()
+            # Get all connected gateways using NoSQL service
+            gateway_service = get_gateway_service(self.db_path)
+            connected_gateways = gateway_service.get_connected_gateways()
             
             # Check each gateway for missed heartbeats
             for gateway in connected_gateways:
@@ -648,28 +638,27 @@ class LocalWorker(BaseWorker):
                     device_id = parts[0]
             
             if device_id:
-                # Register device if it doesn't exist
-                from database import local
+                # Register device if it doesn't exist using NoSQL service
+                device_service = get_device_service(self.db_path)
+                measurement_service = get_measurement_service(self.db_path)
                 measurement_type = payload.get("type", "weight_measurement")
                 
                 logger.info(f"Received measurement from device {device_id} via gateway {gateway_id}")
                 
-                local.register_end_device(
+                device_service.register_device(
                     device_id=device_id,
                     gateway_id=gateway_id,
                     device_type=payload.get("type", "scale"),
-                    status="online",
-                    db_path=self.db_path
+                    status="online"
                 )
                 
-                # Store the measurement
-                local.store_measurement(
+                # Store the measurement using NoSQL service
+                measurement_service.store_measurement(
                     device_id=device_id,
                     gateway_id=gateway_id,
                     measurement_type=measurement_type,
                     payload=payload,
-                    timestamp=task_data.get("timestamp"),
-                    db_path=self.db_path
+                    timestamp=task_data.get("timestamp")
                 )
                 
                 logger.info(f"Stored measurement from device {device_id}")

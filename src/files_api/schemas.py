@@ -16,6 +16,9 @@ from pydantic import (
 from typing_extensions import Self
 from enum import Enum
 
+# Import NoSQL document schemas for embedded objects
+from database.schemas import VendorSchema, CategorySchema
+
 DEFAULT_GET_FILES_PAGE_SIZE = 10
 DEFAULT_GET_FILES_MIN_PAGE_SIZE = 10
 DEFAULT_GET_FILES_MAX_PAGE_SIZE = 100
@@ -89,11 +92,10 @@ class ExtractionStatus(str, Enum):
     FAILED = 'failed'
 
 class InvoiceMetadata(BaseModel):
-    """Response model for invoice metadata."""
+    """Response model for invoice metadata with embedded vendor and category objects (NoSQL structure)."""
     invoice_id: int
-    vendor_id: str
-    vendor_name: str
-    category_id: Optional[int] = None
+    vendor: VendorSchema = Field(..., description="Embedded vendor information")
+    category: Optional[CategorySchema] = Field(None, description="Embedded category information")
     invoice_number: str
     invoice_date: datetime
     upload_date: datetime
@@ -114,9 +116,17 @@ class InvoiceMetadata(BaseModel):
         json_schema_extra={
             "example": {
                 "invoice_id": 1,
-                "vendor_id": "V20240101123456",
-                "vendor_name": "Eco Recycling Corp",
-                "category_id": 1,
+                "vendor": {
+                    "vendor_id": "V20240101123456",
+                    "vendor_name": "Eco Recycling Corp",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "is_active": True
+                },
+                "category": {
+                    "category_id": 1,
+                    "category_name": "Metal",
+                    "description": "Metal waste and scrap"
+                },
                 "invoice_number": "INV-2024-001",
                 "invoice_date": "2024-01-01T00:00:00Z",
                 "upload_date": "2024-01-01T12:34:56Z",
@@ -154,10 +164,11 @@ class ExtractionStatus(str, Enum):
     FAILED = 'failed'
 
 class InvoiceListItem(BaseModel):
-    """Schema for invoice list item displayed in the table."""
+    """Schema for invoice list item displayed in the table with embedded vendor and category objects (NoSQL structure)."""
     invoice_id: int = Field(description="Invoice ID")
     invoice_number: str = Field(description="Invoice number")
-    category: str = Field(description="Material category")
+    vendor: VendorSchema = Field(..., description="Embedded vendor information")
+    category: Optional[CategorySchema] = Field(None, description="Embedded category information")
     filename: str = Field(description="Name of the uploaded file")
     reported_weight_kg: Optional[Decimal] = Field(None, description="Weight in kilograms")
     total_amount: Optional[Decimal] = Field(None, description="Total price")
@@ -169,7 +180,17 @@ class InvoiceListItem(BaseModel):
             "example": {
                 "invoice_id": 13,
                 "invoice_number": "INV-2024-0013",
-                "category": "Metal",
+                "vendor": {
+                    "vendor_id": "V20240101123456",
+                    "vendor_name": "Eco Recycling Corp",
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "is_active": True
+                },
+                "category": {
+                    "category_id": 1,
+                    "category_name": "Metal",
+                    "description": "Metal waste and scrap"
+                },
                 "filename": "invoice_13.pdf",
                 "reported_weight_kg": "421.69",
                 "total_amount": "8833.86",
@@ -191,7 +212,17 @@ class InvoiceListResponse(BaseModel):
                     {
                         "invoice_id": 13,
                         "invoice_number": "INV-2024-0013",
-                        "category": "Metal",
+                        "vendor": {
+                            "vendor_id": "V20240101123456",
+                            "vendor_name": "Eco Recycling Corp",
+                            "created_at": "2024-01-01T00:00:00Z",
+                            "is_active": True
+                        },
+                        "category": {
+                            "category_id": 1,
+                            "category_name": "Metal",
+                            "description": "Metal waste and scrap"
+                        },
                         "filename": "invoice_13.pdf",
                         "reported_weight_kg": "421.69",
                         "total_amount": "8833.86",

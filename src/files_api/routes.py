@@ -10,9 +10,8 @@ from fastapi import (
     status
 )
 from fastapi.responses import StreamingResponse, JSONResponse
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
-from decimal import Decimal
 from files_api.s3.delete_objects import delete_s3_object
 from files_api.s3.read_objects import (
     fetch_s3_object,
@@ -34,13 +33,7 @@ from files_api.schemas import (
     InvoiceResultUpdate
 )
 from files_api.settings import Settings
-from database.local import (
-    add_invoice, 
-    get_invoice_metadata,
-    get_invoices_list,
-    update_invoice_processing_status,
-    update_invoice_with_extracted_data
-)
+from files_api.db_layer import get_invoice_service, get_category_service
 from files_api.msg_queue import QueueFactory
 
 ROUTER = APIRouter(tags=["Files"])
@@ -87,15 +80,38 @@ async def upload_file(
             content_type=file_content.content_type,
         )
 
-        # Add initial invoice record - only basic info
-        invoice_id = add_invoice(
+        # Add initial invoice record using NoSQL service
+        invoice_service = get_invoice_service()
+        
+        # Convert invoice_date string to datetime if provided
+        invoice_date_obj = None
+        if invoice_date:
+            invoice_date_obj = datetime.fromisoformat(invoice_date)
+        
+        # Get category name if category_id is provided
+        category_name = None
+        if category_id:
+            category_service = get_category_service()
+            category_data = category_service.get_category_by_id(category_id)
+            if category_data:
+                category_name = category_data.get('category_name')
+            else:
+                # Fallback to default categories for category IDs 1-10
+                default_categories = {
+                    1: "General Waste", 2: "Recyclable", 3: "Hazardous", 4: "Organic", 5: "Metal",
+                    6: "Paper", 7: "Plastic", 8: "Glass", 9: "Electronic", 10: "Construction"
+                }
+                category_name = default_categories.get(category_id, f"Category {category_id}")
+        
+        invoice_id = invoice_service.create_invoice(
             filename=file_content.filename,
             filepath=file_path,
             vendor_name=vendor_name,
             vendor_id=vendor_id,
             category_id=category_id,
+            category_name=category_name,
             invoice_number=invoice_number,
-            invoice_date=invoice_date
+            invoice_date=invoice_date_obj
         )
 
         # Queue PDF for processing
@@ -278,23 +294,14 @@ async def get_invoice(
     invoice_id: int = Path(..., description="The ID of the invoice to retrieve")
 ) -> GetInvoiceResponse:
     """Retrieve invoice metadata."""
-    invoice_data = get_invoice_metadata(invoice_id)
+    invoice_service = get_invoice_service()
+    invoice_data = invoice_service.get_invoice(invoice_id)
     
     if not invoice_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Invoice with ID {invoice_id} not found"
         )
-
-    # Convert datetime strings to datetime objects
-    for field in ['invoice_date', 'upload_date', 'processing_date', 'completion_date']:
-        if invoice_data.get(field):
-            invoice_data[field] = datetime.fromisoformat(invoice_data[field].replace('Z', '+00:00'))
-
-    # Convert decimal strings to Decimal objects
-    for field in ['reported_weight_kg', 'unit_price', 'total_amount']:
-        if invoice_data.get(field):
-            invoice_data[field] = Decimal(str(invoice_data[field]))
 
     return GetInvoiceResponse(invoice=InvoiceMetadata(**invoice_data))
 
@@ -313,7 +320,8 @@ async def list_invoices(
     vendor_id: str = Path(..., description="The ID of the vendor to get invoices for")
 ) -> InvoiceListResponse:
     """Retrieve list of invoices for the table view."""
-    invoices, total_count = get_invoices_list(vendor_id)
+    invoice_service = get_invoice_service()
+    invoices, total_count = invoice_service.list_invoices(vendor_id=vendor_id)
     
     return InvoiceListResponse(
         invoices=[InvoiceListItem(**invoice) for invoice in invoices],
@@ -327,11 +335,13 @@ async def update_invoice_status_internal(
 ) -> dict:
     """Internal endpoint for worker to update invoice status."""
     try:
-        update_invoice_processing_status(
+        invoice_service = get_invoice_service()
+        success = invoice_service.update_invoice_status(
             invoice_id=invoice_id,
-            status=status_update.status,
-            processing_date=status_update.timestamp or datetime.utcnow().isoformat()
+            status=status_update.status
         )
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Invoice {invoice_id} not found")
         return {"success": True, "invoice_id": invoice_id, "status": status_update.status}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -343,14 +353,16 @@ async def update_invoice_result_internal(
 ) -> dict:
     """Internal endpoint for worker to update invoice result."""
     try:
-        update_invoice_with_extracted_data(
+        invoice_service = get_invoice_service()
+        success = invoice_service.update_invoice_status(
             invoice_id=invoice_id,
+            status=result_update.status,
             total_amount=result_update.total_amount,
             reported_weight_kg=result_update.reported_weight,
-            status=result_update.status,
-            completion_date=result_update.completion_timestamp or datetime.utcnow().isoformat(),
             error_message=result_update.error_message
         )
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Invoice {invoice_id} not found")
         return {"success": True, "invoice_id": invoice_id, "status": result_update.status}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -384,7 +396,7 @@ async def health_check():
     
     # Check database status
     try:
-        from database.local import get_invoice_metadata
+        invoice_service = get_invoice_service()
         # Simple database connectivity test
         health_status["components"]["database"] = "ready"
     except Exception as e:

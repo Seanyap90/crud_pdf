@@ -5,7 +5,7 @@ import hashlib
 import json
 import yaml
 from typing import Dict, Any, List, Optional
-from .models import (
+from .schemas import (
     CreateGatewayRequest, 
     MQTTEventRequest, 
     GatewayStatus, 
@@ -21,7 +21,7 @@ from .models import (
 )
 from .worker.base import BaseWorker
 from .worker.local_worker import LocalWorker
-from database import local
+from .db_layer import get_device_service
 
 logger = logging.getLogger(__name__)
 
@@ -675,11 +675,11 @@ async def list_devices(
         include_offline: Whether to include offline devices in the response
     """
     try:
-        # Use the function from local.py
-        devices = local.list_end_devices(
+        # Use the NoSQL device service
+        device_service = get_device_service(worker.db_path)
+        devices = device_service.list_devices(
             gateway_id=gateway_id,
-            include_offline=include_offline,
-            db_path=worker.db_path
+            include_offline=include_offline
         )
         
         return devices

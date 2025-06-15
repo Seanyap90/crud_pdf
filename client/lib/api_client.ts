@@ -1,6 +1,17 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import type { 
+  Invoice, 
+  InvoiceListResponse, 
+  InvoiceResponse,
+  InvoiceUploadParams,
+  InvoiceUploadResponse,
+  VendorStatistics,
+  CategoryStatistics,
+  InvoiceFilters,
+  HealthResponse
+} from '../types/invoice';
 
 // Base API URL
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -83,12 +94,84 @@ class ApiClient {
 // Create a singleton instance
 const apiClient = new ApiClient();
 
-// Define domain-specific API functions
+// Define domain-specific API functions for NoSQL embedded documents
 export const api = {
   invoices: {
-    getList: (vendorId: string) => apiClient.get(`/v1/${vendorId}/invoices`),
-    upload: (filePath: string, formData: FormData, metadata: Record<string, string>) => 
-      apiClient.uploadFile(`/v1/files/${filePath}`, formData, metadata),
+    // Get invoices for a vendor with embedded vendor and category objects
+    getList: async (vendorId: string, filters?: InvoiceFilters): Promise<InvoiceListResponse> => {
+      const queryParams = new URLSearchParams();
+      if (filters) {
+        Object.entries(filters).forEach(([key, value]) => {
+          if (value !== undefined && value !== null) {
+            queryParams.append(key, String(value));
+          }
+        });
+      }
+      const queryString = queryParams.toString();
+      const path = `/v1/${vendorId}/invoices${queryString ? `?${queryString}` : ''}`;
+      return apiClient.get(path);
+    },
+
+    // Get a single invoice with embedded objects
+    getById: async (invoiceId: number): Promise<InvoiceResponse> => {
+      return apiClient.get(`/v1/invoices/${invoiceId}`);
+    },
+
+    // Upload invoice with enhanced metadata for embedded documents
+    upload: async (filePath: string, formData: FormData, params: InvoiceUploadParams): Promise<InvoiceUploadResponse> => {
+      return apiClient.uploadFile(`/v1/files/${filePath}`, formData, params);
+    },
+
+    // Search invoices across vendors using embedded document fields
+    search: async (query: string, filters?: InvoiceFilters): Promise<InvoiceListResponse> => {
+      const queryParams = new URLSearchParams({ q: query });
+      if (filters) {
+        Object.entries(filters).forEach(([key, value]) => {
+          if (value !== undefined && value !== null) {
+            queryParams.append(key, String(value));
+          }
+        });
+      }
+      return apiClient.get(`/v1/invoices/search?${queryParams.toString()}`);
+    }
+  },
+
+  vendors: {
+    // Get vendor statistics from embedded documents
+    getStatistics: async (vendorId: string): Promise<VendorStatistics> => {
+      return apiClient.get(`/v1/vendors/${vendorId}/statistics`);
+    },
+
+    // List all vendors from embedded documents
+    list: async (): Promise<{ vendors: Array<{ vendor_id: string; vendor_name: string; is_active: boolean }> }> => {
+      return apiClient.get('/v1/vendors');
+    },
+
+    // Search vendors by name
+    search: async (query: string): Promise<{ vendors: Array<{ vendor_id: string; vendor_name: string; is_active: boolean }> }> => {
+      return apiClient.get(`/v1/vendors/search?q=${encodeURIComponent(query)}`);
+    }
+  },
+
+  categories: {
+    // Get category statistics from embedded documents
+    getStatistics: async (categoryId: number): Promise<CategoryStatistics> => {
+      return apiClient.get(`/v1/categories/${categoryId}/statistics`);
+    },
+
+    // List all categories
+    list: async (): Promise<{ categories: Array<{ category_id: number; category_name: string; description: string }> }> => {
+      return apiClient.get('/v1/categories');
+    },
+
+    // Get top categories by various metrics
+    getTopByAmount: async (limit: number = 10): Promise<{ categories: CategoryStatistics[] }> => {
+      return apiClient.get(`/v1/categories/top/amount?limit=${limit}`);
+    },
+
+    getTopByWeight: async (limit: number = 10): Promise<{ categories: CategoryStatistics[] }> => {
+      return apiClient.get(`/v1/categories/top/weight?limit=${limit}`);
+    }
   }
 };
 
@@ -111,7 +194,7 @@ export function useApiReady() {
         
         if (!mounted) return;
         
-        if (healthData.ready === true) {
+        if (healthData.ready === true || healthData.status === "healthy") {
           setIsReady(true);
           setIsChecking(false);
         } else {

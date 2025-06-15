@@ -3,12 +3,35 @@ import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 import logging
+from .nosql_adapter import NoSQLAdapter
+from .schemas import VendorSchema, CategorySchema, VendorInvoiceSchema
 
 logger = logging.getLogger(__name__)
 
+# Global NoSQL adapter instance
+_nosql_adapter = None
+
+def get_nosql_adapter(db_path: str = "recycling.db") -> NoSQLAdapter:
+    """Get or create NoSQL adapter instance"""
+    global _nosql_adapter
+    if _nosql_adapter is None or _nosql_adapter.db_path != db_path:
+        _nosql_adapter = NoSQLAdapter(db_path)
+    return _nosql_adapter
+
 def init_db(db_path: str = "recycling.db") -> None:
-    """Initialize database with all required tables."""
+    """Initialize database with all required tables and NoSQL collections."""
+    conn = None
     try:
+        # Initialize NoSQL collections first
+        adapter = get_nosql_adapter(db_path)
+        adapter.init_collections()
+        
+        # Initialize document indexes for performance
+        from .indexes import DocumentIndexManager
+        index_manager = DocumentIndexManager(db_path)
+        index_manager.create_all_indexes()
+        
+        # Initialize traditional SQL tables for backward compatibility
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
@@ -69,66 +92,6 @@ def init_db(db_path: str = "recycling.db") -> None:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
-        # Create gateways table for read model
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS gateways (
-                gateway_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                location TEXT NOT NULL,
-                status TEXT NOT NULL,
-                last_updated TEXT,
-                last_heartbeat TEXT,
-                uptime TEXT,
-                health TEXT,
-                error TEXT,
-                created_at TEXT,
-                connected_at TEXT,
-                disconnected_at TEXT,
-                deleted_at TEXT,
-                certificate_info TEXT
-            )
-        ''')
-
-        # Create end_devices table with flexible schema
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS end_devices (
-                device_id TEXT PRIMARY KEY,
-                gateway_id TEXT NOT NULL,
-                device_type TEXT NOT NULL,
-                name TEXT,
-                location TEXT,
-                status TEXT NOT NULL,
-                last_updated TEXT,
-                last_measurement TEXT,
-                last_config_fetch TEXT,
-                config_version TEXT,
-                config_hash TEXT,
-                device_config TEXT,  -- JSON blob of the device's configuration
-                FOREIGN KEY (gateway_id) REFERENCES gateways(gateway_id)
-            )
-        ''')
-
-        # Create measurements table with fully dynamic payload
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS measurements (
-                measurement_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                device_id TEXT NOT NULL,
-                gateway_id TEXT NOT NULL,
-                measurement_type TEXT NOT NULL,  -- e.g., "weight_measurement"
-                timestamp TEXT NOT NULL,
-                processed BOOLEAN DEFAULT FALSE,
-                uploaded_to_cloud BOOLEAN DEFAULT FALSE,
-                payload TEXT NOT NULL,  -- Full JSON payload with all measurement data
-                FOREIGN KEY (device_id) REFERENCES end_devices(device_id),
-                FOREIGN KEY (gateway_id) REFERENCES gateways(gateway_id)
-            )
-        ''')
-
-        # Create index for faster queries
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_measurements_device ON measurements(device_id, timestamp)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_measurements_gateway ON measurements(gateway_id, timestamp)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_measurements_type ON measurements(measurement_type, timestamp)')
 
         # Initialize default categories if they don't exist
         default_categories = [
@@ -151,7 +114,8 @@ def init_db(db_path: str = "recycling.db") -> None:
         
         conn.commit()
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 def get_or_create_vendor(vendor_name: str, vendor_id: Optional[str] = None, db_path: str = "recycling.db") -> str:
     """Get existing vendor or create new one if doesn't exist."""
@@ -176,7 +140,7 @@ def get_or_create_vendor(vendor_name: str, vendor_id: Optional[str] = None, db_p
         # Create new vendor if doesn't exist
         if not vendor_id:
             # Generate a new vendor_id if not provided
-            vendor_id = f"V{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            vendor_id = f"V{datetime.now().strftime('%Y%m%d%H%M%S')}"
             
         cursor.execute(
             'INSERT INTO vendors (vendor_id, vendor_name) VALUES (?, ?)',
@@ -205,11 +169,11 @@ def add_invoice(filename: str,
         
         # If invoice_number not provided, generate one
         if not invoice_number:
-            invoice_number = f"INV{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            invoice_number = f"INV{datetime.now().strftime('%Y%m%d%H%M%S')}"
             
         # If invoice_date not provided, use current date
         if not invoice_date:
-            invoice_date = datetime.utcnow().date().isoformat()
+            invoice_date = datetime.now().date().isoformat()
             
         # Insert basic invoice record
         cursor.execute('''
@@ -332,616 +296,167 @@ def get_invoices_list(vendor_id: str, db_path: str = "recycling.db") -> tuple[li
     finally:
         conn.close()
 
-def register_end_device(
-    device_id: str,
-    gateway_id: str,
-    device_type: str,
-    config_version: Optional[str] = None,
-    config_hash: Optional[str] = None,
-    device_config: Optional[Dict[str, Any]] = None,
-    name: Optional[str] = None,
-    location: Optional[str] = None,
-    status: str = "online",
-    db_path: str = "recycling.db"
-) -> Dict[str, Any]:
-    """Register a new end device or update existing one with dynamic configuration."""
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # Check if device already exists
-        cursor.execute('SELECT * FROM end_devices WHERE device_id = ?', (device_id,))
-        existing_device = cursor.fetchone()
-        
-        timestamp = datetime.now().isoformat()
-        
-        # Convert device_config to JSON if provided
-        device_config_json = None
-        if device_config:
-            device_config_json = json.dumps(device_config)
-        
-        if existing_device:
-            # Update existing device
-            query = '''
-                UPDATE end_devices
-                SET gateway_id = ?,
-                    device_type = ?,
-                    name = ?,
-                    location = ?,
-                    status = ?,
-                    last_updated = ?
-            '''
-            params = [gateway_id, device_type, name, location, status, timestamp]
-            
-            # Only update config fields if provided
-            if config_version:
-                query += ", config_version = ?, last_config_fetch = ?"
-                params.extend([config_version, timestamp])
-            
-            if config_hash:
-                query += ", config_hash = ?"
-                params.append(config_hash)
-                
-            if device_config_json:
-                query += ", device_config = ?"
-                params.append(device_config_json)
-                
-            query += " WHERE device_id = ?"
-            params.append(device_id)
-            
-            cursor.execute(query, params)
-        else:
-            # Create new device
-            if not name:
-                name = f"Device {device_id}"
-            
-            if not location:
-                location = "Unknown"
-            
-            query = '''
-                INSERT INTO end_devices
-                (device_id, gateway_id, device_type, name, location, status, last_updated
-            '''
-            
-            params = [device_id, gateway_id, device_type, name, location, status, timestamp]
-            
-            # Add config fields if provided
-            if config_version:
-                query += ", config_version, last_config_fetch"
-                params.extend([config_version, timestamp])
-            
-            if config_hash:
-                query += ", config_hash"
-                params.append(config_hash)
-                
-            if device_config_json:
-                query += ", device_config"
-                params.append(device_config_json)
-                
-            query += ") VALUES (" + ", ".join(["?"] * len(params)) + ")"
-            
-            cursor.execute(query, params)
-        
-        conn.commit()
-        
-        # Return the device info
-        cursor.execute('SELECT * FROM end_devices WHERE device_id = ?', (device_id,))
-        device = cursor.fetchone()
-        result = dict(device) if device else {"device_id": device_id, "error": "Failed to fetch device after registration"}
-        
-        # Parse device_config JSON if present
-        if result.get('device_config'):
-            try:
-                result['device_config'] = json.loads(result['device_config'])
-            except:
-                pass
-                
-        return result
-    finally:
-        conn.close()
 
-def store_measurement(
-    device_id: str,
-    gateway_id: str,
-    measurement_type: str,
-    payload: Dict[str, Any],
-    timestamp: Optional[str] = None,
+
+
+
+
+
+
+
+# ====================================================================
+# NoSQL Document-Based Functions
+# ====================================================================
+
+def create_invoice_doc(
+    filename: str,
+    filepath: str,
+    vendor_name: str,
+    vendor_id: Optional[str] = None,
+    category_id: Optional[int] = None,
+    category_name: Optional[str] = None,
+    invoice_number: Optional[str] = None,
+    invoice_date: Optional[datetime] = None,
     db_path: str = "recycling.db"
 ) -> int:
-    """Store a measurement with fully dynamic payload."""
+    """Create invoice document with embedded vendor and category"""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        adapter = get_nosql_adapter(db_path)
         
-        if not timestamp:
-            timestamp = datetime.now().isoformat()
+        # Generate IDs if not provided
+        if not vendor_id:
+            vendor_id = f"V{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        if not invoice_number:
+            invoice_number = f"INV{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        if not invoice_date:
+            invoice_date = datetime.now()
         
-        # Convert payload to JSON
-        payload_json = json.dumps(payload)
+        # Get next invoice ID
+        count = adapter.count_documents('vendor_invoices')
+        invoice_id = count + 1
         
-        cursor.execute('''
-            INSERT INTO measurements
-            (device_id, gateway_id, measurement_type, timestamp, payload)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (device_id, gateway_id, measurement_type, timestamp, payload_json))
+        # Create vendor document
+        vendor_doc = {
+            "vendor_id": vendor_id,
+            "vendor_name": vendor_name,
+            "created_at": datetime.now(),
+            "is_active": True
+        }
         
-        measurement_id = cursor.lastrowid
+        # Create category document if provided
+        category_doc = None
+        if category_id and category_name:
+            category_doc = {
+                "category_id": category_id,
+                "category_name": category_name,
+                "description": None
+            }
         
-        # Also update the device's last_measurement time
-        cursor.execute('''
-            UPDATE end_devices
-            SET last_measurement = ?, last_updated = ?
-            WHERE device_id = ?
-        ''', (timestamp, timestamp, device_id))
+        # Create invoice document
+        invoice_doc = {
+            "invoice_id": invoice_id,
+            "vendor": vendor_doc,
+            "category": category_doc,
+            "invoice_number": invoice_number,
+            "invoice_date": invoice_date,
+            "upload_date": datetime.now(),
+            "filename": filename,
+            "filepath": filepath,
+            "reported_weight_kg": None,
+            "unit_price": None,
+            "total_amount": None,
+            "extraction_status": "pending",
+            "processing_date": None,
+            "completion_date": None,
+            "error_message": None
+        }
         
-        conn.commit()
-        return measurement_id
-    finally:
-        conn.close()
+        # Validate and create document
+        created_id = adapter.create_document('vendor_invoices', invoice_doc)
+        logger.info(f"Created invoice document with ID: {created_id}")
+        return created_id
+        
+    except Exception as e:
+        logger.error(f"Error creating invoice document: {e}")
+        raise
 
-def get_measurements(
-    device_id: Optional[str] = None,
-    gateway_id: Optional[str] = None,
-    measurement_type: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    limit: int = 100,
-    db_path: str = "recycling.db"
-) -> List[Dict[str, Any]]:
-    """Get measurements with flexible filtering options."""
+
+def get_invoice_doc(invoice_id: int, db_path: str = "recycling.db") -> Optional[Dict[str, Any]]:
+    """Get invoice document by ID"""
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        query = 'SELECT * FROM measurements WHERE 1=1'
-        params = []
-        
-        if device_id:
-            query += ' AND device_id = ?'
-            params.append(device_id)
-            
-        if gateway_id:
-            query += ' AND gateway_id = ?'
-            params.append(gateway_id)
-            
-        if measurement_type:
-            query += ' AND measurement_type = ?'
-            params.append(measurement_type)
-            
-        if start_date:
-            query += ' AND timestamp >= ?'
-            params.append(start_date)
-            
-        if end_date:
-            query += ' AND timestamp <= ?'
-            params.append(end_date)
-            
-        query += ' ORDER BY timestamp DESC LIMIT ?'
-        params.append(limit)
-        
-        cursor.execute(query, params)
-        
-        measurements = []
-        for row in cursor.fetchall():
-            measurement = dict(row)
-            
-            # Parse payload JSON
-            if measurement.get('payload'):
-                try:
-                    measurement['payload'] = json.loads(measurement['payload'])
-                except:
-                    # If parsing fails, leave as string
-                    pass
-                    
-            measurements.append(measurement)
-            
-        return measurements
-    finally:
-        conn.close()
+        adapter = get_nosql_adapter(db_path)
+        return adapter.get_document('vendor_invoices', invoice_id)
+    except Exception as e:
+        logger.error(f"Error getting invoice document: {e}")
+        raise
 
-def get_measurement_summary(
-    field_name: str,
-    gateway_id: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    measurement_type: str = "weight_measurement",
-    db_path: str = "recycling.db"
-) -> List[Dict[str, Any]]:
-    """Get summary of measurements by a specific field (e.g., material type) within a date range."""
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # Try to extract from both the top level and the nested payload structure
-        query = f'''
-            WITH data AS (
-                SELECT 
-                    json_extract(payload, '$.{field_name}') as field_value,
-                    CAST(json_extract(payload, '$.payload.weight_kg') AS REAL) as weight_kg
-                FROM measurements
-                WHERE measurement_type = ? AND
-                      (json_extract(payload, '$.{field_name}') IS NOT NULL OR 
-                       json_extract(payload, '$.payload.{field_name}') IS NOT NULL)
-                
-                UNION ALL
-                
-                SELECT 
-                    json_extract(payload, '$.payload.{field_name}') as field_value,
-                    CAST(json_extract(payload, '$.payload.weight_kg') AS REAL) as weight_kg
-                FROM measurements
-                WHERE measurement_type = ? AND
-                      json_extract(payload, '$.payload.{field_name}') IS NOT NULL AND
-                      json_extract(payload, '$.{field_name}') IS NULL
-            )
-            SELECT 
-                field_value,
-                COUNT(*) as measurement_count,
-                SUM(weight_kg) as total_weight_kg,
-                AVG(weight_kg) as avg_weight_kg,
-                MIN(weight_kg) as min_weight_kg,
-                MAX(weight_kg) as max_weight_kg
-            FROM data
-            WHERE field_value IS NOT NULL AND weight_kg IS NOT NULL
-            GROUP BY field_value
-            ORDER BY total_weight_kg DESC
-        '''
-        
-        params = [measurement_type, measurement_type]
-        
-        if gateway_id or start_date or end_date:
-            # Modify the query to add additional filters
-            filtered_query = f'''
-                WITH data AS (
-                    SELECT 
-                        json_extract(payload, '$.{field_name}') as field_value,
-                        CAST(json_extract(payload, '$.payload.weight_kg') AS REAL) as weight_kg
-                    FROM measurements
-                    WHERE measurement_type = ? 
-            '''
-            
-            if gateway_id:
-                filtered_query += ' AND gateway_id = ?'
-                params.append(gateway_id)
-                
-            if start_date:
-                filtered_query += ' AND timestamp >= ?'
-                params.append(start_date)
-                
-            if end_date:
-                filtered_query += ' AND timestamp <= ?'
-                params.append(end_date)
-                
-            filtered_query += f''' AND (json_extract(payload, '$.{field_name}') IS NOT NULL OR 
-                                    json_extract(payload, '$.payload.{field_name}') IS NOT NULL)
-                
-                UNION ALL
-                
-                SELECT 
-                    json_extract(payload, '$.payload.{field_name}') as field_value,
-                    CAST(json_extract(payload, '$.payload.weight_kg') AS REAL) as weight_kg
-                FROM measurements
-                WHERE measurement_type = ? 
-            '''
-            
-            # Add the same filters again for the second part of the UNION
-            if gateway_id:
-                filtered_query += ' AND gateway_id = ?'
-                params.append(gateway_id)
-                
-            if start_date:
-                filtered_query += ' AND timestamp >= ?'
-                params.append(start_date)
-                
-            if end_date:
-                filtered_query += ' AND timestamp <= ?'
-                params.append(end_date)
-                
-            filtered_query += f''' AND json_extract(payload, '$.payload.{field_name}') IS NOT NULL AND
-                                   json_extract(payload, '$.{field_name}') IS NULL
-            )
-            SELECT 
-                field_value,
-                COUNT(*) as measurement_count,
-                SUM(weight_kg) as total_weight_kg,
-                AVG(weight_kg) as avg_weight_kg,
-                MIN(weight_kg) as min_weight_kg,
-                MAX(weight_kg) as max_weight_kg
-            FROM data
-            WHERE field_value IS NOT NULL AND weight_kg IS NOT NULL
-            GROUP BY field_value
-            ORDER BY total_weight_kg DESC
-            '''
-            
-            params = [measurement_type] + params[1:] + [measurement_type] + params[1:]
-            query = filtered_query
-            
-        cursor.execute(query, params)
-        summary = [dict(row) for row in cursor.fetchall()]
-        return summary
-    finally:
-        conn.close()
 
-def update_device_parameter_set(
-    device_id: str,
-    parameter_set: str,
-    parameters: Dict[str, Any],
+def update_invoice_doc_status(
+    invoice_id: int,
+    status: str,
+    processing_date: Optional[datetime] = None,
+    completion_date: Optional[datetime] = None,
+    total_amount: Optional[float] = None,
+    reported_weight_kg: Optional[float] = None,
+    error_message: Optional[str] = None,
     db_path: str = "recycling.db"
 ) -> bool:
-    """Update a device's parameter set assignment and parameters."""
+    """Update invoice document status and extracted data"""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        adapter = get_nosql_adapter(db_path)
         
-        # Get current config
-        cursor.execute('SELECT device_config FROM end_devices WHERE device_id = ?', (device_id,))
-        result = cursor.fetchone()
-        if not result:
+        # Get existing document
+        doc = adapter.get_document('vendor_invoices', invoice_id)
+        if not doc:
+            logger.warning(f"Invoice document {invoice_id} not found")
             return False
-            
-        config = json.loads(result[0]) if result[0] else {}
         
-        # Update parameter set
-        config['active_parameter_set'] = parameter_set
-        config['parameters'] = parameters
+        # Update fields
+        doc['extraction_status'] = status
+        if processing_date:
+            doc['processing_date'] = processing_date
+        if completion_date:
+            doc['completion_date'] = completion_date
+        if total_amount is not None:
+            doc['total_amount'] = total_amount
+        if reported_weight_kg is not None:
+            doc['reported_weight_kg'] = reported_weight_kg
+        if error_message is not None:
+            doc['error_message'] = error_message
         
-        # Store updated config
-        cursor.execute(
-            'UPDATE end_devices SET device_config = ?, last_config_fetch = ? WHERE device_id = ?',
-            (json.dumps(config), datetime.now().isoformat(), device_id)
-        )
-        
-        conn.commit()
-        return True
-    finally:
-        conn.close()
-
-def initialize_config_tables(db_path: str = "recycling.db") -> None:
-    """Initialize configuration-specific tables in the database."""
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # Check if config_updates table exists
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='config_updates'")
-        table_exists = cursor.fetchone() is not None
-        
-        if not table_exists:
-            # Create config_updates table with streamlined schema
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS config_updates (
-                    update_id TEXT PRIMARY KEY,
-                    gateway_id TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    version TEXT,
-                    config_hash TEXT,  
-                    config_version TEXT,  
-                    created_at TEXT,
-                    published_at TEXT,
-                    requested_at TEXT,
-                    sent_at TEXT,
-                    delivered_at TEXT,
-                    completed_at TEXT,
-                    failed_at TEXT,
-                    last_updated TEXT,
-                    delivery_status TEXT,
-                    error TEXT
-                )
-            ''')
-            
-            conn.commit()
-            logger.info("Configuration tables initialized")
+        return adapter.update_document('vendor_invoices', invoice_id, doc)
         
     except Exception as e:
-        logger.error(f"Error initializing configuration tables: {str(e)}")
+        logger.error(f"Error updating invoice document: {e}")
         raise
-    finally:
-        conn.close()
 
-def update_config_update(
-    update_id: str,
-    gateway_id: str,
-    state: str,
-    version: Optional[str] = None,
-    config_hash: Optional[str] = None,
-    config_version: Optional[str] = None,
-    created_at: Optional[str] = None,
-    published_at: Optional[str] = None,
-    requested_at: Optional[str] = None,
-    sent_at: Optional[str] = None,
-    delivered_at: Optional[str] = None,
-    completed_at: Optional[str] = None,
-    failed_at: Optional[str] = None,
-    last_updated: Optional[str] = None,
-    delivery_status: Optional[str] = None,
-    error: Optional[str] = None,
+
+def query_invoices(
+    vendor_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
     db_path: str = "recycling.db"
-) -> None:
-    """Update a configuration update entry."""
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Query invoice documents with filters"""
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        adapter = get_nosql_adapter(db_path)
         
-        cursor.execute('''
-            INSERT OR REPLACE INTO config_updates
-            (update_id, gateway_id, state, version, config_hash, config_version,
-            created_at, published_at, requested_at, sent_at, delivered_at,
-            completed_at, failed_at, last_updated, delivery_status, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            update_id, gateway_id, state, version, config_hash, config_version,
-            created_at, published_at, requested_at, sent_at, delivered_at,
-            completed_at, failed_at, last_updated, delivery_status, error
-        ))
+        # Build query
+        query = {}
+        if vendor_id:
+            query['vendor.vendor_id'] = vendor_id
+        if status:
+            query['extraction_status'] = status
         
-        conn.commit()
-        logger.info(f"Updated config update {update_id} with state={state}")
+        # Get documents and count
+        documents = adapter.query_documents('vendor_invoices', query, limit, offset)
+        total_count = adapter.count_documents('vendor_invoices', query)
+        
+        return documents, total_count
+        
     except Exception as e:
-        logger.error(f"Error updating config update: {str(e)}")
+        logger.error(f"Error querying invoice documents: {e}")
         raise
-    finally:
-        conn.close()
 
-def get_config_update(
-    update_id: str,
-    db_path: str = "recycling.db"
-) -> Optional[Dict[str, Any]]:
-    """Get a configuration update by ID."""
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT * FROM config_updates
-            WHERE update_id = ?
-        ''', (update_id,))
-        
-        row = cursor.fetchone()
-        if row:
-            return dict(row)
-        return None
-    except Exception as e:
-        logger.error(f"Error getting config update: {str(e)}")
-        return None
-    finally:
-        conn.close()
 
-def list_config_updates(
-    gateway_id: Optional[str] = None,
-    include_completed: bool = True,
-    db_path: str = "recycling.db"
-) -> List[Dict[str, Any]]:
-    """List configuration updates."""
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # Build query based on filters
-        query = "SELECT * FROM config_updates"
-        params = []
-        
-        where_clauses = []
-        if gateway_id:
-            where_clauses.append("gateway_id = ?")
-            params.append(gateway_id)
-        
-        if not include_completed:
-            where_clauses.append("state NOT IN (?, ?)")
-            params.extend(["completed", "failed"])
-        
-        if where_clauses:
-            query += " WHERE " + " AND ".join(where_clauses)
-        
-        query += " ORDER BY last_updated DESC"
-        
-        cursor.execute(query, params)
-        
-        updates = []
-        for row in cursor.fetchall():
-            updates.append(dict(row))
-        
-        return updates
-    except Exception as e:
-        logger.error(f"Error listing config updates: {str(e)}")
-        return []
-    finally:
-        conn.close()
-
-def get_latest_config_for_gateway(
-    gateway_id: str,
-    db_path: str = "recycling.db"
-) -> Optional[Dict[str, Any]]:
-    """Get the latest completed configuration update for a gateway."""
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # First try to get the completed config
-        cursor.execute('''
-            SELECT * FROM config_updates
-            WHERE gateway_id = ? AND state = 'completed'
-            ORDER BY completed_at DESC
-            LIMIT 1
-        ''', (gateway_id,))
-        
-        row = cursor.fetchone()
-        if row:
-            return dict(row)
-            
-        # If no completed config, get the most recent one in any state
-        cursor.execute('''
-            SELECT * FROM config_updates
-            WHERE gateway_id = ?
-            ORDER BY last_updated DESC
-            LIMIT 1
-        ''', (gateway_id,))
-        
-        row = cursor.fetchone()
-        if row:
-            return dict(row)
-            
-        return None
-    except Exception as e:
-        logger.error(f"Error getting latest config: {str(e)}")
-        return None
-    finally:
-        conn.close()
-
-def list_end_devices(
-    gateway_id: Optional[str] = None,
-    include_offline: bool = True, 
-    db_path: str = "recycling.db"
-) -> List[Dict[str, Any]]:
-    """List end devices with optional filtering by gateway ID.
-    
-    Args:
-        gateway_id: Optional gateway ID to filter by
-        include_offline: Whether to include offline devices
-        db_path: Path to the database
-        
-    Returns:
-        List of device dictionaries
-    """
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # Build the query based on filters
-        query = "SELECT * FROM end_devices WHERE 1=1"
-        params = []
-        
-        if gateway_id:
-            query += " AND gateway_id = ?"
-            params.append(gateway_id)
-            
-        if not include_offline:
-            query += " AND status = 'online'"
-            
-        cursor.execute(query, params)
-        
-        devices = []
-        for row in cursor.fetchall():
-            device = dict(row)
-            
-            # Parse device_config JSON if present
-            if device.get('device_config'):
-                try:
-                    device['device_config'] = json.loads(device['device_config'])
-                except:
-                    # If parsing fails, leave as string
-                    pass
-                    
-            devices.append(device)
-            
-        return devices
-    except Exception as e:
-        logger.error(f"Error listing end devices: {str(e)}")
-        return []
-    finally:
-        conn.close()

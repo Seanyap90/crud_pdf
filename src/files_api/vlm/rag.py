@@ -13,7 +13,7 @@ from pathlib import Path
 from pdf2image import convert_from_path
 from files_api.vlm.load_models import ModelManager, model_on_device
 from files_api.config import config
-from database.local import update_invoice_processing_status, update_invoice_with_extracted_data
+from files_api.db_layer import get_invoice_service
 from typing import Optional, List, Tuple, Dict, Any
 from transformers import GenerationConfig
 
@@ -441,11 +441,13 @@ class Worker:
                 torch.cuda.empty_cache()
                 gc.collect()
                 
+                # Get invoice service for status updates
+                invoice_service = get_invoice_service()
+                
                 # Update status to processing
-                update_invoice_processing_status(
+                invoice_service.update_invoice_status(
                     invoice_id=invoice_id,
-                    status='processing',
-                    processing_date=datetime.utcnow().isoformat()
+                    status='processing'
                 )
                 
                 try:
@@ -465,25 +467,20 @@ class Worker:
                     
                     if total_amount is not None and reported_weight is not None:
                         # Update database with successful extraction
-                        update_invoice_with_extracted_data(
+                        invoice_service.update_invoice_status(
                             invoice_id=invoice_id,
-                            total_amount=total_amount,
-                            reported_weight_kg=reported_weight,
                             status='completed',
-                            completion_date=datetime.utcnow().isoformat(),
-                            error_message=None
+                            total_amount=total_amount,
+                            reported_weight_kg=reported_weight
                         )
                         logger.info(f"Successfully processed invoice {invoice_id} with total amount: ${total_amount}, weight: {reported_weight}kg")
                         return f"Processed PDF {filepath} with total amount: ${total_amount}, weight: {reported_weight}kg"
                     else:
                         error_msg = f"Could not extract both price and weight from invoice. Response was: {response[:200]}..."
                         # Update database with failed extraction
-                        update_invoice_with_extracted_data(
+                        invoice_service.update_invoice_status(
                             invoice_id=invoice_id,
-                            total_amount=None,
-                            reported_weight_kg=None,
                             status='failed',
-                            completion_date=datetime.utcnow().isoformat(),
                             error_message=error_msg
                         )
                         logger.error(f"Failed to extract data from invoice {invoice_id}: {error_msg}")
@@ -499,12 +496,9 @@ class Worker:
                     logger.error(f"Error processing invoice {invoice_id}: {error_message}", exc_info=True)
                     
                     # Update database
-                    update_invoice_with_extracted_data(
+                    invoice_service.update_invoice_status(
                         invoice_id=invoice_id,
-                        total_amount=None,
-                        reported_weight_kg=None,
                         status='failed',
-                        completion_date=datetime.utcnow().isoformat(),
                         error_message=str(processing_error)[:500]
                     )
                     

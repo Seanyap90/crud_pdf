@@ -3,30 +3,16 @@
 import React, { useState, useEffect } from 'react';
 import { Info, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from './alert';
+import { api } from '../../lib/api_client';
+import type { Invoice, InvoiceListResponse } from '../../types/invoice';
 
 const API_BASE_URL = 'http://localhost:8000';
 
-// Mock vendor data
+// Mock vendor data - in a real app this would come from auth context
 const MOCK_VENDOR = {
   name: 'Demo Vendor',
   id: 'V12345'
 };
-
-interface Invoice {
-  invoice_id: number;
-  invoice_number: string;
-  category: string;
-  filename: string;
-  reported_weight_kg: string | null;  // Coming as string from SQLite
-  total_amount: string | null;        // Coming as string from SQLite
-  upload_date: string;
-  extraction_status: 'pending' | 'processing' | 'completed' | 'failed';
-}
-
-interface InvoiceResponse {
-  invoices: Invoice[];
-  total_count: number;
-}
 
 export const StatusList: React.FC = () => {
   const [data, setData] = useState<Invoice[]>([]);
@@ -39,27 +25,12 @@ export const StatusList: React.FC = () => {
     setError(null);
     
     try {
-      console.log('Fetching invoices from:', `${API_BASE_URL}/v1/invoices`);
+      console.log('Fetching invoices with embedded objects for vendor:', MOCK_VENDOR.id);
       
-      const response = await fetch(`${API_BASE_URL}/v1/${MOCK_VENDOR.id}/invoices`);
-      console.log('Response status:', response.status);
+      // Use the enhanced API client that handles embedded documents
+      const result: InvoiceListResponse = await api.invoices.getList(MOCK_VENDOR.id);
+      console.log('Received invoices with embedded objects:', result);
       
-      const responseText = await response.text();
-      console.log('Raw response:', responseText);
-      
-      if (!response.ok) {
-        throw new Error(`Failed to fetch invoices: ${response.status} ${responseText}`);
-      }
-
-      // Try to parse the response as JSON
-      let result: InvoiceResponse;
-      try {
-        result = JSON.parse(responseText);
-        console.log('Parsed response:', result);
-      } catch (e) {
-        console.error('Failed to parse JSON:', e);
-        throw new Error('Invalid JSON response');
-      }
       setData(result.invoices);
       setTotalCount(result.total_count);
     } catch (error) {
@@ -97,6 +68,12 @@ export const StatusList: React.FC = () => {
       hour: '2-digit',
       minute: '2-digit'
     });
+  };
+
+  const formatNumber = (value: any): string => {
+    if (value === null || value === undefined) return '-';
+    const num = typeof value === 'number' ? value : parseFloat(value.toString());
+    return isNaN(num) ? '-' : num.toFixed(2);
   };
 
   if (error) {
@@ -144,6 +121,9 @@ export const StatusList: React.FC = () => {
                   Invoice Number
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Vendor
+                </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Category
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -173,18 +153,28 @@ export const StatusList: React.FC = () => {
                     {item.invoice_number}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm">
-                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-                      {item.category}
-                    </span>
+                    <div className="flex flex-col">
+                      <span className="font-medium text-gray-900">{item.vendor.vendor_name}</span>
+                      <span className="text-xs text-gray-500">{item.vendor.vendor_id}</span>
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                    {item.category ? (
+                      <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                        {item.category.category_name}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">No category</span>
+                    )}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     {item.filename}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {item.reported_weight_kg ? Number(item.reported_weight_kg).toFixed(2) : '-'}
+                    {formatNumber(item.reported_weight_kg)}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {item.total_amount ? `${Number(item.total_amount).toFixed(2)}` : '-'}
+                    {formatNumber(item.total_amount)}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     {formatDate(item.upload_date)}

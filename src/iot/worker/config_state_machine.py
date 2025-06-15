@@ -1,10 +1,10 @@
-import sqlite3
 import json
 import logging
 from enum import Enum
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from database import event_store, local
+from database import event_store
+from ..db_layer import get_config_service
 
 logger = logging.getLogger(__name__)
 
@@ -237,8 +237,10 @@ class ConfigUpdateStateMachine:
     
     @staticmethod
     def initialize_config_tables(db_path: str = "recycling.db") -> None:
-        """Initialize configuration-specific tables in the database."""
-        local.initialize_config_tables(db_path)
+        """Initialize configuration collections (NoSQL compatibility method)."""
+        # NoSQL collections are automatically initialized when first accessed
+        # This method is kept for backward compatibility
+        logger.info("Config NoSQL collections are automatically initialized")
     
     @classmethod
     def reconstruct_from_events(cls, update_id: str, db_path: str = "recycling.db") -> "ConfigUpdateStateMachine":
@@ -289,7 +291,8 @@ class ConfigUpdateStateMachine:
         # Generate config version based on timestamp if not available
         config_version = version or f"v{datetime.now().strftime('%Y%m%d%H%M%S')}"
         
-        local.update_config_update(
+        config_service = get_config_service(db_path)
+        config_service.update_config_update(
             update_id=update_id,
             gateway_id=gateway_id,
             state=state,
@@ -305,8 +308,7 @@ class ConfigUpdateStateMachine:
             failed_at=failed_at,
             last_updated=last_updated,
             delivery_status=delivery_status,
-            error=error,
-            db_path=db_path
+            error=error
         )
     
     @staticmethod
@@ -329,7 +331,7 @@ class ConfigUpdateStateMachine:
         config_hash: str,
         db_path: str = "recycling.db"
     ) -> Optional[Dict[str, Any]]:
-        """Get configuration metadata from the config_updates table.
+        """Get configuration metadata from NoSQL documents.
         
         Instead of returning full YAML content, this returns metadata about
         the configuration update including version, timestamps, and status.
@@ -342,28 +344,11 @@ class ConfigUpdateStateMachine:
             Configuration metadata or None if not found
         """
         try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT update_id, gateway_id, state, version, config_version, 
-                    created_at, last_updated, config_hash
-                FROM config_updates
-                WHERE config_hash = ?
-                ORDER BY created_at DESC
-                LIMIT 1
-            ''', (config_hash,))
-            
-            row = cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
+            config_service = get_config_service(db_path)
+            return config_service.get_config_by_hash(config_hash)
         except Exception as e:
             logger.error(f"Error getting configuration metadata: {str(e)}")
             return None
-        finally:
-            conn.close()
     
     @staticmethod
     def get_config_update_status(
@@ -371,7 +356,8 @@ class ConfigUpdateStateMachine:
         db_path: str = "recycling.db"
     ) -> Optional[Dict[str, Any]]:
         """Get the current status of a configuration update."""
-        return local.get_config_update(update_id, db_path)
+        config_service = get_config_service(db_path)
+        return config_service.get_config_update(update_id)
     
     @staticmethod
     def list_config_updates(
@@ -380,7 +366,8 @@ class ConfigUpdateStateMachine:
         db_path: str = "recycling.db"
     ) -> List[Dict[str, Any]]:
         """List all configuration updates."""
-        return local.list_config_updates(gateway_id, include_completed, db_path)
+        config_service = get_config_service(db_path)
+        return config_service.list_config_updates(gateway_id, include_completed)
     
     @staticmethod
     def get_latest_config_for_gateway(
@@ -388,4 +375,5 @@ class ConfigUpdateStateMachine:
         db_path: str = "recycling.db"
     ) -> Optional[Dict[str, Any]]:
         """Get the latest completed configuration update for a gateway."""
-        return local.get_latest_config_for_gateway(gateway_id, db_path)
+        config_service = get_config_service(db_path)
+        return config_service.get_latest_config_for_gateway(gateway_id)

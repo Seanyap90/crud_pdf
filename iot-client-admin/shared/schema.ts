@@ -4,6 +4,16 @@ export type GatewayStateType = 'created' | 'connected' | 'disconnected' | 'delet
 // Types for gateway statuses (may include more UI statuses)
 export type GatewayStatusType = 'online' | 'offline' | 'warning' | 'error' | GatewayStateType;
 
+// Device information embedded in measurements (NoSQL structure)
+export interface DeviceInfo {
+  device_id: string;
+  gateway_id: string;
+  device_type: string;
+  name: string;
+  location: string;
+  status: string;
+}
+
 // Firmware information for gateway and end devices
 export interface FirmwareInfo {
   version?: string;
@@ -20,7 +30,34 @@ export interface EndDevice {
   firmware?: FirmwareInfo;
 }
 
-// Gateway representation for the frontend
+// Device representation with NoSQL document structure
+export interface Device {
+  device_id: string;
+  gateway_id: string;
+  device_type: string;
+  name: string;
+  location: string;
+  status: string;
+  last_updated: string;
+  last_measurement?: string | null;
+  last_config_fetch?: string | null;
+  config_version?: string | null;
+  config_hash?: string | null;
+  device_config?: Record<string, any>;
+}
+
+// Measurement with embedded device info (NoSQL structure)
+export interface Measurement {
+  measurement_id: number;
+  device_info: DeviceInfo;              // Embedded device + gateway information
+  measurement_type: string;
+  timestamp: string;
+  processed: boolean;
+  uploaded_to_cloud: boolean;
+  payload: Record<string, any>;
+}
+
+// Gateway representation for the frontend (unchanged for NoSQL)
 export interface Gateway {
   id: string;
   name: string;
@@ -60,12 +97,26 @@ export interface MQTTEvent {
   timestamp?: string;
 }
 
-// API response format
+// API response formats for NoSQL document operations
 export interface ApiResponse<T> {
   status: string;
   gateway?: Gateway;
   gateways?: Gateway[];
+  devices?: Device[];
+  measurements?: Measurement[];
   total?: number;
   data?: T;
   error?: string;
+}
+
+// Device list response
+export interface DeviceListResponse {
+  devices: Device[];
+  total?: number;
+}
+
+// Measurement list response with embedded device info
+export interface MeasurementListResponse {
+  measurements: Measurement[];
+  total?: number;
 }

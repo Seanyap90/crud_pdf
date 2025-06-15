@@ -30,3 +30,6 @@ src/files_api/sample
 /src/files_api/s3/__pycache__/*
 /src/files_api/aws/__pycache__/*
 /src/files_api/__pycache__/*
+claude.md 
+recycling_db_schema_current.mermaid
+roadmap.csv

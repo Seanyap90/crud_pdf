@@ -3,6 +3,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Upload, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from './alert';
+import { api } from '../../lib/api_client';
+import type { InvoiceUploadParams, InvoiceUploadData } from '../../types/invoice';
 
 const API_BASE_URL = 'http://localhost:8000';
 
@@ -12,11 +14,8 @@ interface PDFFile {
   file: File;  // Added to store the actual file object
 }
 
-interface InvoiceDetails {
-  invoiceNumber: string;
-  invoiceDate: string;
-  category: string;
-}
+// Use the imported type instead of local interface
+type InvoiceDetails = InvoiceUploadData;
 
 interface NotificationState {
   show: boolean;
@@ -43,7 +42,10 @@ export const PDFUpload: React.FC = () => {
   const [invoiceDetails, setInvoiceDetails] = useState<InvoiceDetails>({
     invoiceNumber: '',
     invoiceDate: '',
-    category: '',
+    categoryId: '',
+    categoryName: '',
+    vendorName: 'Demo Vendor', // Default vendor
+    vendorId: 'V12345' // Default vendor ID
   });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -98,7 +100,10 @@ export const PDFUpload: React.FC = () => {
     setInvoiceDetails({
       invoiceNumber: '',
       invoiceDate: '',
-      category: '',
+      categoryId: '',
+      categoryName: '',
+      vendorName: 'Demo Vendor',
+      vendorId: 'V12345'
     });
     localStorage.removeItem('pdfUploadData');
   };
@@ -131,7 +136,7 @@ export const PDFUpload: React.FC = () => {
   };
 
   const handleSubmit = async () => {
-    if (!pdf?.file || !invoiceDetails.invoiceNumber || !invoiceDetails.invoiceDate || !invoiceDetails.category) {
+    if (!pdf?.file || !invoiceDetails.invoiceNumber || !invoiceDetails.invoiceDate || !invoiceDetails.categoryId) {
       showNotification('Please fill all required fields', 'error');
       return;
     }
@@ -142,35 +147,26 @@ export const PDFUpload: React.FC = () => {
       const formData = new FormData();
       formData.append('file_content', pdf.file);
 
-      // Build query parameters
-      const queryParams = new URLSearchParams({
-        vendor_name: 'Demo Vendor', // This should come from auth context
-        vendor_id: 'V12345',       // This should come from auth context
-        category_id: invoiceDetails.category,
-        invoice_number: invoiceDetails.invoiceNumber,
-        invoice_date: invoiceDetails.invoiceDate
-      });
-
       // Create file path
       const fileName = pdf.file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
       const filePath = `invoices/${new Date().getFullYear()}/${fileName}`;
 
-      const response = await fetch(
-        `${API_BASE_URL}/v1/files/${filePath}?${queryParams}`,
-        {
-          method: 'PUT',
-          body: formData
-        }
-      );
+      // Build enhanced parameters for embedded document structure
+      const uploadParams: InvoiceUploadParams = {
+        vendor_name: invoiceDetails.vendorName || 'Demo Vendor',
+        vendor_id: invoiceDetails.vendorId || 'V12345',
+        category_id: invoiceDetails.categoryId,
+        invoice_number: invoiceDetails.invoiceNumber,
+        invoice_date: invoiceDetails.invoiceDate
+      };
 
-      if (!response.ok) {
-        throw new Error('Upload failed');
-      }
-
-      const result = await response.json();
-      showNotification('Success: Invoice uploaded', 'success');
+      // Use the enhanced API client
+      const result = await api.invoices.upload(filePath, formData, uploadParams);
+      
+      showNotification('Success: Invoice uploaded with embedded vendor/category data', 'success');
       resetForm();
     } catch (error) {
+      console.error('Upload error:', error);
       showNotification('Upload failed. Please try again.', 'error');
     } finally {
       setIsUploading(false);
@@ -222,8 +218,15 @@ export const PDFUpload: React.FC = () => {
             Waste Category
           </label>
           <select
-            value={invoiceDetails.category}
-            onChange={(e) => setInvoiceDetails(prev => ({ ...prev, category: e.target.value }))}
+            value={invoiceDetails.categoryId}
+            onChange={(e) => {
+              const selectedCategory = WASTE_CATEGORIES.find(cat => cat.id === e.target.value);
+              setInvoiceDetails(prev => ({ 
+                ...prev, 
+                categoryId: e.target.value,
+                categoryName: selectedCategory?.name || ''
+              }));
+            }}
             className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 focus:border-blue-500"
           >
             <option value="">Select category</option>
@@ -287,7 +290,7 @@ export const PDFUpload: React.FC = () => {
               <div>
                 <p className="text-sm text-gray-500">Category</p>
                 <p className="font-medium">
-                  {WASTE_CATEGORIES.find(c => c.id === invoiceDetails.category)?.name || '-'}
+                  {invoiceDetails.categoryName || '-'}
                 </p>
               </div>
               <div>
@@ -316,7 +319,7 @@ export const PDFUpload: React.FC = () => {
       <button
         onClick={handleSubmit}
         className="mt-6 flex items-center justify-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-        disabled={isUploading || !pdf || !invoiceDetails.invoiceNumber || !invoiceDetails.invoiceDate || !invoiceDetails.category}
+        disabled={isUploading || !pdf || !invoiceDetails.invoiceNumber || !invoiceDetails.invoiceDate || !invoiceDetails.categoryId}
       >
         {isUploading ? (
           <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white" />

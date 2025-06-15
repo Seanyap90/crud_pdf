@@ -1,10 +1,10 @@
-import sqlite3
 import json
 import logging
 from enum import Enum
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from database import event_store
+from ..db_layer import get_gateway_service
 
 logger = logging.getLogger(__name__)
 
@@ -323,72 +323,15 @@ class GatewayStateMachine:
     
     @staticmethod
     def initialize_gateway_tables(db_path: str = "recycling.db") -> None:
-        """Initialize gateway-specific tables in the database or migrate existing tables."""
+        """Initialize gateway collections (NoSQL compatibility method)."""
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Check if gateways table exists
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='gateways'")
-            table_exists = cursor.fetchone() is not None
-            
-            if table_exists:
-                # Table exists, check columns and add missing ones
-                logger.info("Gateways table exists, checking for missing columns...")
-                
-                # Get current columns
-                cursor.execute("PRAGMA table_info(gateways)")
-                existing_columns = [row[1] for row in cursor.fetchall()]
-                logger.info(f"Existing columns: {existing_columns}")
-                
-                # Define new columns that might need to be added
-                new_columns = {
-                    "created_at": "TEXT",
-                    "connected_at": "TEXT",
-                    "disconnected_at": "TEXT",
-                    "deleted_at": "TEXT",
-                    "certificate_info": "TEXT"
-                }
-                
-                # Add any missing columns
-                for col_name, col_type in new_columns.items():
-                    if col_name not in existing_columns:
-                        logger.info(f"Adding missing column: {col_name}")
-                        cursor.execute(f"ALTER TABLE gateways ADD COLUMN {col_name} {col_type}")
-                
-                conn.commit()
-                logger.info("Gateway table migration completed successfully")
-                
-            else:
-                # Create gateways table with streamlined schema
-                logger.info("Creating gateways table with streamlined schema...")
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS gateways (
-                        gateway_id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        location TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        last_updated TEXT,
-                        last_heartbeat TEXT,
-                        uptime TEXT,
-                        health TEXT,
-                        error TEXT,
-                        created_at TEXT,
-                        connected_at TEXT,
-                        disconnected_at TEXT,
-                        deleted_at TEXT,
-                        certificate_info TEXT
-                    )
-                ''')
-                
-                conn.commit()
-                logger.info("Gateway tables initialized with streamlined schema")
+            # NoSQL collections are automatically initialized when first accessed
+            # This method is kept for backward compatibility
+            logger.info("Gateway NoSQL collections are automatically initialized")
             
         except Exception as e:
-            logger.error(f"Error initializing gateway tables: {str(e)}")
+            logger.error(f"Error initializing gateway collections: {str(e)}")
             raise
-        finally:
-            conn.close()
     
     @classmethod
     def reconstruct_from_events(cls, gateway_id: str, db_path: str = "recycling.db") -> "GatewayStateMachine":
@@ -434,71 +377,45 @@ class GatewayStateMachine:
         certificate_info: Optional[Dict[str, Any]] = None,
         db_path: str = "recycling.db"
     ) -> None:
-        """Update the gateway read model with the streamlined schema."""
+        """Update the gateway read model using NoSQL documents."""
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
+            gateway_service = get_gateway_service(db_path)
             
             logger.debug(f"Updating read model for gateway {gateway_id} with status={status}")
             
-            # Format timestamps to YYYY-MM-DDThh:mm:ss format without microseconds
-            def format_timestamp(ts):
-                if not ts:
-                    return ts
-                try:
-                    dt = datetime.fromisoformat(ts)
-                    return dt.strftime("%Y-%m-%dT%H:%M:%S")
-                except:
-                    return ts
+            # Use the gateway service to update the document
+            success = gateway_service.update_gateway(
+                gateway_id=gateway_id,
+                name=name,
+                location=location,
+                status=status,
+                last_updated=last_updated,
+                last_heartbeat=last_heartbeat,
+                uptime=uptime,
+                health=health,
+                error=error,
+                created_at=created_at,
+                connected_at=connected_at,
+                disconnected_at=disconnected_at,
+                deleted_at=deleted_at,
+                certificate_info=certificate_info
+            )
             
-            last_updated = format_timestamp(last_updated)
-            last_heartbeat = format_timestamp(last_heartbeat)
-            created_at = format_timestamp(created_at)
-            connected_at = format_timestamp(connected_at)
-            disconnected_at = format_timestamp(disconnected_at)
-            deleted_at = format_timestamp(deleted_at)
-            
-            # Convert certificate_info to JSON string if it's a dict
-            cert_info_json = None
-            if certificate_info is not None:
-                # Update installed_at timestamp format if present
-                if isinstance(certificate_info, dict) and "installed_at" in certificate_info:
-                    certificate_info["installed_at"] = format_timestamp(certificate_info["installed_at"])
-                cert_info_json = json.dumps(certificate_info)
-            
-            # Format error as JSON if it's not already
-            if error and not error.startswith("{"):
-                if "offline" in error.lower():
-                    error = json.dumps({"status": "reported offline"})
-                else:
-                    error = json.dumps({"message": error})
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO gateways
-                (gateway_id, name, location, status, last_updated, last_heartbeat,
-                uptime, health, error, created_at, connected_at, disconnected_at,
-                deleted_at, certificate_info)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                gateway_id, name, location, status, last_updated, last_heartbeat,
-                uptime, health, error, created_at, connected_at, disconnected_at,
-                deleted_at, cert_info_json
-            ))
-            
-            conn.commit()
-            logger.info(f"Read model updated for gateway {gateway_id} with status={status}")
+            if success:
+                logger.info(f"Read model updated for gateway {gateway_id} with status={status}")
+            else:
+                logger.warning(f"Failed to update read model for gateway {gateway_id}")
+                
         except Exception as e:
             logger.error(f"Error updating read model: {str(e)}")
             raise
-        finally:
-            conn.close()
     
     @staticmethod
     def get_gateway_status(
         gateway_id: str,
         db_path: str = "recycling.db"
     ) -> Optional[Dict[str, Any]]:
-        """Get the current status of a gateway from the read model.
+        """Get the current status of a gateway from the NoSQL read model.
         
         Args:
             gateway_id: ID of the gateway
@@ -508,41 +425,18 @@ class GatewayStateMachine:
             Current status of the gateway or None if not found
         """
         try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT * FROM gateways
-                WHERE gateway_id = ?
-            ''', (gateway_id,))
-            
-            row = cursor.fetchone()
-            if row:
-                gateway_dict = dict(row)
-                
-                # Parse certificate_info from JSON if it exists
-                if gateway_dict.get('certificate_info'):
-                    try:
-                        gateway_dict['certificate_info'] = json.loads(gateway_dict['certificate_info'])
-                    except:
-                        # If there's a parsing error, set to None
-                        gateway_dict['certificate_info'] = None
-                
-                return gateway_dict
-            return None
+            gateway_service = get_gateway_service(db_path)
+            return gateway_service.get_gateway_status(gateway_id)
         except Exception as e:
             logger.error(f"Error getting gateway status: {str(e)}")
             return None
-        finally:
-            conn.close()
     
     @staticmethod
     def list_gateways(
         db_path: str = "recycling.db",
         include_deleted: bool = False
     ) -> List[Dict[str, Any]]:
-        """List all gateways from the read model.
+        """List all gateways from the NoSQL read model.
         
         Args:
             db_path: Path to the database
@@ -552,32 +446,8 @@ class GatewayStateMachine:
             List of all gateways
         """
         try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            if include_deleted:
-                cursor.execute("SELECT * FROM gateways")
-            else:
-                cursor.execute("SELECT * FROM gateways WHERE status != ?", (GatewayState.DELETED.value,))
-            
-            gateways = []
-            for row in cursor.fetchall():
-                gateway_dict = dict(row)
-                
-                # Parse certificate_info from JSON if it exists
-                if gateway_dict.get('certificate_info'):
-                    try:
-                        gateway_dict['certificate_info'] = json.loads(gateway_dict['certificate_info'])
-                    except:
-                        # If there's a parsing error, set to None
-                        gateway_dict['certificate_info'] = None
-                
-                gateways.append(gateway_dict)
-            
-            return gateways
+            gateway_service = get_gateway_service(db_path)
+            return gateway_service.list_gateways(include_deleted=include_deleted)
         except Exception as e:
             logger.error(f"Error listing gateways: {str(e)}")
             return []
-        finally:
-            conn.close()
