@@ -174,16 +174,14 @@ class NoSQLAdapter:
     
     def create_document(self, collection: str, document: Dict[str, Any]) -> Union[str, int]:
         """Create a new document in the collection"""
-        # Validate document
-        self._validate_document(collection, document)
-        
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
             
-            doc_json = self._serialize_document(document)
-            
             if collection == 'vendor_invoices':
+                # Validate document first for collections with predefined IDs
+                self._validate_document(collection, document)
+                doc_json = self._serialize_document(document)
                 cursor.execute('''
                     INSERT INTO vendor_invoices_docs (invoice_id, document)
                     VALUES (?, ?)
@@ -191,6 +189,9 @@ class NoSQLAdapter:
                 doc_id = document['invoice_id']
                 
             elif collection == 'gateways':
+                # Validate document first for collections with predefined IDs
+                self._validate_document(collection, document)
+                doc_json = self._serialize_document(document)
                 cursor.execute('''
                     INSERT INTO gateways_docs (gateway_id, document)
                     VALUES (?, ?)
@@ -198,6 +199,9 @@ class NoSQLAdapter:
                 doc_id = document['gateway_id']
                 
             elif collection == 'devices':
+                # Validate document first for collections with predefined IDs
+                self._validate_document(collection, document)
+                doc_json = self._serialize_document(document)
                 cursor.execute('''
                     INSERT INTO devices_docs (device_id, document)
                     VALUES (?, ?)
@@ -205,6 +209,8 @@ class NoSQLAdapter:
                 doc_id = document['device_id']
                 
             elif collection == 'measurements':
+                # For measurements, assign ID first, then validate
+                doc_json = self._serialize_document(document)
                 cursor.execute('''
                     INSERT INTO measurements_docs (document)
                     VALUES (?)
@@ -212,10 +218,22 @@ class NoSQLAdapter:
                 doc_id = cursor.lastrowid
                 # Update the document with the generated ID
                 document['measurement_id'] = doc_id
+                # Now validate the complete document
+                self._validate_document(collection, document)
                 doc_json = self._serialize_document(document)
                 cursor.execute('''
                     UPDATE measurements_docs SET document = ? WHERE measurement_id = ?
                 ''', (doc_json, doc_id))
+                
+            elif collection == 'config_updates':
+                # Validate document first for collections with predefined IDs
+                self._validate_document(collection, document)
+                doc_json = self._serialize_document(document)
+                cursor.execute('''
+                    INSERT INTO config_updates_docs (update_id, document)
+                    VALUES (?, ?)
+                ''', (document['update_id'], doc_json))
+                doc_id = document['update_id']
                 
             else:
                 raise ValueError(f"Unknown collection: {collection}")
@@ -244,6 +262,8 @@ class NoSQLAdapter:
                 cursor.execute('SELECT document FROM devices_docs WHERE device_id = ?', (doc_id,))
             elif collection == 'measurements':
                 cursor.execute('SELECT document FROM measurements_docs WHERE measurement_id = ?', (doc_id,))
+            elif collection == 'config_updates':
+                cursor.execute('SELECT document FROM config_updates_docs WHERE update_id = ?', (doc_id,))
             else:
                 raise ValueError(f"Unknown collection: {collection}")
             
@@ -293,6 +313,12 @@ class NoSQLAdapter:
                     SET document = ?, updated_at = CURRENT_TIMESTAMP 
                     WHERE measurement_id = ?
                 ''', (doc_json, doc_id))
+            elif collection == 'config_updates':
+                cursor.execute('''
+                    UPDATE config_updates_docs 
+                    SET document = ?, updated_at = CURRENT_TIMESTAMP 
+                    WHERE update_id = ?
+                ''', (doc_json, doc_id))
             else:
                 raise ValueError(f"Unknown collection: {collection}")
             
@@ -326,6 +352,8 @@ class NoSQLAdapter:
                 cursor.execute('DELETE FROM devices_docs WHERE device_id = ?', (doc_id,))
             elif collection == 'measurements':
                 cursor.execute('DELETE FROM measurements_docs WHERE measurement_id = ?', (doc_id,))
+            elif collection == 'config_updates':
+                cursor.execute('DELETE FROM config_updates_docs WHERE update_id = ?', (doc_id,))
             else:
                 raise ValueError(f"Unknown collection: {collection}")
             
@@ -369,6 +397,8 @@ class NoSQLAdapter:
                         where_clauses.append("device_id = ?")
                     elif collection == 'measurements':
                         where_clauses.append("measurement_id = ?")
+                    elif collection == 'config_updates':
+                        where_clauses.append("update_id = ?")
                     params.append(value)
                 else:
                     # JSON path query
@@ -420,6 +450,8 @@ class NoSQLAdapter:
                             where_clauses.append("device_id = ?")
                         elif collection == 'measurements':
                             where_clauses.append("measurement_id = ?")
+                        elif collection == 'config_updates':
+                            where_clauses.append("update_id = ?")
                         params.append(value)
                     else:
                         # JSON path query

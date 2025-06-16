@@ -383,7 +383,31 @@ class GatewayStateMachine:
             
             logger.debug(f"Updating read model for gateway {gateway_id} with status={status}")
             
-            # Use the gateway service to update the document
+            # For CREATED status, create the document first if it doesn't exist
+            if status == "created":
+                existing_gateway = gateway_service.get_gateway(gateway_id)
+                if not existing_gateway:
+                    logger.info(f"Creating initial gateway document for {gateway_id}")
+                    gateway_service.create_gateway(
+                        gateway_id=gateway_id,
+                        name=name,
+                        location=location,
+                        status=status,
+                        last_updated=last_updated,
+                        last_heartbeat=last_heartbeat,
+                        uptime=uptime,
+                        health=health,
+                        error=error,
+                        created_at=created_at,
+                        connected_at=connected_at,
+                        disconnected_at=disconnected_at,
+                        deleted_at=deleted_at,
+                        certificate_info=certificate_info
+                    )
+                    logger.info(f"Gateway document created for {gateway_id}")
+                    return
+            
+            # Update existing document
             success = gateway_service.update_gateway(
                 gateway_id=gateway_id,
                 name=name,

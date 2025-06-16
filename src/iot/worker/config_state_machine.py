@@ -183,11 +183,11 @@ class ConfigUpdateStateMachine:
             "update_id": self.data.get("update_id", ""),
             "gateway_id": self.data.get("gateway_id", ""),
             "state": self.current_state.value,
-            "version": self.data.get("version", ""),
+            "version": str(self.version) if self.version is not None else None,
+            "config_hash": self.data.get("config_hash"),
             "created_at": self.data.get("created_at"),
             "last_updated": self.data.get("last_updated"),
             "yaml_config": self.data.get("yaml_config"),  # This could be large, consider excluding
-            "version": self.version
         }
         
         # Add timestamps for state transitions

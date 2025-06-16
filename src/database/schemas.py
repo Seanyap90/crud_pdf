@@ -29,6 +29,7 @@ class DeviceStatus(str, Enum):
 
 class GatewayStatus(str, Enum):
     """Enumeration for gateway statuses"""
+    CREATED = 'created'
     CONNECTED = 'connected'
     DISCONNECTED = 'disconnected'
     MAINTENANCE = 'maintenance'
@@ -93,7 +94,7 @@ class GatewaySchema(BaseModel):
     connected_at: Optional[datetime] = Field(None, description="Connection timestamp")
     disconnected_at: Optional[datetime] = Field(None, description="Disconnection timestamp")
     deleted_at: Optional[datetime] = Field(None, description="Deletion timestamp")
-    certificate_info: Optional[str] = Field(None, description="Certificate information")
+    certificate_info: Optional[Dict[str, Any]] = Field(None, description="Certificate information")
 
 
 # Device info embedded in measurements
@@ -134,6 +135,28 @@ class MeasurementSchema(BaseModel):
     processed: bool = Field(False, description="Whether measurement is processed")
     uploaded_to_cloud: bool = Field(False, description="Whether uploaded to cloud")
     payload: Dict[str, Any] = Field(..., description="Measurement payload data")
+
+
+# Configuration update document schema
+class ConfigUpdateSchema(BaseModel):
+    """Schema for configuration update documents"""
+    update_id: str = Field(..., description="Unique update identifier")
+    gateway_id: str = Field(..., description="Target gateway identifier")
+    state: str = Field(..., description="Update state")
+    version: Optional[str] = Field(None, description="Configuration version")
+    config_hash: Optional[str] = Field(None, description="Configuration hash")
+    config_version: Optional[str] = Field(None, description="Configuration version string")
+    created_at: Optional[datetime] = Field(None, description="Creation timestamp")
+    last_updated: Optional[datetime] = Field(None, description="Last update timestamp")
+    published_at: Optional[datetime] = Field(None, description="Published timestamp")
+    requested_at: Optional[datetime] = Field(None, description="Requested timestamp")
+    sent_at: Optional[datetime] = Field(None, description="Sent timestamp")
+    delivered_at: Optional[datetime] = Field(None, description="Delivered timestamp")
+    completed_at: Optional[datetime] = Field(None, description="Completed timestamp")
+    failed_at: Optional[datetime] = Field(None, description="Failed timestamp")
+    delivery_status: Optional[str] = Field(None, description="Delivery status")
+    error: Optional[str] = Field(None, description="Error message")
+    yaml_config: Optional[str] = Field(None, description="YAML configuration content")
 
 
 # JSON Schema validators (for runtime validation)
@@ -185,7 +208,7 @@ GATEWAY_JSON_SCHEMA = {
         "gateway_id": {"type": "string", "minLength": 1},
         "name": {"type": "string", "minLength": 1},
         "location": {"type": "string", "minLength": 1},
-        "status": {"type": "string", "enum": ["connected", "disconnected", "maintenance", "error"]},
+        "status": {"type": "string", "enum": ["created", "connected", "disconnected", "maintenance", "error"]},
         "last_updated": {"type": ["string", "null"], "format": "date-time"},
         "last_heartbeat": {"type": ["string", "null"], "format": "date-time"},
         "uptime": {"type": ["string", "null"]},
@@ -195,7 +218,7 @@ GATEWAY_JSON_SCHEMA = {
         "connected_at": {"type": ["string", "null"], "format": "date-time"},
         "disconnected_at": {"type": ["string", "null"], "format": "date-time"},
         "deleted_at": {"type": ["string", "null"], "format": "date-time"},
-        "certificate_info": {"type": ["string", "null"]}
+        "certificate_info": {"type": ["object", "string", "null"]}
     },
     "required": ["gateway_id", "name", "location", "status"],
     "additionalProperties": False
@@ -248,6 +271,31 @@ MEASUREMENT_JSON_SCHEMA = {
     "additionalProperties": False
 }
 
+CONFIG_UPDATE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "update_id": {"type": "string", "minLength": 1},
+        "gateway_id": {"type": "string", "minLength": 1},
+        "state": {"type": "string", "minLength": 1},
+        "version": {"type": ["string", "null"]},
+        "config_hash": {"type": ["string", "null"]},
+        "config_version": {"type": ["string", "null"]},
+        "created_at": {"type": ["string", "null"], "format": "date-time"},
+        "last_updated": {"type": ["string", "null"], "format": "date-time"},
+        "published_at": {"type": ["string", "null"], "format": "date-time"},
+        "requested_at": {"type": ["string", "null"], "format": "date-time"},
+        "sent_at": {"type": ["string", "null"], "format": "date-time"},
+        "delivered_at": {"type": ["string", "null"], "format": "date-time"},
+        "completed_at": {"type": ["string", "null"], "format": "date-time"},
+        "failed_at": {"type": ["string", "null"], "format": "date-time"},
+        "delivery_status": {"type": ["string", "null"]},
+        "error": {"type": ["string", "null"]},
+        "yaml_config": {"type": ["string", "null"]}
+    },
+    "required": ["update_id", "gateway_id", "state"],
+    "additionalProperties": False
+}
+
 
 def validate_vendor_invoice_document(document: Dict[str, Any]) -> None:
     """Validate a vendor invoice document against the schema"""
@@ -269,17 +317,24 @@ def validate_measurement_document(document: Dict[str, Any]) -> None:
     jsonschema.validate(document, MEASUREMENT_JSON_SCHEMA)
 
 
+def validate_config_update_document(document: Dict[str, Any]) -> None:
+    """Validate a config update document against the schema"""
+    jsonschema.validate(document, CONFIG_UPDATE_JSON_SCHEMA)
+
+
 # Schema mapping for easy access
 DOCUMENT_SCHEMAS = {
     'vendor_invoices': VENDOR_INVOICE_JSON_SCHEMA,
     'gateways': GATEWAY_JSON_SCHEMA,
     'devices': DEVICE_JSON_SCHEMA,
-    'measurements': MEASUREMENT_JSON_SCHEMA
+    'measurements': MEASUREMENT_JSON_SCHEMA,
+    'config_updates': CONFIG_UPDATE_JSON_SCHEMA
 }
 
 DOCUMENT_VALIDATORS = {
     'vendor_invoices': validate_vendor_invoice_document,
     'gateways': validate_gateway_document,
     'devices': validate_device_document,
-    'measurements': validate_measurement_document
+    'measurements': validate_measurement_document,
+    'config_updates': validate_config_update_document
 }

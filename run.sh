@@ -424,6 +424,11 @@ function dev {
 function iot-backend-start() {
     echo "Starting Docker containers (MQTT broker and gateway simulator)..."
     cd src/iot && docker-compose build --no-cache gateway-simulator
+    
+    # Create the network first (this will also be created by docker-compose up, but ensuring it exists early)
+    echo "Ensuring iot-network exists..."
+    docker network create iot-network 2>/dev/null || echo "iot-network already exists or will be created by docker-compose"
+    
     docker-compose up -d mqtt-broker
     
     echo "Waiting for MQTT broker to initialize..."
