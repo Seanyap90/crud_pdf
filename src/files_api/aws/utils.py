@@ -102,6 +102,22 @@ def get_elasticbeanstalk_client():
     """Get the Elastic Beanstalk client."""
     return AWSClientManager().get_client('elasticbeanstalk')
 
+def get_ecs_client():
+    """Get the ECS client."""
+    return AWSClientManager().get_client('ecs')
+
+def get_efs_client():
+    """Get the EFS client."""
+    return AWSClientManager().get_client('efs')
+
+def get_application_autoscaling_client():
+    """Get the Application Auto Scaling client."""
+    return AWSClientManager().get_client('application-autoscaling')
+
+def get_logs_client():
+    """Get the CloudWatch Logs client."""
+    return AWSClientManager().get_client('logs')
+
 def create_s3_bucket(bucket_name: str = None) -> bool:
     """Create an S3 bucket with proper error handling."""
     settings = get_settings()
