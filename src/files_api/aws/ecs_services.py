@@ -1,8 +1,7 @@
 """ECS service definitions for MongoDB and VLM worker services."""
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 import json
-import boto3
 from botocore.exceptions import ClientError
 
 from files_api.settings import get_settings
@@ -49,13 +48,13 @@ class ECSServiceManager:
                 cluster=self.cluster_name,
                 serviceName=service_name,
                 taskDefinition=task_def_arn,
-                desiredCount=1,  # Always 1 instance for MongoDB
+                desiredCount=1,
                 launchType='FARGATE',
                 networkConfiguration={
                     'awsvpcConfiguration': {
                         'subnets': [vpc_config['public_subnet_id']],
                         'securityGroups': [vpc_config['mongodb_security_group_id']],
-                        'assignPublicIp': 'ENABLED'  # Public subnet with public IP
+                        'assignPublicIp': 'ENABLED'
                     }
                 },
                 serviceRegistries=[
@@ -65,7 +64,7 @@ class ECSServiceManager:
                         'containerPort': 27017
                     }
                 ],
-                enableExecuteCommand=True,  # For debugging
+                enableExecuteCommand=True,
                 tags=[
                     {'key': 'Name', 'value': service_name},
                     {'key': 'Project', 'value': settings.app_name},
@@ -84,14 +83,13 @@ class ECSServiceManager:
             raise
     
     def create_vlm_worker_service(self, vpc_config: Dict[str, Any], 
-                                 efs_config: Dict[str, Any],
-                                 sqs_queue_arn: str) -> Dict[str, Any]:
+                                 efs_config: Dict[str, Any]) -> Dict[str, Any]:
         """Create VLM worker service with EC2 GPU instances."""
         service_name = f"{settings.app_name}-vlm-workers"
         
         try:
             # Create task definition
-            task_def_arn = self._create_vlm_worker_task_definition(efs_config, sqs_queue_arn)
+            task_def_arn = self._create_vlm_worker_task_definition(efs_config)
             
             # Check for existing service
             existing_service = self._find_existing_service(service_name)
@@ -105,22 +103,22 @@ class ECSServiceManager:
                 cluster=self.cluster_name,
                 serviceName=service_name,
                 taskDefinition=task_def_arn,
-                desiredCount=0,  # Start with 0, scale based on SQS
+                desiredCount=0,
                 capacityProviderStrategy=[
                     {
                         'capacityProvider': f"{self.cluster_name}-gpu-cp",
                         'weight': 1,
-                        'base': 0  # No base capacity, scale to zero
+                        'base': 0
                     }
                 ],
                 networkConfiguration={
                     'awsvpcConfiguration': {
                         'subnets': [vpc_config['private_subnet_id']],
                         'securityGroups': [vpc_config['vlm_security_group_id']],
-                        'assignPublicIp': 'DISABLED'  # Private subnet
+                        'assignPublicIp': 'DISABLED'
                     }
                 },
-                enableExecuteCommand=True,  # For debugging
+                enableExecuteCommand=True,
                 tags=[
                     {'key': 'Name', 'value': service_name},
                     {'key': 'Project', 'value': settings.app_name},
@@ -151,8 +149,8 @@ class ECSServiceManager:
                 'family': family,
                 'networkMode': 'awsvpc',
                 'requiresCompatibilities': ['FARGATE'],
-                'cpu': '512',  # 0.5 vCPU
-                'memory': '1024',  # 1GB
+                'cpu': '512',
+                'memory': '1024',
                 'executionRoleArn': self._get_ecs_execution_role_arn(),
                 'taskRoleArn': self._get_ecs_task_role_arn(),
                 'volumes': [
@@ -201,7 +199,7 @@ class ECSServiceManager:
                         'healthCheck': {
                             'command': [
                                 'CMD-SHELL',
-                                'mongosh --eval "db.adminCommand(\\'ping\\')" --quiet'
+                                'mongosh --eval "db.adminCommand(\'ping\')" --quiet'
                             ],
                             'interval': 30,
                             'timeout': 5,
@@ -229,8 +227,7 @@ class ECSServiceManager:
             logger.error(f"Failed to create MongoDB task definition: {e}")
             raise
     
-    def _create_vlm_worker_task_definition(self, efs_config: Dict[str, Any], 
-                                          sqs_queue_arn: str) -> str:
+    def _create_vlm_worker_task_definition(self, efs_config: Dict[str, Any]) -> str:
         """Create task definition for VLM workers."""
         family = f"{settings.app_name}-vlm-worker"
         
@@ -238,13 +235,13 @@ class ECSServiceManager:
             # Create CloudWatch log group
             log_group = self._create_log_group(f"/ecs/{family}")
             
-            # VLM worker task definition
+            # VLM worker task definition  
             task_definition = {
                 'family': family,
                 'networkMode': 'awsvpc',
                 'requiresCompatibilities': ['EC2'],
-                'cpu': '3584',  # 3.5 vCPU (leaving 0.5 for system on g4dn.xlarge)
-                'memory': '14336',  # 14GB (leaving 2GB for system)
+                'cpu': '3584',
+                'memory': '14336',
                 'executionRoleArn': self._get_ecs_execution_role_arn(),
                 'taskRoleArn': self._get_ecs_task_role_arn(),
                 'volumes': [
@@ -309,28 +306,6 @@ class ECSServiceManager:
                                 'awslogs-region': self.region,
                                 'awslogs-stream-prefix': 'vlm-worker'
                             }
-                        },
-                        'dockerLabels': {
-                            'com.nvidia.cuda.version': '11.8'
-                        },
-                        'linuxParameters': {
-                            'devices': [
-                                {
-                                    'hostPath': '/dev/nvidia0',
-                                    'containerPath': '/dev/nvidia0',
-                                    'permissions': ['read', 'write']
-                                },
-                                {
-                                    'hostPath': '/dev/nvidiactl',
-                                    'containerPath': '/dev/nvidiactl',
-                                    'permissions': ['read', 'write']
-                                },
-                                {
-                                    'hostPath': '/dev/nvidia-uvm',
-                                    'containerPath': '/dev/nvidia-uvm',
-                                    'permissions': ['read', 'write']
-                                }
-                            ]
                         }
                     }
                 ],
@@ -458,7 +433,7 @@ class ECSServiceManager:
             # Create log group
             self.logs_client.create_log_group(
                 logGroupName=log_group_name,
-                retentionInDays=7,  # 7 days retention for cost optimization
+                retentionInDays=7,
                 tags={
                     'Name': log_group_name,
                     'Project': settings.app_name
@@ -618,8 +593,6 @@ class ECSServiceManager:
             'task_definitions': self.task_definitions
         }
     
-    # Helper methods for finding existing resources
-    
     def _find_existing_service(self, service_name: str) -> Optional[Dict[str, Any]]:
         """Find existing ECS service."""
         try:
@@ -672,8 +645,7 @@ class ECSServiceManager:
                         desiredCount=0
                     )
                     
-                    # Wait for tasks to stop, then delete service
-                    # This is simplified - in production you'd want proper waiter logic
+                    # Delete service
                     self.ecs_client.delete_service(
                         cluster=self.cluster_name,
                         service=service_info['serviceName'],
