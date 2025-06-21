@@ -1,0 +1,548 @@
+"""AWS ECS deployment for VLM+RAG worker with MongoDB and GPU support."""
+import os
+import logging
+import json
+import time
+import subprocess
+import argparse
+import zipfile
+import shutil
+from pathlib import Path
+from typing import Dict, Any, Optional, List
+from contextlib import contextmanager
+
+# Import settings
+from files_api.settings import get_settings
+
+# Import AWS utilities
+from files_api.aws.utils import (
+    AWSClientManager,
+    get_s3_client,
+    get_sqs_client,
+    get_ecs_client,
+    get_iam_client,
+    get_ecr_client,
+    create_s3_bucket,
+    create_sqs_queue,
+    get_queue_arn
+)
+
+# Import ECS infrastructure components
+from files_api.aws.vpc_network import VPCNetworkBuilder
+from files_api.aws.efs_manager import EFSManager
+from files_api.aws.ecs_cluster import ECSClusterManager
+from files_api.aws.ecs_services import ECSServiceManager
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Get settings instance
+settings = get_settings()
+
+# Constants from settings
+DEFAULT_REGION = settings.aws_region
+S3_BUCKET_NAME = settings.s3_bucket_name
+SQS_QUEUE_NAME = settings.sqs_queue_name
+ECS_CLUSTER_NAME = f"{settings.app_name.lower().replace(' ', '-')}-ecs-cluster"
+ECR_REPO_NAME = settings.ecr_repo_name
+
+def log_operation(description: str):
+    """Decorator for timing and logging AWS deployment operations."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            logger.info(f"Starting: {description}")
+            start_time = time.time()
+            try:
+                result = func(*args, **kwargs)
+                duration = time.time() - start_time
+                logger.info(f"Completed: {description} in {duration:.2f}s")
+                return result
+            except Exception as e:
+                duration = time.time() - start_time
+                logger.error(f"Failed: {description} after {duration:.2f}s - {str(e)}")
+                raise
+        return wrapper
+    return decorator
+
+
+class ECSDeploymentStrategy:
+    """Base class for ECS deployment strategies."""
+    
+    def __init__(self, mode: str):
+        self.mode = mode
+        self.settings = get_settings()
+        self.deployment_config = {}
+    
+    def setup_clients(self) -> None:
+        """Set up AWS clients."""
+        pass
+    
+    def create_container_config(self, ecr_uri: str) -> Dict[str, Any]:
+        """Create container configuration for ECS tasks."""
+        return {
+            "image": ecr_uri,
+            "essential": True,
+            "environment": self._get_container_environment(),
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-region": self.settings.aws_region,
+                    "awslogs-stream-prefix": "ecs"
+                }
+            }
+        }
+    
+    def _get_container_environment(self) -> List[Dict[str, str]]:
+        """Get environment variables for containers."""
+        return [
+            {"name": "DEPLOYMENT_MODE", "value": self.mode},
+            {"name": "AWS_REGION", "value": self.settings.aws_region},
+            {"name": "S3_BUCKET_NAME", "value": self.settings.s3_bucket_name},
+            {"name": "SQS_QUEUE_URL", "value": self.settings.sqs_queue_url or ""}
+        ]
+
+
+class MockECSStrategy(ECSDeploymentStrategy):
+    """Strategy for aws-mock deployment using docker-compose."""
+    
+    def __init__(self):
+        super().__init__("aws-mock")
+        self.endpoint_url = self.settings.aws_endpoint_url or "http://localhost:5000"
+    
+    def setup_clients(self) -> None:
+        """Set up environment for mock AWS clients."""
+        os.environ["AWS_ENDPOINT_URL"] = self.endpoint_url
+        logger.info(f"Using mock AWS endpoint: {self.endpoint_url}")
+    
+    @log_operation("Mock ECS deployment with docker-compose")
+    def deploy(self) -> Dict[str, Any]:
+        """Deploy using docker-compose for local testing."""
+        logger.info("Mock ECS deployment - using docker-compose")
+        
+        # Use existing docker-compose file or create ECS-specific one
+        compose_file = Path("src/files_api/docker-compose.ecs-mock.yml")
+        if not compose_file.exists():
+            self._create_mock_compose_file(compose_file)
+        
+        # Run docker-compose
+        try:
+            subprocess.run([
+                "docker-compose", 
+                "-f", str(compose_file), 
+                "up", "-d"
+            ], check=True)
+            
+            return {
+                "status": "success",
+                "mode": "mock",
+                "message": "ECS mock environment started with docker-compose"
+            }
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Docker-compose failed: {e}")
+            raise
+    
+    def _create_mock_compose_file(self, compose_file: Path) -> None:
+        """Create docker-compose file for ECS mock environment."""
+        compose_content = {
+            "version": "3.8",
+            "services": {
+                "mongodb": {
+                    "image": "mongo:7.0",
+                    "ports": ["27017:27017"],
+                    "environment": [
+                        "MONGO_INITDB_ROOT_USERNAME=admin",
+                        f"MONGO_INITDB_ROOT_PASSWORD={settings.mongodb_password}",
+                        f"MONGO_INITDB_DATABASE={settings.mongodb_database}"
+                    ],
+                    "volumes": ["mongodb_data:/data/db"]
+                },
+                "vlm-worker": {
+                    "build": {"context": "src/files_api/vlm"},
+                    "environment": [
+                        "DEPLOYMENT_MODE=aws-mock",
+                        f"AWS_REGION={settings.aws_region}",
+                        f"MONGODB_URI=mongodb://admin:{settings.mongodb_password}@mongodb:27017/{settings.mongodb_database}",
+                        "MODEL_CACHE_DIR=/models"
+                    ],
+                    "volumes": ["model_cache:/models"],
+                    "depends_on": ["mongodb"]
+                }
+            },
+            "volumes": {
+                "mongodb_data": {},
+                "model_cache": {}
+            }
+        }
+        
+        compose_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(compose_file, 'w') as f:
+            import yaml
+            yaml.dump(compose_content, f, default_flow_style=False)
+        
+        logger.info(f"Created mock compose file: {compose_file}")
+
+
+class ProductionECSStrategy(ECSDeploymentStrategy):
+    """Strategy for aws-prod deployment using real AWS ECS."""
+    
+    def __init__(self):
+        super().__init__("aws-prod")
+        self.vpc_builder = None
+        self.efs_manager = None
+        self.cluster_manager = None
+        self.service_manager = None
+        self.deployment_config = {}
+    
+    def setup_clients(self) -> None:
+        """Set up AWS clients for production deployment."""
+        # Initialize infrastructure managers
+        self.vpc_builder = VPCNetworkBuilder(self.settings.aws_region)
+        self.efs_manager = EFSManager(self.settings.aws_region)
+        self.cluster_manager = ECSClusterManager(self.settings.aws_region)
+        self.service_manager = ECSServiceManager(self.settings.aws_region)
+        
+        logger.info("Initialized ECS infrastructure managers")
+    
+    @log_operation("Production ECS deployment")
+    def deploy(self) -> Dict[str, Any]:
+        """Deploy complete ECS infrastructure."""
+        try:
+            # Phase 1: Core Infrastructure
+            logger.info("Phase 1: Setting up core infrastructure")
+            vpc_config = self._setup_vpc_infrastructure()
+            efs_config = self._setup_efs_storage(vpc_config)
+            
+            # Phase 2: ECS Infrastructure
+            logger.info("Phase 2: Setting up ECS infrastructure")
+            cluster_config = self._setup_ecs_cluster(vpc_config)
+            
+            # Phase 3: Services
+            logger.info("Phase 3: Deploying services")
+            services_config = self._deploy_services(vpc_config, efs_config)
+            
+            # Phase 4: Auto-scaling (placeholder for ecs_scaling.py)
+            logger.info("Phase 4: Configuring auto-scaling")
+            scaling_config = self._setup_auto_scaling(services_config)
+            
+            # Compile deployment summary
+            self.deployment_config = {
+                "status": "success",
+                "mode": "production",
+                "region": self.settings.aws_region,
+                "cluster_name": ECS_CLUSTER_NAME,
+                "vpc": vpc_config,
+                "efs": efs_config,
+                "cluster": cluster_config,
+                "services": services_config,
+                "scaling": scaling_config,
+                "deployment_time": time.time()
+            }
+            
+            logger.info("ECS deployment completed successfully")
+            return self.deployment_config
+            
+        except Exception as e:
+            logger.error(f"ECS deployment failed: {e}")
+            self.deployment_config["status"] = "failed"
+            self.deployment_config["error"] = str(e)
+            raise
+    
+    @log_operation("VPC and networking setup")
+    def _setup_vpc_infrastructure(self) -> Dict[str, Any]:
+        """Set up VPC infrastructure."""
+        # Build VPC with single AZ design
+        vpc_config = (self.vpc_builder
+                     .build_vpc("10.0.0.0/16")
+                     .build_subnets("us-east-1a")  # Single AZ for cost optimization
+                     .build_internet_gateway()
+                     .build_nat_gateway()
+                     .build_route_tables()
+                     .build_security_groups()
+                     .get_vpc_config())
+        
+        logger.info(f"VPC created: {vpc_config['vpc_id']}")
+        return vpc_config
+    
+    @log_operation("EFS storage setup")
+    def _setup_efs_storage(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Set up EFS file systems for MongoDB and models."""
+        # Create MongoDB EFS
+        mongodb_efs = self.efs_manager.create_mongodb_efs(
+            vpc_config['vpc_id'],
+            vpc_config['public_subnet_id'],
+            vpc_config['efs_security_group_id']
+        )
+        
+        # Create models EFS
+        models_efs = self.efs_manager.create_models_efs(
+            vpc_config['vpc_id'],
+            vpc_config['private_subnet_id'],
+            vpc_config['efs_security_group_id']
+        )
+        
+        # Wait for mount targets to be available
+        self.efs_manager.wait_for_mount_targets_available()
+        
+        efs_config = {
+            "mongodb": mongodb_efs,
+            "models": models_efs
+        }
+        
+        logger.info(f"EFS systems created: MongoDB={mongodb_efs['file_system_id']}, Models={models_efs['file_system_id']}")
+        return efs_config
+    
+    @log_operation("ECS cluster setup")
+    def _setup_ecs_cluster(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Set up ECS cluster with GPU capacity provider."""
+        cluster_config = self.cluster_manager.create_cluster(
+            vpc_config['vpc_id'],
+            [vpc_config['private_subnet_id']]
+        )
+        
+        logger.info(f"ECS cluster created: {cluster_config['clusterName']}")
+        return self.cluster_manager.get_cluster_info()
+    
+    @log_operation("ECS services deployment")
+    def _deploy_services(self, vpc_config: Dict[str, Any], efs_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy MongoDB and VLM worker services."""
+        # Create MongoDB service
+        mongodb_service = self.service_manager.create_mongodb_service(
+            vpc_config, efs_config
+        )
+        
+        # Create VLM worker service
+        vlm_service = self.service_manager.create_vlm_worker_service(
+            vpc_config, efs_config
+        )
+        
+        services_config = self.service_manager.get_services_info()
+        logger.info(f"Services deployed: MongoDB={mongodb_service['serviceName']}, VLM={vlm_service['serviceName']}")
+        
+        return services_config
+    
+    @log_operation("Auto-scaling configuration")
+    def _setup_auto_scaling(self, services_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Set up auto-scaling for VLM workers."""
+        # Placeholder for ecs_scaling.py integration
+        # This will be implemented when ecs_scaling.py is created
+        scaling_config = {
+            "vlm_workers": {
+                "min_capacity": 0,
+                "max_capacity": 3,
+                "target_metric": "SQS_ApproximateNumberOfMessages",
+                "scale_out_cooldown": 300,
+                "scale_in_cooldown": 300,
+                "status": "configured"
+            }
+        }
+        
+        logger.info("Auto-scaling configuration prepared (implementation pending)")
+        return scaling_config
+
+
+class ECSDeploymentBuilder:
+    """Builder for ECS deployment with different strategies."""
+    
+    def __init__(self, mode: str = None):
+        self.mode = mode or settings.deployment_mode
+        self.strategy = self._create_strategy()
+        self.ecr_uri = None
+        
+    def _create_strategy(self) -> ECSDeploymentStrategy:
+        """Create deployment strategy based on mode."""
+        if self.mode == "aws-mock":
+            return MockECSStrategy()
+        elif self.mode == "aws-prod":
+            return ProductionECSStrategy()
+        else:
+            raise ValueError(f"Unsupported deployment mode: {self.mode}")
+    
+    @log_operation("ECR image preparation")
+    def prepare_ecr_image(self, docker_image_path: str = None) -> 'ECSDeploymentBuilder':
+        """Prepare and push Docker image to ECR."""
+        docker_image_path = docker_image_path or "src/files_api/vlm"
+        
+        if self.mode == "aws-mock":
+            logger.info("Skipping ECR for mock mode")
+            self.ecr_uri = "mock-image:latest"
+            return self
+        
+        # ECR operations for production
+        ecr_client = get_ecr_client()
+        
+        try:
+            # Create ECR repository if it doesn't exist
+            try:
+                ecr_client.create_repository(repositoryName=ECR_REPO_NAME)
+                logger.info(f"Created ECR repository: {ECR_REPO_NAME}")
+            except ecr_client.exceptions.RepositoryAlreadyExistsException:
+                logger.info(f"ECR repository already exists: {ECR_REPO_NAME}")
+            
+            # Get ECR login token
+            token_response = ecr_client.get_authorization_token()
+            token_data = token_response['authorizationData'][0]
+            ecr_endpoint = token_data['proxyEndpoint']
+            
+            # Build ECR URI
+            account_id = token_data['proxyEndpoint'].split('.')[0].split('//')[-1]
+            self.ecr_uri = f"{account_id}.dkr.ecr.{DEFAULT_REGION}.amazonaws.com/{ECR_REPO_NAME}:latest"
+            
+            # Docker build and push operations
+            self._build_and_push_image(docker_image_path, token_data)
+            
+            logger.info(f"ECR image ready: {self.ecr_uri}")
+            
+        except Exception as e:
+            logger.error(f"ECR preparation failed: {e}")
+            raise
+        
+        return self
+    
+    def _build_and_push_image(self, docker_path: str, token_data: Dict[str, Any]) -> None:
+        """Build and push Docker image to ECR."""
+        import base64
+        
+        # Decode ECR token
+        token = base64.b64decode(token_data['authorizationToken']).decode('utf-8')
+        username, password = token.split(':')
+        
+        # Docker login
+        subprocess.run([
+            "docker", "login", "--username", username, "--password-stdin",
+            token_data['proxyEndpoint']
+        ], input=password.encode(), check=True)
+        
+        # Build image
+        subprocess.run([
+            "docker", "build", "-t", self.ecr_uri, docker_path
+        ], check=True)
+        
+        # Push image
+        subprocess.run([
+            "docker", "push", self.ecr_uri
+        ], check=True)
+        
+        logger.info(f"Pushed image to ECR: {self.ecr_uri}")
+    
+    @log_operation("S3 and SQS setup")
+    def setup_supporting_services(self) -> 'ECSDeploymentBuilder':
+        """Set up S3 bucket and SQS queue."""
+        if self.mode == "aws-mock":
+            logger.info("Skipping S3/SQS setup for mock mode")
+            return self
+        
+        # Create S3 bucket
+        if create_s3_bucket(S3_BUCKET_NAME):
+            logger.info(f"S3 bucket ready: {S3_BUCKET_NAME}")
+        
+        # Create SQS queue
+        queue_url = create_sqs_queue(SQS_QUEUE_NAME)
+        if queue_url:
+            queue_arn = get_queue_arn(queue_url)
+            # Update settings with queue info
+            settings.sqs_queue_url = queue_url
+            settings.sqs_queue_arn = queue_arn
+            logger.info(f"SQS queue ready: {SQS_QUEUE_NAME}")
+        
+        return self
+    
+    @log_operation("ECS infrastructure deployment")
+    def deploy(self) -> Dict[str, Any]:
+        """Execute the deployment strategy."""
+        self.strategy.setup_clients()
+        return self.strategy.deploy()
+
+
+def cleanup_deployment(mode: str = None) -> None:
+    """Clean up ECS deployment resources."""
+    mode = mode or settings.deployment_mode
+    
+    if mode == "aws-mock":
+        logger.info("Cleaning up mock deployment")
+        try:
+            subprocess.run([
+                "docker-compose", 
+                "-f", "src/files_api/docker-compose.ecs-mock.yml", 
+                "down", "-v"
+            ], check=True)
+            logger.info("Mock deployment cleaned up")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Mock cleanup failed: {e}")
+    
+    elif mode == "aws-prod":
+        logger.info("Cleaning up production deployment")
+        try:
+            # Initialize managers
+            service_manager = ECSServiceManager(settings.aws_region)
+            cluster_manager = ECSClusterManager(settings.aws_region)
+            efs_manager = EFSManager(settings.aws_region)
+            vpc_builder = VPCNetworkBuilder(settings.aws_region)
+            
+            # Clean up in reverse order
+            service_manager.cleanup_services_resources()
+            cluster_manager.cleanup_cluster_resources()
+            efs_manager.cleanup_efs_resources()
+            vpc_builder.cleanup_vpc_resources()
+            
+            logger.info("Production deployment cleaned up")
+        except Exception as e:
+            logger.error(f"Production cleanup failed: {e}")
+            raise
+
+
+def main():
+    """Main deployment entry point."""
+    parser = argparse.ArgumentParser(description="Deploy ECS infrastructure for VLM workers")
+    parser.add_argument("--mode", choices=["aws-mock", "aws-prod"], 
+                       default=settings.deployment_mode,
+                       help="Deployment mode")
+    parser.add_argument("--cleanup", action="store_true", 
+                       help="Clean up deployment instead of deploying")
+    parser.add_argument("--docker-path", default="src/files_api/vlm",
+                       help="Path to Docker build context")
+    
+    args = parser.parse_args()
+    
+    try:
+        if args.cleanup:
+            cleanup_deployment(args.mode)
+            return
+        
+        # Execute deployment
+        builder = ECSDeploymentBuilder(args.mode)
+        result = (builder
+                 .setup_supporting_services()
+                 .prepare_ecr_image(args.docker_path)
+                 .deploy())
+        
+        # Output deployment summary
+        print(json.dumps(result, indent=2, default=str))
+        
+        if result.get("status") == "success":
+            logger.info("ECS deployment completed successfully!")
+            print(f"\nDeployment Summary:")
+            print(f"Mode: {result.get('mode')}")
+            print(f"Region: {result.get('region')}")
+            print(f"Cluster: {result.get('cluster_name')}")
+            
+            if args.mode == "aws-prod":
+                print(f"VPC ID: {result['vpc']['vpc_id']}")
+                print(f"MongoDB EFS: {result['efs']['mongodb']['file_system_id']}")
+                print(f"Models EFS: {result['efs']['models']['file_system_id']}")
+        else:
+            logger.error("ECS deployment failed!")
+            return 1
+            
+    except Exception as e:
+        logger.error(f"Deployment error: {e}")
+        return 1
+    
+    return 0
+
+
+if __name__ == "__main__":
+    exit(main())
