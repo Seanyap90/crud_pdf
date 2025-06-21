@@ -1,16 +1,32 @@
 version: '3.8'
 
 services:
+  # Model Downloader - downloads models to shared volume then exits
+  model-downloader:
+    build:
+      context: ../..  # Build from project root
+      dockerfile: src/files_api/vlm/Dockerfile
+    environment:
+      - TRANSFORMERS_CACHE=/app/cache
+      - HF_HOME=/app/cache
+      - HF_HUB_OFFLINE=0  # Allow downloads
+      - HF_HUB_DOWNLOAD_TIMEOUT=300  # 5 minutes timeout for downloads
+    volumes:
+      - model_cache:/app/cache
+    command: python3 /app/files_api/vlm/download_models.py
+    networks:
+      - eb-network
+    restart: "no"  # Run once and exit
+
   # VLM+RAG Worker - simulates EB worker environment
   eb-worker:
     build:
-      context: ../../
+      context: ../..  # Build from project root
       dockerfile: src/files_api/vlm/Dockerfile
     environment:
       # Core deployment configuration
       - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-aws-mock}
       - QUEUE_TYPE=${DEPLOYMENT_MODE:-aws-mock} 
-      - HF_HUB_DOWNLOAD_TIMEOUT=300
       
       # AWS Configuration (from environment or defaults)
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
@@ -45,9 +61,10 @@ services:
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       
-      # Transformers cache
+      # Transformers cache - using mounted volume
       - TRANSFORMERS_CACHE=/app/cache
       - HF_HOME=/app/cache
+      - HF_HUB_OFFLINE=1  # Use offline mode for inference
       
       # EB-specific environment variables (optional)
       - EB_APP_NAME=${EB_APP_NAME:-}
@@ -55,6 +72,14 @@ services:
 
       # worker to call FastAPI
       - API_BASE_URL=http://host.docker.internal:8000
+    
+    volumes:
+      # Mount the model cache volume (shared with downloader)
+      - model_cache:/app/cache
+    
+    depends_on:
+      model-downloader:
+        condition: service_completed_successfully
     
     deploy:
       mode: replicated
@@ -93,6 +118,11 @@ services:
       timeout: 20s
       retries: 3
       start_period: 300s
+
+volumes:
+  # Named volume for model cache - persists across container restarts
+  model_cache:
+    driver: local
 
 networks:
   eb-network:

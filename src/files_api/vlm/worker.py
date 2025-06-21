@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from pdf2image import convert_from_path
-from files_api.vlm.load_models_eb import ModelManager, model_on_device
+from files_api.vlm.load_models_ecs import ModelManager, model_on_device
 from typing import Optional, List, Tuple, Dict, Any
 from transformers import GenerationConfig
 

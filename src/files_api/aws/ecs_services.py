@@ -251,17 +251,7 @@ class ECSServiceManager:
                             'fileSystemId': efs_config['models']['file_system_id'],
                             'transitEncryption': 'ENABLED',
                             'authorizationConfig': {
-                                'accessPointId': efs_config['models']['colpali_access_point_id']
-                            }
-                        }
-                    },
-                    {
-                        'name': 'smolvlm-models',
-                        'efsVolumeConfiguration': {
-                            'fileSystemId': efs_config['models']['file_system_id'],
-                            'transitEncryption': 'ENABLED',
-                            'authorizationConfig': {
-                                'accessPointId': efs_config['models']['smolvlm_access_point_id']
+                                'accessPointId': efs_config['models']['access_point_id']
                             }
                         }
                     }
@@ -290,12 +280,7 @@ class ECSServiceManager:
                         'mountPoints': [
                             {
                                 'sourceVolume': 'model-storage',
-                                'containerPath': '/models/colpali',
-                                'readOnly': False
-                            },
-                            {
-                                'sourceVolume': 'smolvlm-models',
-                                'containerPath': '/models/smolvlm',
+                                'containerPath': '/app/cache',
                                 'readOnly': False
                             }
                         ],

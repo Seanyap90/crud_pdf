@@ -106,20 +106,15 @@ class EFSManager:
                 fs_id, subnet_id, security_group_id, 'models'
             )
             
-            # Create access points for different model types
-            colpali_ap = self._create_access_point(
-                fs_id, 'colpali-models', '/models/colpali', 1000, 1000
-            )
-            
-            smolvlm_ap = self._create_access_point(
-                fs_id, 'smolvlm-models', '/models/smolvlm', 1000, 1000
+            # Create single access point for all models (matches Docker volume structure)
+            models_ap = self._create_access_point(
+                fs_id, 'models-cache', '/cache', 1000, 1000
             )
             
             return {
                 'file_system_id': fs_id,
                 'mount_target_id': mount_target['MountTargetId'],
-                'colpali_access_point_id': colpali_ap['AccessPointId'],
-                'smolvlm_access_point_id': smolvlm_ap['AccessPointId'],
+                'access_point_id': models_ap['AccessPointId'],
                 'mount_target_ip': mount_target.get('IpAddress'),
                 'dns_name': f"{fs_id}.efs.{self.region}.amazonaws.com"
             }

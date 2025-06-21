@@ -158,7 +158,7 @@ class TaskDefinitionBuilder:
         family = f"{settings.app_name}-vlm-worker"
         log_group = self.create_log_group(f"/ecs/{family}")
         
-        # EFS volumes for model storage
+        # EFS volume for model storage (single mount point for all models)
         volumes = [
             {
                 'name': 'model-storage',
@@ -166,17 +166,7 @@ class TaskDefinitionBuilder:
                     'fileSystemId': efs_config['models']['file_system_id'],
                     'transitEncryption': 'ENABLED',
                     'authorizationConfig': {
-                        'accessPointId': efs_config['models']['colpali_access_point_id']
-                    }
-                }
-            },
-            {
-                'name': 'smolvlm-models',
-                'efsVolumeConfiguration': {
-                    'fileSystemId': efs_config['models']['file_system_id'],
-                    'transitEncryption': 'ENABLED',
-                    'authorizationConfig': {
-                        'accessPointId': efs_config['models']['smolvlm_access_point_id']
+                        'accessPointId': efs_config['models']['access_point_id']
                     }
                 }
             }
@@ -201,8 +191,8 @@ class TaskDefinitionBuilder:
                     {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
                     {'name': 'MODEL_MEMORY_LIMIT', 'value': settings.model_memory_limit},
                     {'name': 'DISABLE_DUPLICATE_LOADING', 'value': str(settings.disable_duplicate_loading).lower()},
-                    {'name': 'TRANSFORMERS_CACHE', 'value': '/app/models/colpali'},
-                    {'name': 'HF_HOME', 'value': '/app/models/colpali'},
+                    {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
+                    {'name': 'HF_HOME', 'value': '/app/cache'},
                     {'name': 'HF_HUB_OFFLINE', 'value': '1'},  # Use offline mode with EFS models
                     {'name': 'CUDA_VISIBLE_DEVICES', 'value': '0'},
                     {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:128,garbage_collection_threshold:0.8'},
@@ -212,12 +202,7 @@ class TaskDefinitionBuilder:
                 'mountPoints': [
                     {
                         'sourceVolume': 'model-storage',
-                        'containerPath': '/app/models/colpali',
-                        'readOnly': True
-                    },
-                    {
-                        'sourceVolume': 'smolvlm-models',
-                        'containerPath': '/app/models/smolvlm',
+                        'containerPath': '/app/cache',
                         'readOnly': True
                     }
                 ],
