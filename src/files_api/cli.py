@@ -86,5 +86,44 @@ def show_config():
     print(f"  Model Memory Limit: {settings.model_memory_limit}")
     print(f"  Disable Duplicate Loading: {settings.disable_duplicate_loading}")
 
+@cli.command()
+@click.option("--app", 
+              type=click.Choice(["files-api", "iot-backend", "all"]), 
+              default="all",
+              help="Which Lambda function to deploy")
+@click.option("--mode", 
+              type=click.Choice(["aws-prod"]), 
+              default="aws-prod",
+              help="Deployment mode")
+def lambda_deploy(app, mode):
+    """Deploy Lambda functions to AWS"""
+    print(f"Deploying {app} Lambda function(s) in {mode} mode...")
+    
+    try:
+        from files_api.aws.deploy_lambda import deploy_files_api_lambda
+        
+        if app in ["files-api", "all"]:
+            print("Deploying Files API Lambda...")
+            result = deploy_files_api_lambda()
+            if result:
+                print(f"✅ Files API Lambda deployed successfully")
+                print(f"Function URL: {result.get('function_url', 'N/A')}")
+            else:
+                print("❌ Files API Lambda deployment failed")
+                return
+        
+        # Future: IoT Backend Lambda deployment
+        if app in ["iot-backend", "all"]:
+            print("IoT Backend Lambda deployment not yet implemented")
+        
+        print("✅ Lambda deployment completed successfully")
+        
+    except ImportError as e:
+        print(f"❌ Error importing deployment module: {e}")
+        print("Make sure aws dependencies are installed")
+    except Exception as e:
+        print(f"❌ Lambda deployment failed: {e}")
+        raise
+
 if __name__ == "__main__":
     cli()

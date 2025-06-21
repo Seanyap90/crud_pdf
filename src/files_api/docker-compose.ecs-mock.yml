@@ -1,0 +1,132 @@
+version: '3.8'
+
+services:
+  # Model Downloader - downloads models to shared volume then exits
+  model-downloader:
+    build:
+      context: ../..  # Build from project root
+      dockerfile: src/files_api/vlm/Dockerfile
+    environment:
+      - TRANSFORMERS_CACHE=/app/cache
+      - HF_HOME=/app/cache
+      - HF_HUB_OFFLINE=0  # Allow downloads
+      - HF_HUB_DOWNLOAD_TIMEOUT=300  # 5 minutes timeout for downloads
+    volumes:
+      - model_cache:/app/cache
+    command: python3 /app/files_api/vlm/download_models.py
+    networks:
+      - ecs-network
+    restart: "no"  # Run once and exit
+
+  # VLM+RAG Worker - simulates ECS worker environment
+  ecs-worker:
+    build:
+      context: ../..  # Build from project root
+      dockerfile: src/files_api/vlm/Dockerfile
+    environment:
+      # Core deployment configuration
+      - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-aws-mock}
+      - QUEUE_TYPE=${DEPLOYMENT_MODE:-aws-mock} 
+      
+      # AWS Configuration (from environment or defaults)
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-mock}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-mock}
+      - AWS_ENDPOINT_URL=http://host.docker.internal:5000
+      
+      # S3 Configuration
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-rag-pdf-storage}
+      
+      # SQS Configuration
+      - SQS_QUEUE_NAME=${SQS_QUEUE_NAME:-rag-task-queue}
+      - SQS_QUEUE_URL=http://host.docker.internal:5000/queue/${SQS_QUEUE_NAME:-rag-task-queue}
+      
+      # Model Configuration (from settings or defaults)
+      - MODEL_MEMORY_LIMIT=${MODEL_MEMORY_LIMIT:-7GiB}
+      - DISABLE_DUPLICATE_LOADING=${DISABLE_DUPLICATE_LOADING:-true}
+      - MAX_CONTENT_LENGTH=256
+      - LOW_MEMORY=true
+      - OFFLOAD_TO_CPU=true
+      - CPU_OFFLOAD_FOLDER=/app/offload_folder
+      - CACHE_IMPLEMENTATION=offloaded
+      
+      # CUDA optimization
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8
+      
+      # CPU threading optimization
+      - OMP_NUM_THREADS=8
+      - MKL_NUM_THREADS=6
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Transformers cache - using mounted volume
+      - TRANSFORMERS_CACHE=/app/cache
+      - HF_HOME=/app/cache
+      - HF_HUB_OFFLINE=1  # Use offline mode for inference
+      
+      # ECS-specific environment variables (optional)
+      - ECS_CLUSTER_NAME=${ECS_CLUSTER_NAME:-}
+      - ECS_SERVICE_NAME=${ECS_SERVICE_NAME:-}
+
+      # worker to call FastAPI
+      - API_BASE_URL=http://host.docker.internal:8000
+    
+    volumes:
+      # Mount the model cache volume (shared with downloader)
+      - model_cache:/app/cache
+    
+    depends_on:
+      model-downloader:
+        condition: service_completed_successfully
+    
+    deploy:
+      mode: replicated
+      replicas: ${ECS_WORKER_REPLICAS:-1}  # Can be scaled to simulate ECS auto-scaling
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+        limits:
+          memory: 26G
+    
+    shm_size: 8gb
+    cpuset: "0-11"
+    mem_swappiness: 60
+    ulimits:
+      memlock: -1
+    
+    runtime: nvidia
+    
+    networks:
+      - ecs-network
+    
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
+    restart: unless-stopped
+    
+    # No ports exposed - this is not an HTTP service
+    # The worker polls SQS directly
+    
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep python | grep -v grep || exit 1"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 300s
+
+volumes:
+  # Named volume for model cache - persists across container restarts
+  model_cache:
+    driver: local
+
+networks:
+  ecs-network:
+    driver: bridge
+
+# To simulate ECS auto-scaling locally, you can scale the worker:
+# docker-compose -f docker-compose.ecs-mock.yml up --scale ecs-worker=3

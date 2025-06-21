@@ -13,7 +13,7 @@ run:
 local-dev:
 	bash run.sh local-dev
 
-# Test AWS Elastic Beanstalk deployment locally  
+# Test AWS ECS deployment locally with mock environment
 aws-mock:
 	bash run.sh aws-mock
 

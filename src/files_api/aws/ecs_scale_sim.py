@@ -1,6 +1,7 @@
 """
-Elastic Beanstalk Autoscaling Simulator
-Simulates EB worker autoscaling decisions based on SQS metrics without spawning real containers.
+ECS Autoscaling Simulator
+Simulates ECS worker autoscaling decisions based on SQS metrics without spawning real containers.
+Implements ECS scaling logic: 1:1 message to task ratio with scale-to-zero capability.
 """
 import asyncio
 import logging
@@ -32,23 +33,23 @@ class ScalingEvent:
         }
 
 @dataclass
-class EBScalingConfig:
-    """EB Worker environment scaling configuration."""
-    min_instances: int = 1
-    max_instances: int = 5
-    scale_up_threshold: int = 10  # messages per instance
-    scale_down_threshold: int = 2  # messages per instance
-    cooldown_period: int = 300  # seconds
-    evaluation_periods: int = 2  # consecutive periods before scaling
-    evaluation_interval: int = 30  # seconds between evaluations
+class ECSScalingConfig:
+    """ECS service scaling configuration for simulation."""
+    min_instances: int = 0  # Scale to zero capability
+    max_instances: int = 3  # Max 3 GPU instances
+    scale_up_threshold: int = 1  # 1 message = 1 task (immediate)
+    scale_down_threshold: int = 0  # 0 messages = scale to zero
+    cooldown_period: int = 300  # 5 minutes (scale-in delay)
+    evaluation_periods: int = 1  # Immediate scaling (no delay for scale-out)
+    evaluation_interval: int = 15  # seconds between evaluations
 
-class EBAutoscalingSimulator:
-    """Simulates EB worker autoscaling without real containers."""
+class ECSAutoscalingSimulator:
+    """Simulates ECS worker autoscaling without real containers."""
     
-    def __init__(self, queue_url: str, config: EBScalingConfig = None):
+    def __init__(self, queue_url: str, config: ECSScalingConfig = None):
         self.settings = get_settings()
         self.queue_url = queue_url
-        self.config = config or EBScalingConfig()
+        self.config = config or ECSScalingConfig()
         
         # Simulation state
         self.current_instance_count = self.config.min_instances
@@ -62,7 +63,7 @@ class EBAutoscalingSimulator:
         # Running state
         self.running = False
         
-        logger.info(f"🎯 EB Autoscaling Simulator initialized")
+        logger.info(f"🎯 ECS Autoscaling Simulator initialized")
         logger.info(f"   Queue: {queue_url}")
         logger.info(f"   Config: {asdict(self.config)}")
     
@@ -102,28 +103,31 @@ class EBAutoscalingSimulator:
             }
     
     def evaluate_scaling_decision(self, metrics: Dict) -> str:
-        """Evaluate whether to scale up, down, or take no action."""
-        messages_per_instance = metrics['messages_per_instance']
+        """Evaluate scaling decision using ECS logic: 1:1 message to task ratio."""
+        total_messages = metrics['total_messages']
         current_time = metrics['timestamp']
         
-        # Check cooldown period
-        time_since_last_scaling = (current_time - self.last_scaling_action).total_seconds()
-        if time_since_last_scaling < self.config.cooldown_period:
-            return 'cooldown'
+        # ECS Scaling Logic:
+        # 0 messages = 0 tasks (scale to zero)
+        # 1 message = 1 task (immediate scale-up)
+        # 2+ messages = n tasks (1:1 ratio)
+        desired_task_count = min(total_messages, self.config.max_instances)
+        desired_task_count = max(desired_task_count, self.config.min_instances)
         
-        # Evaluate scale up
-        if (messages_per_instance >= self.config.scale_up_threshold and 
-            self.current_instance_count < self.config.max_instances):
-            
+        # Determine action needed
+        if desired_task_count > self.current_instance_count:
+            # Scale out immediately (no cooldown for scale-out in ECS)
             self.scaling_evaluations['up'] += 1
             self.scaling_evaluations['down'] = 0
             
             if self.scaling_evaluations['up'] >= self.config.evaluation_periods:
                 return 'scale_up'
         
-        # Evaluate scale down
-        elif (messages_per_instance <= self.config.scale_down_threshold and 
-              self.current_instance_count > self.config.min_instances):
+        elif desired_task_count < self.current_instance_count:
+            # Scale in with cooldown period (5-minute delay)
+            time_since_last_scaling = (current_time - self.last_scaling_action).total_seconds()
+            if time_since_last_scaling < self.config.cooldown_period:
+                return 'cooldown'
             
             self.scaling_evaluations['down'] += 1
             self.scaling_evaluations['up'] = 0
@@ -131,7 +135,7 @@ class EBAutoscalingSimulator:
             if self.scaling_evaluations['down'] >= self.config.evaluation_periods:
                 return 'scale_down'
         
-        # Reset evaluations if thresholds not met
+        # No scaling needed
         else:
             self.scaling_evaluations = {'up': 0, 'down': 0}
         
@@ -143,29 +147,26 @@ class EBAutoscalingSimulator:
         instance_count_after = self.current_instance_count
         reason = ""
         
+        total_messages = metrics['total_messages']
+        desired_task_count = min(max(total_messages, self.config.min_instances), self.config.max_instances)
+        
         if decision == 'scale_up':
-            instance_count_after = min(
-                self.current_instance_count + 1, 
-                self.config.max_instances
-            )
-            reason = f"Queue messages per instance ({metrics['messages_per_instance']:.1f}) >= threshold ({self.config.scale_up_threshold})"
+            instance_count_after = desired_task_count
+            reason = f"ECS scaling: {total_messages} messages → {desired_task_count} tasks (1:1 ratio)"
             self.last_scaling_action = metrics['timestamp']
             self.scaling_evaluations = {'up': 0, 'down': 0}
             
         elif decision == 'scale_down':
-            instance_count_after = max(
-                self.current_instance_count - 1, 
-                self.config.min_instances
-            )
-            reason = f"Queue messages per instance ({metrics['messages_per_instance']:.1f}) <= threshold ({self.config.scale_down_threshold})"
+            instance_count_after = desired_task_count  
+            reason = f"ECS scaling: {total_messages} messages → {desired_task_count} tasks (5min cooldown passed)"
             self.last_scaling_action = metrics['timestamp']
             self.scaling_evaluations = {'up': 0, 'down': 0}
             
         elif decision == 'cooldown':
-            reason = f"In cooldown period ({(metrics['timestamp'] - self.last_scaling_action).total_seconds():.0f}s < {self.config.cooldown_period}s)"
+            reason = f"Scale-in cooldown active ({(metrics['timestamp'] - self.last_scaling_action).total_seconds():.0f}s < {self.config.cooldown_period}s)"
             
         else:  # no_action
-            reason = f"Messages per instance ({metrics['messages_per_instance']:.1f}) within thresholds"
+            reason = f"No scaling needed: {total_messages} messages, {self.current_instance_count} tasks running"
         
         # Update instance count
         self.current_instance_count = instance_count_after
@@ -230,7 +231,7 @@ class EBAutoscalingSimulator:
         self.running = True
         start_time = datetime.now()
         
-        logger.info(f"🚀 Starting EB Autoscaling Simulation")
+        logger.info(f"🚀 Starting ECS Autoscaling Simulation")
         logger.info(f"   Evaluation interval: {self.config.evaluation_interval} seconds")
         if duration_seconds:
             logger.info(f"   Duration: {duration_seconds} seconds")
@@ -316,16 +317,16 @@ async def main():
     """Main function for standalone testing."""
     import argparse
     
-    parser = argparse.ArgumentParser(description='EB Autoscaling Simulator')
+    parser = argparse.ArgumentParser(description='ECS Autoscaling Simulator')
     parser.add_argument('--queue-url', required=True, help='SQS Queue URL')
     parser.add_argument('--duration', type=int, help='Simulation duration in seconds (default: run until stopped)')
-    parser.add_argument('--min-instances', type=int, default=1, help='Minimum instances')
-    parser.add_argument('--max-instances', type=int, default=5, help='Maximum instances')
-    parser.add_argument('--scale-up-threshold', type=int, default=10, help='Scale up threshold (messages per instance)')
-    parser.add_argument('--scale-down-threshold', type=int, default=2, help='Scale down threshold (messages per instance)')
+    parser.add_argument('--min-instances', type=int, default=0, help='Minimum instances (0 for scale-to-zero)')
+    parser.add_argument('--max-instances', type=int, default=3, help='Maximum instances (GPU limit)')
+    parser.add_argument('--scale-up-threshold', type=int, default=1, help='Scale up threshold (1 message = 1 task)')
+    parser.add_argument('--scale-down-threshold', type=int, default=0, help='Scale down threshold (0 messages = scale to zero)')
     parser.add_argument('--cooldown', type=int, default=300, help='Cooldown period in seconds')
-    parser.add_argument('--evaluation-periods', type=int, default=2, help='Consecutive evaluation periods required')
-    parser.add_argument('--evaluation-interval', type=int, default=30, help='Seconds between evaluations')
+    parser.add_argument('--evaluation-periods', type=int, default=1, help='Consecutive evaluation periods required (1 for immediate scaling)')
+    parser.add_argument('--evaluation-interval', type=int, default=15, help='Seconds between evaluations')
     
     args = parser.parse_args()
     
@@ -336,7 +337,7 @@ async def main():
     )
     
     # Create scaling config
-    config = EBScalingConfig(
+    config = ECSScalingConfig(
         min_instances=args.min_instances,
         max_instances=args.max_instances,
         scale_up_threshold=args.scale_up_threshold,
@@ -347,7 +348,7 @@ async def main():
     )
     
     # Create and run simulator
-    simulator = EBAutoscalingSimulator(args.queue_url, config)
+    simulator = ECSAutoscalingSimulator(args.queue_url, config)
     
     try:
         await simulator.run(args.duration)
