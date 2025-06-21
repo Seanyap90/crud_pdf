@@ -1,4 +1,4 @@
-u"""EFS file system management for MongoDB data and model storage."""
+"""EFS file system management for MongoDB data and model storage."""
 import logging
 from typing import Dict, Any, Optional, List
 import boto3

@@ -9,6 +9,8 @@ from typing import Dict, Any, Optional, List
 
 from files_api.vlm.rag import Worker
 from files_api.aws.utils import get_cloudwatch_client
+from files_api.vlm.ecs_task_manager import get_task_manager, ECSTaskManager
+from files_api.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +131,53 @@ class LoggingObserver(WorkerObserver):
             return f"{task['file_info'].get('invoice_id', 'unknown')}"
         return str(id(task))
 
+
+class ECSTaskObserver(WorkerObserver):
+    """ECS-specific observer for task lifecycle management."""
+    
+    def __init__(self, task_manager: ECSTaskManager):
+        """Initialize with ECS task manager."""
+        self.task_manager = task_manager
+        self.processed_tasks = 0
+        
+    def on_task_start(self, task: Dict[str, Any]) -> None:
+        """Handle ECS task start."""
+        # Register current ECS task if not already registered
+        if not self.task_manager.get_current_task_arn():
+            self.task_manager.register_current_task()
+        
+        # Log ECS task info
+        health = self.task_manager.monitor_task_health()
+        if health.get('task_id'):
+            logger.info(f"[ECS Task {health['task_id']}] Processing task {self.processed_tasks + 1}")
+    
+    def on_task_complete(self, task: Dict[str, Any], duration: float, success: bool) -> None:
+        """Handle ECS task completion."""
+        self.processed_tasks += 1
+        
+        # Get current health and statistics
+        health = self.task_manager.monitor_task_health()
+        stats = self.task_manager.get_task_statistics()
+        
+        logger.info(f"[ECS Task] Processed {self.processed_tasks} tasks total")
+        logger.info(f"[ECS Task] Success rate: {stats.get('success_rate', 0):.1f}%")
+        
+        # Check if we should scale to zero based on queue state
+        settings = get_settings()
+        if hasattr(settings, 'sqs_queue_url') and settings.sqs_queue_url:
+            ready_to_scale = self.task_manager.scale_to_zero(settings.sqs_queue_url)
+            if ready_to_scale and self.processed_tasks > 0:  # Only scale to zero after processing at least one task
+                logger.info("Queue is empty and task completed - initiating scale to zero")
+                self.task_manager.initiate_graceful_shutdown("Queue empty - scaling to zero")
+    
+    def on_worker_error(self, error: Exception) -> None:
+        """Handle worker error in ECS context."""
+        # Signal task failure to ECS task manager
+        self.task_manager.signal_task_completion(success=False, reason=f"Worker error: {str(error)}")
+        logger.error(f"[ECS Task] Worker error reported to task manager: {str(error)}")
+
 class AWSWorker(Worker):
-    """AWS-specific worker implementation with enhanced monitoring."""
+    """AWS-specific worker implementation with enhanced monitoring and ECS integration."""
     
     def __init__(self, queue, observers: Optional[List[WorkerObserver]] = None, mode: str = "aws-prod"):
         """Initialize AWS worker with queue and observers.
@@ -138,18 +185,33 @@ class AWSWorker(Worker):
         Args:
             queue: Queue handler for receiving tasks
             observers: Optional list of observers for monitoring
+            mode: Deployment mode (aws-mock, aws-prod)
         """
         super().__init__(queue)
         self.mode = mode
         
-        # Initialize observers
+        # Initialize ECS task manager for aws-prod
+        self.task_manager = None
+        if mode == "aws-prod":
+            try:
+                self.task_manager = get_task_manager()
+                logger.info("ECS task manager initialized")
+            except Exception as e:
+                logger.warning(f"Could not initialize ECS task manager: {e}")
+        
+        # Initialize observers based on mode
         if mode == "aws-mock":
             self.observers = observers or [LoggingObserver()]
         else:  # aws-prod
-            self.observers = observers or [LoggingObserver(), CloudWatchObserver()]
+            base_observers = [LoggingObserver(), CloudWatchObserver()]
+            if self.task_manager:
+                base_observers.append(ECSTaskObserver(self.task_manager))
+            self.observers = observers or base_observers
         
         # Log initialization
-        logger.info("AWS Worker initialized with enhanced monitoring")
+        logger.info(f"AWS Worker initialized with enhanced monitoring (mode: {mode})")
+        if self.task_manager:
+            logger.info("ECS task lifecycle management enabled")
         
         # Track continuous error count for health monitoring
         self.consecutive_errors = 0
@@ -158,6 +220,11 @@ class AWSWorker(Worker):
         # Schedule periodic health check reporting
         self.last_health_report = 0
         self.health_report_interval = 300  # 5 minutes
+        
+        # ECS-specific configuration
+        self.enable_scale_to_zero = (mode == "aws-prod")
+        self.idle_check_interval = 30  # Check for scale-to-zero every 30 seconds
+        self.last_idle_check = 0
     
     async def process_task(self, task: Dict[str, Any]) -> str:
         """Process a task with metrics and enhanced error handling.
@@ -214,6 +281,66 @@ class AWSWorker(Worker):
                 self.last_health_report = current_time
             
             self._check_memory_limits()
+    
+    async def listen_for_tasks(self) -> None:
+        """Enhanced task listening with ECS scale-to-zero support."""
+        if self.enable_scale_to_zero and self.task_manager:
+            logger.info("Starting ECS worker with scale-to-zero capability")
+        
+        # Call parent implementation but with ECS enhancements
+        await super().listen_for_tasks()
+    
+    def _should_check_for_scale_to_zero(self) -> bool:
+        """Check if it's time to evaluate scale-to-zero."""
+        current_time = time.time()
+        if current_time - self.last_idle_check >= self.idle_check_interval:
+            self.last_idle_check = current_time
+            return True
+        return False
+    
+    async def _check_scale_to_zero_condition(self) -> bool:
+        """Check if worker should scale to zero based on queue state."""
+        if not self.enable_scale_to_zero or not self.task_manager:
+            return False
+        
+        try:
+            settings = get_settings()
+            if not hasattr(settings, 'sqs_queue_url') or not settings.sqs_queue_url:
+                return False
+            
+            # Check queue state for scale decision
+            scale_info = self.task_manager.check_queue_for_scale_decision(settings.sqs_queue_url)
+            
+            # Scale to zero if no messages and no in-flight processing
+            should_scale = (
+                scale_info.get('total_messages', 0) == 0 and
+                scale_info.get('in_flight_messages', 0) == 0
+            )
+            
+            if should_scale:
+                logger.info("Scale-to-zero condition met: queue is empty")
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Error checking scale-to-zero condition: {e}")
+            return False
+    
+    def get_ecs_task_info(self) -> Optional[Dict[str, Any]]:
+        """Get current ECS task information."""
+        if not self.task_manager:
+            return None
+        
+        health = self.task_manager.monitor_task_health()
+        stats = self.task_manager.get_task_statistics()
+        
+        return {
+            'task_health': health,
+            'task_statistics': stats,
+            'mode': self.mode,
+            'scale_to_zero_enabled': self.enable_scale_to_zero
+        }
     
     def _report_health(self) -> None:
         """Report worker health metrics to CloudWatch."""
