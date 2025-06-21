@@ -1,26 +1,16 @@
 """AWS ECS deployment for VLM+RAG worker with MongoDB and GPU support."""
-import os
 import logging
 import json
 import time
 import subprocess
 import argparse
-import zipfile
-import shutil
-from pathlib import Path
-from typing import Dict, Any, Optional, List
-from contextlib import contextmanager
+from typing import Dict, Any, List
 
 # Import settings
 from files_api.settings import get_settings
 
 # Import AWS utilities
 from files_api.aws.utils import (
-    AWSClientManager,
-    get_s3_client,
-    get_sqs_client,
-    get_ecs_client,
-    get_iam_client,
     get_ecr_client,
     create_s3_bucket,
     create_sqs_queue,
@@ -107,83 +97,37 @@ class ECSDeploymentStrategy:
 
 
 class MockECSStrategy(ECSDeploymentStrategy):
-    """Strategy for aws-mock deployment using docker-compose."""
+    """Strategy for aws-mock deployment using existing infrastructure."""
     
     def __init__(self):
         super().__init__("aws-mock")
-        self.endpoint_url = self.settings.aws_endpoint_url or "http://localhost:5000"
     
     def setup_clients(self) -> None:
-        """Set up environment for mock AWS clients."""
-        os.environ["AWS_ENDPOINT_URL"] = self.endpoint_url
-        logger.info(f"Using mock AWS endpoint: {self.endpoint_url}")
+        """Mock deployment uses existing infrastructure - no client setup needed."""
+        logger.info("Mock deployment will use existing aws-mock infrastructure")
     
-    @log_operation("Mock ECS deployment with docker-compose")
+    @log_operation("Mock ECS deployment using existing aws-mock target")
     def deploy(self) -> Dict[str, Any]:
-        """Deploy using docker-compose for local testing."""
-        logger.info("Mock ECS deployment - using docker-compose")
+        """Delegate to existing aws-mock infrastructure."""
+        logger.info("Mock ECS deployment - delegating to existing aws-mock target")
         
-        # Use existing docker-compose file or create ECS-specific one
-        compose_file = Path("src/files_api/docker-compose.ecs-mock.yml")
-        if not compose_file.exists():
-            self._create_mock_compose_file(compose_file)
+        # The existing aws-mock target in run.sh already:
+        # 1. Starts Moto server
+        # 2. Creates S3/SQS resources
+        # 3. Uses docker-compose for containers
+        # 4. Uses SQLite3 (no MongoDB needed for mock)
+        # 5. Has autoscaling simulation
         
-        # Run docker-compose
-        try:
-            subprocess.run([
-                "docker-compose", 
-                "-f", str(compose_file), 
-                "up", "-d"
-            ], check=True)
-            
-            return {
-                "status": "success",
-                "mode": "mock",
-                "message": "ECS mock environment started with docker-compose"
-            }
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Docker-compose failed: {e}")
-            raise
-    
-    def _create_mock_compose_file(self, compose_file: Path) -> None:
-        """Create docker-compose file for ECS mock environment."""
-        compose_content = {
-            "version": "3.8",
-            "services": {
-                "mongodb": {
-                    "image": "mongo:7.0",
-                    "ports": ["27017:27017"],
-                    "environment": [
-                        "MONGO_INITDB_ROOT_USERNAME=admin",
-                        f"MONGO_INITDB_ROOT_PASSWORD={settings.mongodb_password}",
-                        f"MONGO_INITDB_DATABASE={settings.mongodb_database}"
-                    ],
-                    "volumes": ["mongodb_data:/data/db"]
-                },
-                "vlm-worker": {
-                    "build": {"context": "src/files_api/vlm"},
-                    "environment": [
-                        "DEPLOYMENT_MODE=aws-mock",
-                        f"AWS_REGION={settings.aws_region}",
-                        f"MONGODB_URI=mongodb://admin:{settings.mongodb_password}@mongodb:27017/{settings.mongodb_database}",
-                        "MODEL_CACHE_DIR=/models"
-                    ],
-                    "volumes": ["model_cache:/models"],
-                    "depends_on": ["mongodb"]
-                }
-            },
-            "volumes": {
-                "mongodb_data": {},
-                "model_cache": {}
-            }
+        # For mock mode, we just acknowledge that existing infrastructure
+        # handles the "ECS simulation" via docker-compose
+        return {
+            "status": "success",
+            "mode": "mock",
+            "message": "ECS mock mode - uses existing aws-mock infrastructure",
+            "database": "sqlite3",
+            "infrastructure": "docker-compose via make aws-mock",
+            "note": "Run 'make aws-mock' to start the full mock environment"
         }
-        
-        compose_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(compose_file, 'w') as f:
-            import yaml
-            yaml.dump(compose_content, f, default_flow_style=False)
-        
-        logger.info(f"Created mock compose file: {compose_file}")
 
 
 class ProductionECSStrategy(ECSDeploymentStrategy):
@@ -329,8 +273,11 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         """Set up auto-scaling for VLM workers."""
         # Placeholder for ecs_scaling.py integration
         # This will be implemented when ecs_scaling.py is created
+        vlm_service_name = services_config.get('services', {}).get('vlm_workers', {}).get('serviceName', 'vlm-workers')
+        
         scaling_config = {
             "vlm_workers": {
+                "service_name": vlm_service_name,
                 "min_capacity": 0,
                 "max_capacity": 3,
                 "target_metric": "SQS_ApproximateNumberOfMessages",
@@ -340,7 +287,7 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             }
         }
         
-        logger.info("Auto-scaling configuration prepared (implementation pending)")
+        logger.info(f"Auto-scaling configuration prepared for {vlm_service_name} (implementation pending)")
         return scaling_config
 
 
@@ -385,7 +332,6 @@ class ECSDeploymentBuilder:
             # Get ECR login token
             token_response = ecr_client.get_authorization_token()
             token_data = token_response['authorizationData'][0]
-            ecr_endpoint = token_data['proxyEndpoint']
             
             # Build ECR URI
             account_id = token_data['proxyEndpoint'].split('.')[0].split('//')[-1]
@@ -464,12 +410,9 @@ def cleanup_deployment(mode: str = None) -> None:
     if mode == "aws-mock":
         logger.info("Cleaning up mock deployment")
         try:
-            subprocess.run([
-                "docker-compose", 
-                "-f", "src/files_api/docker-compose.ecs-mock.yml", 
-                "down", "-v"
-            ], check=True)
-            logger.info("Mock deployment cleaned up")
+            # Use existing aws-mock-down function
+            subprocess.run(["make", "aws-mock-down"], check=True, cwd=".")
+            logger.info("Mock deployment cleaned up using existing aws-mock-down")
         except subprocess.CalledProcessError as e:
             logger.warning(f"Mock cleanup failed: {e}")
     
