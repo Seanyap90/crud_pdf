@@ -108,26 +108,45 @@ class MockECSStrategy(ECSDeploymentStrategy):
     
     @log_operation("Mock ECS deployment using existing aws-mock target")
     def deploy(self) -> Dict[str, Any]:
-        """Delegate to existing aws-mock infrastructure."""
-        logger.info("Mock ECS deployment - delegating to existing aws-mock target")
+        """Create mock AWS resources for ECS simulation."""
+        logger.info("Mock ECS deployment - creating required AWS resources")
         
-        # The existing aws-mock target in run.sh already:
-        # 1. Starts Moto server
-        # 2. Creates S3/SQS resources
-        # 3. Uses docker-compose for containers
-        # 4. Uses SQLite3 (no MongoDB needed for mock)
-        # 5. Has autoscaling simulation
-        
-        # For mock mode, we just acknowledge that existing infrastructure
-        # handles the "ECS simulation" via docker-compose
-        return {
-            "status": "success",
-            "mode": "mock",
-            "message": "ECS mock mode - uses existing aws-mock infrastructure",
-            "database": "sqlite3",
-            "infrastructure": "docker-compose via make aws-mock",
-            "note": "Run 'make aws-mock' to start the full mock environment"
-        }
+        try:
+            # Create S3 bucket for mock environment
+            bucket_created = create_s3_bucket(S3_BUCKET_NAME)
+            if bucket_created:
+                logger.info(f"Mock S3 bucket created: {S3_BUCKET_NAME}")
+            
+            # Create SQS queue for mock environment
+            queue_url = create_sqs_queue(SQS_QUEUE_NAME)
+            if queue_url:
+                queue_arn = get_queue_arn(queue_url)
+                logger.info(f"Mock SQS queue created: {SQS_QUEUE_NAME} -> {queue_url}")
+                
+                # Set queue URL in settings for worker access
+                settings.sqs_queue_url = queue_url
+                settings.sqs_queue_arn = queue_arn
+            else:
+                raise Exception(f"Failed to create SQS queue: {SQS_QUEUE_NAME}")
+            
+            return {
+                "status": "success",
+                "mode": "mock",
+                "message": "ECS mock mode - AWS resources created",
+                "database": "sqlite3",
+                "infrastructure": "docker-compose via make aws-mock",
+                "s3_bucket": S3_BUCKET_NAME,
+                "sqs_queue_url": queue_url,
+                "sqs_queue_arn": queue_arn
+            }
+            
+        except Exception as e:
+            logger.error(f"Mock deployment failed: {e}")
+            return {
+                "status": "failed",
+                "mode": "mock",
+                "error": str(e)
+            }
 
 
 class ProductionECSStrategy(ECSDeploymentStrategy):

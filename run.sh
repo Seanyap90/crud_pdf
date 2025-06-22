@@ -228,7 +228,7 @@ function aws-mock {
     
     # Deploy ECS infrastructure using deploy_ecs.py
     echo "Creating ECS mock resources (S3, SQS, etc.)..."
-    python -m files_api.aws.deploy_ecs --mode aws-mock --no-cleanup
+    python -m files_api.aws.deploy_ecs --mode aws-mock
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to create ECS mock resources"
