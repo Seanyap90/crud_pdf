@@ -28,6 +28,14 @@ clean-model-cache:
 aws-prod:
 	bash run.sh aws-prod
 
+# Cleanup AWS production deployment
+aws-prod-cleanup:
+	bash run.sh aws-prod-cleanup
+
+# Show AWS production deployment status
+aws-prod-status:
+	bash run.sh aws-prod-status
+
 iot-backend-start:
 	bash run.sh iot-backend-start
 

@@ -1,13 +1,16 @@
 """
 ECS Auto-scaling with CloudWatch Metrics
 Implements native AWS auto-scaling for ECS services with scale-to-zero capability.
+Enhanced with Docker Compose service discovery for hybrid deployments.
 """
 import logging
 import time
 import json
+import subprocess
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
+from pathlib import Path
 
 from files_api.aws.utils import (
     get_ecs_client,
@@ -394,119 +397,256 @@ class ECSAutoScaler:
         except KeyboardInterrupt:
             logger.info("Scaling simulation interrupted by user")
             return simulation_events
-        except Exception as e:
-            logger.error(f"Scaling simulation failed: {e}")
-            raise
+
+
+class DockerComposeECSIntegration:
+    """Integration layer for Docker Compose ECS services with auto-scaling."""
     
-    def cleanup_auto_scaling(self) -> None:
-        """Clean up auto-scaling resources."""
+    def __init__(self, compose_file: str = "src/files_api/docker-compose.aws-prod.yml"):
+        self.compose_file = Path(compose_file)
+        self.settings = get_settings()
+        
+    def discover_compose_services(self) -> Dict[str, Any]:
+        """Discover ECS-related services from Docker Compose file."""
         try:
-            # Delete CloudWatch alarms
-            alarm_names = [
-                f"{self.config.service_name}-scale-out-alarm",
-                f"{self.config.service_name}-scale-in-alarm"
-            ]
+            if not self.compose_file.exists():
+                logger.warning(f"Compose file not found: {self.compose_file}")
+                return {}
             
-            for alarm_name in alarm_names:
-                try:
-                    self.cloudwatch_client.delete_alarms(AlarmNames=[alarm_name])
-                    logger.info(f"Deleted alarm: {alarm_name}")
-                except Exception as e:
-                    logger.warning(f"Failed to delete alarm {alarm_name}: {e}")
+            # Parse compose file to find scalable services
+            result = subprocess.run(
+                ["docker-compose", "-f", str(self.compose_file), "config", "--services"],
+                capture_output=True, text=True, check=True
+            )
             
-            # Delete scaling policies
-            policy_names = [
-                f"{self.config.service_name}-scale-out",
-                f"{self.config.service_name}-scale-in"
-            ]
+            services = result.stdout.strip().split('\n')
+            scalable_services = {}
             
-            for policy_name in policy_names:
-                try:
-                    self.autoscaling_client.delete_scaling_policy(
-                        PolicyName=policy_name,
-                        ServiceNamespace=self.namespace,
-                        ResourceId=self.resource_id,
-                        ScalableDimension=self.scalable_dimension
-                    )
-                    logger.info(f"Deleted scaling policy: {policy_name}")
-                except Exception as e:
-                    logger.warning(f"Failed to delete policy {policy_name}: {e}")
+            for service in services:
+                if 'worker' in service.lower() or 'vlm' in service.lower():
+                    scalable_services[service] = {
+                        "type": "worker",
+                        "scalable": True,
+                        "compose_file": str(self.compose_file)
+                    }
+                elif 'mongodb' in service.lower():
+                    scalable_services[service] = {
+                        "type": "database", 
+                        "scalable": False,
+                        "compose_file": str(self.compose_file)
+                    }
             
-            # Deregister scalable target
-            try:
-                self.autoscaling_client.deregister_scalable_target(
-                    ServiceNamespace=self.namespace,
-                    ResourceId=self.resource_id,
-                    ScalableDimension=self.scalable_dimension
-                )
-                logger.info(f"Deregistered scalable target: {self.resource_id}")
-            except Exception as e:
-                logger.warning(f"Failed to deregister scalable target: {e}")
+            logger.info(f"Discovered {len(scalable_services)} services: {list(scalable_services.keys())}")
+            return scalable_services
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to discover compose services: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"Error discovering compose services: {e}")
+            return {}
+    
+    def get_compose_service_scale(self, service_name: str) -> int:
+        """Get current scale (replicas) of a compose service."""
+        try:
+            result = subprocess.run(
+                ["docker-compose", "-f", str(self.compose_file), "ps", "-q", service_name],
+                capture_output=True, text=True, check=True
+            )
+            
+            # Count running containers for the service
+            containers = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+            scale = len(containers)
+            
+            logger.debug(f"Service {service_name} current scale: {scale}")
+            return scale
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to get service scale for {service_name}: {e}")
+            return 0
+        except Exception as e:
+            logger.error(f"Error getting service scale: {e}")
+            return 0
+    
+    def scale_compose_service(self, service_name: str, replicas: int) -> bool:
+        """Scale a Docker Compose service to specified replicas."""
+        try:
+            current_scale = self.get_compose_service_scale(service_name)
+            
+            if current_scale == replicas:
+                logger.info(f"Service {service_name} already at desired scale: {replicas}")
+                return True
+            
+            logger.info(f"Scaling {service_name}: {current_scale} → {replicas}")
+            
+            # Scale the service
+            subprocess.run(
+                ["docker-compose", "-f", str(self.compose_file), "up", "-d", 
+                 "--scale", f"{service_name}={replicas}", "--no-recreate"],
+                check=True, capture_output=True
+            )
+            
+            # Verify new scale
+            new_scale = self.get_compose_service_scale(service_name)
+            
+            if new_scale == replicas:
+                logger.info(f"✅ Successfully scaled {service_name} to {replicas}")
+                return True
+            else:
+                logger.error(f"❌ Scale verification failed: expected {replicas}, got {new_scale}")
+                return False
+                
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to scale service {service_name}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error scaling service: {e}")
+            return False
+    
+    def apply_ecs_scaling_to_compose(self, scaling_config: ECSScalingConfig, 
+                                   queue_url: str) -> bool:
+        """Apply ECS scaling logic to Docker Compose services."""
+        try:
+            # Get SQS queue metrics
+            sqs_client = get_sqs_client()
+            
+            # Get approximate number of messages
+            response = sqs_client.get_queue_attributes(
+                QueueUrl=queue_url,
+                AttributeNames=['ApproximateNumberOfMessages']
+            )
+            
+            queue_messages = int(response['Attributes']['ApproximateNumberOfMessages'])
+            
+            # Get current service scale
+            current_scale = self.get_compose_service_scale(scaling_config.service_name)
+            
+            # Calculate desired capacity using ECS scaling logic
+            if queue_messages == 0:
+                # Scale to zero when no messages
+                desired_capacity = scaling_config.min_capacity
+                action = "scale_to_zero"
+            elif queue_messages > 0:
+                # Scale 1:1 with messages (up to max capacity)
+                desired_capacity = min(queue_messages, scaling_config.max_capacity)
+                action = "scale_out" if desired_capacity > current_scale else "maintain"
+            else:
+                desired_capacity = current_scale
+                action = "no_action"
+            
+            logger.info(f"Scaling decision: {queue_messages} messages, "
+                       f"{current_scale} current, {desired_capacity} desired ({action})")
+            
+            # Apply scaling if needed
+            if desired_capacity != current_scale:
+                success = self.scale_compose_service(scaling_config.service_name, desired_capacity)
+                
+                if success:
+                    logger.info(f"🔄 Applied ECS scaling logic to compose service: "
+                              f"{scaling_config.service_name} scaled to {desired_capacity}")
+                return success
+            else:
+                logger.debug(f"No scaling needed for {scaling_config.service_name}")
+                return True
                 
         except Exception as e:
-            logger.error(f"Error during auto-scaling cleanup: {e}")
+            logger.error(f"Failed to apply ECS scaling to compose: {e}")
+            return False
+    
+    def start_compose_scaling_monitor(self, scaling_config: ECSScalingConfig, 
+                                    queue_url: str, interval_seconds: int = 60) -> None:
+        """Start monitoring and scaling Docker Compose services based on ECS logic."""
+        logger.info(f"Starting compose scaling monitor for {scaling_config.service_name}")
+        logger.info(f"Monitoring interval: {interval_seconds}s")
+        logger.info(f"Queue URL: {queue_url}")
+        
+        try:
+            while True:
+                self.apply_ecs_scaling_to_compose(scaling_config, queue_url)
+                time.sleep(interval_seconds)
+                
+        except KeyboardInterrupt:
+            logger.info("Compose scaling monitor stopped by user")
+        except Exception as e:
+            logger.error(f"Compose scaling monitor error: {e}")
             raise
 
 
-def create_vlm_auto_scaler(cluster_name: str, service_name: str) -> ECSAutoScaler:
-    """Factory function to create ECS auto-scaler for VLM workers."""
+def create_enhanced_autoscaler(cluster_name: str, service_name: str, 
+                             queue_url: str, use_compose: bool = False) -> Any:
+    """Create enhanced autoscaler with optional compose integration."""
     config = ECSScalingConfig(
         service_name=service_name,
         cluster_name=cluster_name,
-        min_capacity=0,  # Scale to zero
-        max_capacity=3,  # Max 3 GPU instances
-        target_queue_messages_per_task=1,  # 1 message = 1 task
-        scale_out_cooldown=300,  # 5 minutes
-        scale_in_cooldown=300,   # 5 minutes
-        evaluation_periods=2,    # 2 consecutive periods
-        datapoint_period=60      # 1 minute periods
+        min_capacity=0,
+        max_capacity=3,
+        target_queue_messages_per_task=1
     )
     
-    return ECSAutoScaler(config)
+    if use_compose:
+        # Return compose integration
+        compose_integration = DockerComposeECSIntegration()
+        services = compose_integration.discover_compose_services()
+        
+        if service_name in services:
+            logger.info(f"Using Docker Compose scaling for {service_name}")
+            return compose_integration, config
+        else:
+            logger.warning(f"Service {service_name} not found in compose - falling back to ECS")
+    
+    # Return standard ECS autoscaler
+    autoscaler = ECSAutoScaler(config)
+    autoscaler.setup_auto_scaling(queue_url)
+    return autoscaler, config
 
 
-# CLI entry point for testing
-def main():
-    """Main entry point for testing auto-scaling."""
+# CLI interface for compose integration
+if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="ECS Auto-scaling Manager")
-    parser.add_argument("--cluster", required=True, help="ECS cluster name")
-    parser.add_argument("--service", required=True, help="ECS service name") 
+    parser = argparse.ArgumentParser(description="ECS scaling with compose integration")
+    parser.add_argument("--service-name", required=True, help="Service name to scale")
+    parser.add_argument("--cluster-name", default="crud-pdf-ecs-cluster", help="ECS cluster name")
     parser.add_argument("--queue-url", required=True, help="SQS queue URL")
-    parser.add_argument("--setup", action="store_true", help="Setup auto-scaling")
-    parser.add_argument("--simulate", type=int, metavar="MINUTES", help="Simulate scaling for N minutes")
-    parser.add_argument("--cleanup", action="store_true", help="Cleanup auto-scaling")
+    parser.add_argument("--compose", action="store_true", help="Use Docker Compose scaling")
+    parser.add_argument("--monitor", action="store_true", help="Start scaling monitor")
+    parser.add_argument("--interval", type=int, default=60, help="Monitor interval in seconds")
     
     args = parser.parse_args()
     
-    # Create auto-scaler
-    scaler = create_vlm_auto_scaler(args.cluster, args.service)
+    # Setup logging
+    logging.basicConfig(level=logging.INFO)
     
-    try:
-        if args.setup:
-            result = scaler.setup_auto_scaling(args.queue_url)
-            print(json.dumps(result, indent=2))
-            
-        elif args.simulate:
-            events = scaler.simulate_scaling_behavior(args.queue_url, args.simulate)
-            print(json.dumps(events, indent=2))
-            
-        elif args.cleanup:
-            scaler.cleanup_auto_scaling()
-            print("Auto-scaling resources cleaned up")
-            
+    if args.compose:
+        compose_integration = DockerComposeECSIntegration()
+        
+        if args.monitor:
+            config = ECSScalingConfig(
+                service_name=args.service_name,
+                cluster_name=args.cluster_name
+            )
+            compose_integration.start_compose_scaling_monitor(
+                config, args.queue_url, args.interval
+            )
         else:
-            # Just show current metrics
-            metrics = scaler.get_current_metrics(args.queue_url)
-            print(json.dumps(metrics, indent=2))
-            
-    except Exception as e:
-        logger.error(f"Auto-scaling operation failed: {e}")
-        return 1
-    
-    return 0
-
-
-if __name__ == "__main__":
-    exit(main())
+            # Single scaling operation
+            config = ECSScalingConfig(
+                service_name=args.service_name,
+                cluster_name=args.cluster_name
+            )
+            compose_integration.apply_ecs_scaling_to_compose(config, args.queue_url)
+    else:
+        # Standard ECS scaling
+        config = ECSScalingConfig(
+            service_name=args.service_name,
+            cluster_name=args.cluster_name
+        )
+        autoscaler = ECSAutoScaler(config)
+        autoscaler.setup_auto_scaling(args.queue_url)
+        
+        if args.monitor:
+            try:
+                autoscaler.simulate_scaling_behavior(args.queue_url, duration_minutes=60)
+            except Exception as e:
+                logger.error(f"Scaling simulation failed: {e}")
+                raise
