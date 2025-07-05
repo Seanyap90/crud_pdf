@@ -69,13 +69,13 @@ class TaskDefinitionBuilder:
         """Get ECS task execution role ARN."""
         # This should match the role created in ecs_services.py
         role_name = f"{settings.app_name}-ecs-execution-role"
-        return f"arn:aws:iam::{settings.aws_account_id}:role/{role_name}"
+        return f"arn:aws:iam::{settings.account_id}:role/{role_name}"
     
     def get_ecs_task_role_arn(self) -> str:
         """Get ECS task role ARN."""
         # This should match the role created in ecs_services.py
         role_name = f"{settings.app_name}-ecs-task-role"
-        return f"arn:aws:iam::{settings.aws_account_id}:role/{role_name}"
+        return f"arn:aws:iam::{settings.account_id}:role/{role_name}"
     
     def build_mongodb_task_definition(self, efs_config: Dict[str, Any]) -> Dict[str, Any]:
         """Build MongoDB task definition with EFS storage."""

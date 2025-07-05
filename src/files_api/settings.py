@@ -54,6 +54,12 @@ class Settings(BaseSettings):
         alias="AWS_ENDPOINT_URL"
     )
     
+    aws_account_id: Optional[str] = Field(
+        default=None,
+        alias="AWS_ACCOUNT_ID",
+        description="AWS Account ID (auto-detected if not provided)"
+    )
+    
     # S3 Configuration
     s3_bucket_name: str = Field(
         default="rag-pdf-storage",
@@ -167,6 +173,25 @@ class Settings(BaseSettings):
             if mode in ["local-dev", "aws-mock"]:
                 return "mock"
         return v
+    
+    @property
+    def account_id(self) -> str:
+        """Get AWS account ID with auto-detection fallback."""
+        if self.aws_account_id:
+            return self.aws_account_id
+        
+        # Auto-detect account ID for production modes
+        if self.deployment_mode in ["aws-prod"]:
+            try:
+                import boto3
+                sts_client = boto3.client('sts', region_name=self.aws_region)
+                return sts_client.get_caller_identity()['Account']
+            except Exception:
+                # Fallback for local development
+                return "123456789012"
+        
+        # Mock account ID for development modes
+        return "123456789012"
     
     @property
     def regional_config(self) -> Dict[str, Any]:

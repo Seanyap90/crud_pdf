@@ -210,20 +210,10 @@ class VPCNetworkBuilder:
             )
             allocation_id = eip_response['AllocationId']
             
-            # Create NAT gateway
+            # Create NAT gateway (without tags - not supported during creation)
             nat_response = self.ec2_client.create_nat_gateway(
                 SubnetId=self.public_subnet_id,
-                AllocationId=allocation_id,
-                TagSpecifications=[{
-                    'ResourceType': 'nat-gateway',
-                    'Tags': [{
-                        'Key': 'Name',
-                        'Value': f"{settings.app_name}-ecs-nat"
-                    }, {
-                        'Key': 'Project',
-                        'Value': settings.app_name
-                    }]
-                }]
+                AllocationId=allocation_id
             )
             self.nat_gateway_id = nat_response['NatGateway']['NatGatewayId']
             
@@ -231,6 +221,18 @@ class VPCNetworkBuilder:
             logger.info("Waiting for NAT gateway to become available...")
             waiter = self.ec2_client.get_waiter('nat_gateway_available')
             waiter.wait(NatGatewayIds=[self.nat_gateway_id])
+            
+            # Add tags after creation
+            try:
+                self.ec2_client.create_tags(
+                    Resources=[self.nat_gateway_id],
+                    Tags=[
+                        {'Key': 'Name', 'Value': f"{settings.app_name}-ecs-nat"},
+                        {'Key': 'Project', 'Value': settings.app_name}
+                    ]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to tag NAT gateway: {e}")  # Non-critical
             
             logger.info(f"Created NAT gateway: {self.nat_gateway_id}")
             return self
@@ -340,7 +342,7 @@ class VPCNetworkBuilder:
                 'efs',
                 f"{settings.app_name}-ecs-efs-sg",
                 "EFS access within VPC",
-                [{'IpProtocol': 'tcp', 'FromPort': 2049, 'ToPort': 2049, 'CidrIp': '10.0.0.0/16'}]
+                [{'IpProtocol': 'tcp', 'FromPort': 2049, 'ToPort': 2049, 'IpRanges': [{'CidrIp': '10.0.0.0/16'}]}]
             )
             self.security_groups['efs'] = efs_sg
             
@@ -349,7 +351,7 @@ class VPCNetworkBuilder:
                 'mongodb',
                 f"{settings.app_name}-ecs-mongodb-sg",
                 "MongoDB access within VPC",
-                [{'IpProtocol': 'tcp', 'FromPort': 27017, 'ToPort': 27017, 'CidrIp': '10.0.0.0/16'}]
+                [{'IpProtocol': 'tcp', 'FromPort': 27017, 'ToPort': 27017, 'IpRanges': [{'CidrIp': '10.0.0.0/16'}]}]
             )
             self.security_groups['mongodb'] = mongodb_sg
             
@@ -359,7 +361,7 @@ class VPCNetworkBuilder:
                 f"{settings.app_name}-ecs-vlm-workers-sg",
                 "VLM workers outbound access",
                 [],  # No inbound rules - outbound only
-                [{'IpProtocol': '-1', 'CidrIp': '0.0.0.0/0'}]  # Allow all outbound
+                [{'IpProtocol': '-1', 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}]  # Allow all outbound
             )
             self.security_groups['vlm_workers'] = vlm_workers_sg
             
@@ -380,7 +382,11 @@ class VPCNetworkBuilder:
             'nat_gateway_id': self.nat_gateway_id,
             'public_route_table_id': self.public_route_table_id,
             'private_route_table_id': self.private_route_table_id,
-            'security_groups': self.security_groups
+            'security_groups': self.security_groups,
+            # Add individual security group IDs for easy access
+            'efs_security_group_id': self.security_groups.get('efs'),
+            'mongodb_security_group_id': self.security_groups.get('mongodb'),
+            'vlm_workers_security_group_id': self.security_groups.get('vlm_workers')
         }
     
     def _find_existing_vpc(self) -> Optional[Dict[str, Any]]:
@@ -502,7 +508,7 @@ class VPCNetworkBuilder:
             try:
                 self.ec2_client.revoke_security_group_egress(
                     GroupId=sg_id,
-                    IpPermissions=[{'IpProtocol': '-1', 'CidrIp': '0.0.0.0/0'}]
+                    IpPermissions=[{'IpProtocol': '-1', 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}]
                 )
             except ClientError:
                 pass  # May not exist
@@ -515,3 +521,186 @@ class VPCNetworkBuilder:
         
         logger.info(f"Created security group {sg_type}: {sg_id}")
         return sg_id
+    
+    def cleanup_vpc_resources(self) -> None:
+        """Clean up VPC resources in reverse order of creation."""
+        logger.info("Starting VPC resource cleanup...")
+        
+        try:
+            # Find VPC by project tag
+            existing_vpc = self._find_existing_vpc()
+            if not existing_vpc:
+                logger.info("No VPC found to clean up")
+                return
+                
+            self.vpc_id = existing_vpc['VpcId']
+            logger.info(f"Found VPC to clean up: {self.vpc_id}")
+            
+            # Clean up in reverse order: Security Groups -> Route Tables -> NAT -> IGW -> Subnets -> VPC
+            
+            # 1. Delete security groups (except default)
+            self._cleanup_security_groups()
+            
+            # 2. Delete route tables (except main)
+            self._cleanup_route_tables()
+            
+            # 3. Delete NAT gateway
+            self._cleanup_nat_gateway()
+            
+            # 4. Delete internet gateway
+            self._cleanup_internet_gateway()
+            
+            # 5. Delete subnets
+            self._cleanup_subnets()
+            
+            # 6. Delete VPC
+            self._cleanup_vpc()
+            
+            logger.info("VPC resource cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"VPC cleanup failed: {e}")
+            # Don't re-raise - allow other cleanup to continue
+    
+    def _cleanup_security_groups(self) -> None:
+        """Delete security groups created by this project."""
+        try:
+            response = self.ec2_client.describe_security_groups(
+                Filters=[
+                    {'Name': 'vpc-id', 'Values': [self.vpc_id]},
+                    {'Name': 'tag:Project', 'Values': [settings.app_name]}
+                ]
+            )
+            
+            for sg in response['SecurityGroups']:
+                sg_id = sg['GroupId']
+                sg_name = sg['GroupName']
+                if sg_name != 'default':  # Don't delete default security group
+                    try:
+                        self.ec2_client.delete_security_group(GroupId=sg_id)
+                        logger.info(f"Deleted security group: {sg_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete security group {sg_id}: {e}")
+                        
+        except Exception as e:
+            logger.warning(f"Security group cleanup failed: {e}")
+    
+    def _cleanup_route_tables(self) -> None:
+        """Delete route tables created by this project."""
+        try:
+            response = self.ec2_client.describe_route_tables(
+                Filters=[
+                    {'Name': 'vpc-id', 'Values': [self.vpc_id]},
+                    {'Name': 'tag:Project', 'Values': [settings.app_name]}
+                ]
+            )
+            
+            for rt in response['RouteTables']:
+                rt_id = rt['RouteTableId']
+                # Check if it's the main route table
+                is_main = any(assoc.get('Main', False) for assoc in rt.get('Associations', []))
+                
+                if not is_main:  # Don't delete main route table
+                    try:
+                        # Disassociate from subnets first
+                        for assoc in rt.get('Associations', []):
+                            if 'SubnetId' in assoc:
+                                self.ec2_client.disassociate_route_table(
+                                    AssociationId=assoc['RouteTableAssociationId']
+                                )
+                        
+                        self.ec2_client.delete_route_table(RouteTableId=rt_id)
+                        logger.info(f"Deleted route table: {rt_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete route table {rt_id}: {e}")
+                        
+        except Exception as e:
+            logger.warning(f"Route table cleanup failed: {e}")
+    
+    def _cleanup_nat_gateway(self) -> None:
+        """Delete NAT gateways in this VPC."""
+        try:
+            response = self.ec2_client.describe_nat_gateways(
+                Filters=[
+                    {'Name': 'vpc-id', 'Values': [self.vpc_id]},
+                    {'Name': 'tag:Project', 'Values': [settings.app_name]},
+                    {'Name': 'state', 'Values': ['available']}
+                ]
+            )
+            
+            for nat in response['NatGateways']:
+                nat_id = nat['NatGatewayId']
+                try:
+                    self.ec2_client.delete_nat_gateway(NatGatewayId=nat_id)
+                    logger.info(f"Deleted NAT gateway: {nat_id}")
+                    
+                    # Also release the Elastic IP
+                    for address in nat.get('NatGatewayAddresses', []):
+                        if 'AllocationId' in address:
+                            try:
+                                self.ec2_client.release_address(AllocationId=address['AllocationId'])
+                                logger.info(f"Released Elastic IP: {address['AllocationId']}")
+                            except Exception as e:
+                                logger.warning(f"Failed to release EIP {address['AllocationId']}: {e}")
+                                
+                except Exception as e:
+                    logger.warning(f"Failed to delete NAT gateway {nat_id}: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"NAT gateway cleanup failed: {e}")
+    
+    def _cleanup_internet_gateway(self) -> None:
+        """Delete internet gateway attached to this VPC."""
+        try:
+            response = self.ec2_client.describe_internet_gateways(
+                Filters=[
+                    {'Name': 'attachment.vpc-id', 'Values': [self.vpc_id]},
+                    {'Name': 'tag:Project', 'Values': [settings.app_name]}
+                ]
+            )
+            
+            for igw in response['InternetGateways']:
+                igw_id = igw['InternetGatewayId']
+                try:
+                    # Detach from VPC first
+                    self.ec2_client.detach_internet_gateway(
+                        InternetGatewayId=igw_id,
+                        VpcId=self.vpc_id
+                    )
+                    # Delete internet gateway
+                    self.ec2_client.delete_internet_gateway(InternetGatewayId=igw_id)
+                    logger.info(f"Deleted internet gateway: {igw_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete internet gateway {igw_id}: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Internet gateway cleanup failed: {e}")
+    
+    def _cleanup_subnets(self) -> None:
+        """Delete subnets in this VPC."""
+        try:
+            response = self.ec2_client.describe_subnets(
+                Filters=[
+                    {'Name': 'vpc-id', 'Values': [self.vpc_id]},
+                    {'Name': 'tag:Project', 'Values': [settings.app_name]}
+                ]
+            )
+            
+            for subnet in response['Subnets']:
+                subnet_id = subnet['SubnetId']
+                try:
+                    self.ec2_client.delete_subnet(SubnetId=subnet_id)
+                    logger.info(f"Deleted subnet: {subnet_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete subnet {subnet_id}: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Subnet cleanup failed: {e}")
+    
+    def _cleanup_vpc(self) -> None:
+        """Delete the VPC itself."""
+        try:
+            self.ec2_client.delete_vpc(VpcId=self.vpc_id)
+            logger.info(f"Deleted VPC: {self.vpc_id}")
+        except Exception as e:
+            logger.warning(f"Failed to delete VPC {self.vpc_id}: {e}")

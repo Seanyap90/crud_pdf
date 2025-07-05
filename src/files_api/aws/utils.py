@@ -44,7 +44,21 @@ class AWSClientManager:
             'region_name': self.region
         }
         
-        # Add credentials from settings
+        # Check for AWS profile in environment (for SSO)
+        aws_profile = os.environ.get('AWS_PROFILE')
+        if aws_profile and self.mode == 'aws-prod':
+            # Use session with profile for SSO
+            try:
+                session = boto3.Session(profile_name=aws_profile)
+                client = session.client(service_name, region_name=self.region)
+                self._clients[service_name] = client
+                logger.debug(f"Created {service_name} client using profile: {aws_profile}")
+                return client
+            except Exception as e:
+                logger.warning(f"Failed to create client with profile {aws_profile}: {e}")
+                # Fall back to manual credential configuration
+        
+        # Add credentials from settings (fallback or for non-SSO modes)
         if self.settings.aws_access_key_id:
             client_kwargs['aws_access_key_id'] = self.settings.aws_access_key_id
         if self.settings.aws_secret_access_key:
