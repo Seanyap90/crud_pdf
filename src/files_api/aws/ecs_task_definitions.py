@@ -189,7 +189,8 @@ class TaskDefinitionBuilder:
                     {'name': 'AWS_DEFAULT_REGION', 'value': settings.aws_region},
                     {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},
                     {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
-                    {'name': 'MODEL_MEMORY_LIMIT', 'value': settings.model_memory_limit},
+                    {'name': 'MODEL_MEMORY_LIMIT', 'value': settings.regional_config[settings.aws_region]['gpu_memory_limit']},
+                    {'name': 'INSTANCE_TYPE', 'value': settings.primary_instance_type},
                     {'name': 'DISABLE_DUPLICATE_LOADING', 'value': str(settings.disable_duplicate_loading).lower()},
                     {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
                     {'name': 'HF_HOME', 'value': '/app/cache'},
@@ -235,8 +236,8 @@ class TaskDefinitionBuilder:
             'family': family,
             'networkMode': 'awsvpc',
             'requiresCompatibilities': ['EC2'],  # GPU requires EC2, not Fargate
-            'cpu': '3584',  # 3.5 vCPU for g4dn.xlarge
-            'memory': '14336',  # 14 GB for g4dn.xlarge (leaving headroom)
+            'cpu': '3584',      # 3.5 vCPU (leave 0.5 for system)
+            'memory': '14336',  # 14 GB (leave 2GB headroom for 16GB total)
             'executionRoleArn': self.get_ecs_execution_role_arn(),
             'taskRoleArn': self.get_ecs_task_role_arn(),
             'volumes': volumes,

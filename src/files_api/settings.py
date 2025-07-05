@@ -1,6 +1,6 @@
 # src/files_api/settings.py
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 from pydantic import Field, validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
@@ -89,10 +89,16 @@ class Settings(BaseSettings):
         description="IAM instance profile name"
     )
     
+    # GPU Instance Configuration
+    primary_instance_type: str = Field(
+        default="g4dn.xlarge",
+        description="Primary GPU instance type for cost optimization"
+    )
+    
     # Model Configuration
     model_memory_limit: str = Field(
-        default="24GiB",
-        description="Memory limit for models"
+        default="12GiB",
+        description="Memory limit for models (optimized for T4 GPU)"
     )
     
     disable_duplicate_loading: bool = Field(
@@ -161,6 +167,22 @@ class Settings(BaseSettings):
             if mode in ["local-dev", "aws-mock"]:
                 return "mock"
         return v
+    
+    @property
+    def regional_config(self) -> Dict[str, Any]:
+        """GPU optimization configuration per region."""
+        return {
+            'us-east-1': {
+                'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge', 'g4dn.large'],
+                'spot_max_price': 0.20,  # Conservative for g4dn.xlarge
+                'gpu_memory_limit': '12GiB'  # Safe for 16GB T4
+            },
+            'us-west-2': {
+                'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge'],
+                'spot_max_price': 0.22,  # Slightly higher for us-west-2
+                'gpu_memory_limit': '12GiB'
+            }
+        }
     
     @validator('sqs_queue_url', always=True)
     def generate_queue_url_if_needed(cls, v, values):

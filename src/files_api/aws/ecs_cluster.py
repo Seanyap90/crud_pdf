@@ -186,12 +186,21 @@ systemctl restart ecs
                 LaunchTemplateName=template_name,
                 LaunchTemplateData={
                     'ImageId': gpu_ami_id,
-                    'InstanceType': 'g4dn.xlarge',  # 1 GPU, 16GB RAM, cost-effective
+                    'InstanceType': settings.primary_instance_type,
                     'IamInstanceProfile': {
                         'Arn': instance_profile_arn
                     },
                     'SecurityGroupIds': [gpu_sg_id],
                     'UserData': user_data.encode('utf-8').hex(),
+                    
+                    # Spot instance configuration for 70% cost savings
+                    'InstanceMarketOptions': {
+                        'MarketType': 'spot',
+                        'SpotOptions': {
+                            'MaxPrice': str(settings.regional_config[settings.aws_region]['spot_max_price']),
+                            'SpotInstanceType': 'one-time'
+                        }
+                    },
                     'TagSpecifications': [
                         {
                             'ResourceType': 'instance',
@@ -242,8 +251,8 @@ systemctl restart ecs
                     'LaunchTemplateId': launch_template_id,
                     'Version': '$Latest'
                 },
-                MinSize=0,  # Scale to zero when no tasks
-                MaxSize=3,  # Max 3 GPU instances
+                MinSize=0,          # Scale to zero when idle
+                MaxSize=3,          # HARD LIMIT: 3 instances max for cost control
                 DesiredCapacity=0,  # Start with zero instances
                 VPCZoneIdentifier=','.join(subnet_ids),
                 DefaultCooldown=300,  # 5 minutes cooldown

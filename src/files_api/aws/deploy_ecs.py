@@ -160,6 +160,30 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         self.service_manager = None
         self.deployment_config = {}
     
+    def validate_gpu_quota(self, region: str) -> bool:
+        """Check if we have sufficient GPU quota before deployment."""
+        try:
+            import boto3
+            client = boto3.client('service-quotas', region_name=region)
+            response = client.get_service_quota(
+                ServiceCode='ec2',
+                QuotaCode='L-DB2E81BA'
+            )
+            
+            current_quota = response['Quota']['Value']
+            required_quota = 12.0  # 3× g4dn.xlarge = 12 vCPUs
+            
+            if current_quota >= required_quota:
+                logger.info(f"✅ GPU quota sufficient: {current_quota} vCPUs available")
+                return True
+            else:
+                logger.error(f"❌ Insufficient GPU quota: {current_quota} < {required_quota}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to check quota: {e}")
+            return False
+    
     def setup_clients(self) -> None:
         """Set up AWS clients for production deployment."""
         # Initialize infrastructure managers
@@ -174,6 +198,10 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
     def deploy(self) -> Dict[str, Any]:
         """Deploy complete ECS infrastructure."""
         try:
+            # NEW: Pre-deployment GPU quota validation
+            if not self.validate_gpu_quota(self.settings.aws_region):
+                raise Exception("Insufficient GPU quota - request increase first")
+            
             # Phase 1: Core Infrastructure
             logger.info("Phase 1: Setting up core infrastructure")
             vpc_config = self._setup_vpc_infrastructure()
