@@ -25,6 +25,7 @@ gateway-config-structure-2.yaml
 src/files_api/sample
 .env.aws
 .env.local
+.env.aws-prod
 /rag_offload
 /storage
 /src/files_api/s3/__pycache__/*

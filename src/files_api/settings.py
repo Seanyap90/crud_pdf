@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     
     # Application Settings
     app_name: str = Field(
-        default="FastAPI App",
+        default="fastapi-app",
         description="Application name"
     )
     
@@ -183,8 +183,9 @@ class Settings(BaseSettings):
         # Auto-detect account ID for production modes
         if self.deployment_mode in ["aws-prod"]:
             try:
-                import boto3
-                sts_client = boto3.client('sts', region_name=self.aws_region)
+                # Use existing client manager that handles SSO
+                from files_api.aws.utils import AWSClientManager
+                sts_client = AWSClientManager().get_client('sts')
                 return sts_client.get_caller_identity()['Account']
             except Exception:
                 # Fallback for local development
@@ -192,6 +193,11 @@ class Settings(BaseSettings):
         
         # Mock account ID for development modes
         return "123456789012"
+    
+    @property
+    def ecr_registry(self) -> str:
+        """Get ECR registry URL."""
+        return f"{self.account_id}.dkr.ecr.{self.aws_region}.amazonaws.com"
     
     @property
     def regional_config(self) -> Dict[str, Any]:

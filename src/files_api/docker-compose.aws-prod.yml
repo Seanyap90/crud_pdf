@@ -119,17 +119,16 @@ services:
       mode: replicated
       replicas: ${VLM_WORKER_REPLICAS:-0}  # Start with 0 for scale-to-zero
       resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
         limits:
           memory: 24G
           cpus: '8'
         reservations:
           memory: 16G
           cpus: '4'
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     
     shm_size: 8gb
     runtime: nvidia

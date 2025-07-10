@@ -83,10 +83,20 @@ class VPCNetworkBuilder:
             existing_subnets = self._find_existing_subnets()
             if existing_subnets:
                 for subnet in existing_subnets:
-                    if 'public' in subnet.get('Tags', [{}])[0].get('Value', '').lower():
+                    # Properly iterate through all tags to find Type tag
+                    subnet_type = None
+                    for tag in subnet.get('Tags', []):
+                        if tag.get('Key') == 'Type':
+                            subnet_type = tag.get('Value', '').lower()
+                            break
+                    
+                    if subnet_type == 'public':
                         self.public_subnet_id = subnet['SubnetId']
-                    elif 'private' in subnet.get('Tags', [{}])[0].get('Value', '').lower():
+                        logger.info(f"Found existing public subnet: {self.public_subnet_id}")
+                    elif subnet_type == 'private':
                         self.private_subnet_id = subnet['SubnetId']
+                        logger.info(f"Found existing private subnet: {self.private_subnet_id}")
+                
                 if self.public_subnet_id and self.private_subnet_id:
                     logger.info(f"Using existing subnets: public={self.public_subnet_id}, private={self.private_subnet_id}")
                     return self

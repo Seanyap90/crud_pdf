@@ -431,7 +431,7 @@ function aws-prod {
     
     # Deploy with Docker Compose
     echo "🚀 Starting Docker Compose services..."
-    docker-compose -f docker-compose.aws-prod.yml up -d
+    docker-compose --env-file .env.aws-prod -f docker-compose.aws-prod.yml up -d
     
     if [ $? -ne 0 ]; then
         echo "❌ Error: Docker Compose deployment failed"
@@ -468,9 +468,9 @@ function aws-prod {
     echo "   • Auto-scaling: Native CloudWatch integration"
     echo ""
     echo "📋 Management commands:"
-    echo "   • View logs: docker-compose -f src/files_api/docker-compose.aws-prod.yml logs"
-    echo "   • Scale workers: docker-compose -f src/files_api/docker-compose.aws-prod.yml up --scale vlm-worker=3"
-    echo "   • Stop services: docker-compose -f src/files_api/docker-compose.aws-prod.yml down"
+    echo "   • View logs: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml logs"
+    echo "   • Scale workers: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml up --scale vlm-worker=3"
+    echo "   • Stop services: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml down"
     echo ""
     echo "🔗 Access your deployment via the Lambda function URL"
 }
@@ -522,7 +522,7 @@ function aws-prod-cleanup {
     # Phase 1: Stop and remove Docker Compose services
     echo "🐳 Phase 1: Stopping Docker Compose services..."
     cd src/files_api 2>/dev/null || true
-    docker-compose -f docker-compose.aws-prod.yml down --volumes --remove-orphans 2>/dev/null || true
+    docker-compose --env-file .env.aws-prod -f docker-compose.aws-prod.yml down --volumes --remove-orphans 2>/dev/null || true
     cd ../.. 2>/dev/null || true
     echo "✅ Docker Compose services stopped"
     
@@ -580,6 +580,105 @@ function aws-prod-cleanup {
     echo "   • Check CloudWatch log groups"
     echo ""
     echo "🔍 Cost verification: aws ce get-cost-and-usage --help"
+}
+
+# Soft cleanup AWS production deployment (preserves expensive infrastructure)
+function aws-prod-cleanup-soft {
+    set +e
+    
+    echo "🧹 AWS Production Soft Cleanup - Preserve Infrastructure"
+    echo "💰 This preserves NAT Gateway, VPC, EFS, and ECR to avoid recreation costs"
+    echo "🔄 Only cleans up: ECS Services, Tasks, Auto Scaling Groups, Lambda functions"
+    
+    # Set deployment mode for cleanup
+    export DEPLOYMENT_MODE="aws-prod"
+    
+    # Load infrastructure config if available
+    if [ -f ".env.aws-prod" ]; then
+        echo "📋 Loading infrastructure configuration..."
+        source .env.aws-prod
+    fi
+    
+    # Phase 1: Stop and remove Docker Compose services
+    echo "🐳 Phase 1: Stopping Docker Compose services..."
+    cd src/files_api 2>/dev/null || true
+    docker-compose --env-file .env.aws-prod -f docker-compose.aws-prod.yml down --volumes --remove-orphans 2>/dev/null || true
+    cd ../.. 2>/dev/null || true
+    echo "✅ Docker Compose services stopped"
+    
+    # Phase 2: Scale down ECS services (preserve infrastructure)
+    echo "🏗️ Phase 2: Scaling down ECS services (preserving infrastructure)..."
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "vlm-worker" --desired-count 0 2>/dev/null || echo "⚠️ vlm-worker service not found or already scaled down"
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "mongodb" --desired-count 0 2>/dev/null || echo "⚠️ mongodb service not found or already scaled down"
+        echo "✅ ECS services scaled to 0 (infrastructure preserved)"
+    else
+        echo "⚠️ ECS_CLUSTER_NAME not found - skipping service scaling"
+    fi
+    
+    # Phase 3: Cleanup Lambda functions
+    echo "⚡ Phase 3: Cleaning up Lambda functions..."
+    python -m files_api.aws.deploy_lambda --mode aws-prod --cleanup
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ Lambda functions cleaned up"
+    else
+        echo "⚠️ Lambda cleanup had issues - check AWS console for remaining functions"
+    fi
+    
+    # Phase 4: Scale down auto scaling groups to 0 (don't delete)
+    echo "📊 Phase 4: Scaling down auto scaling groups..."
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
+        # Find and scale down auto scaling groups
+        ASG_NAMES=$(aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?contains(Tags[?Key=='Project'].Value, 'FastAPI App')].AutoScalingGroupName" --output text 2>/dev/null || echo "")
+        if [ -n "$ASG_NAMES" ]; then
+            for asg in $ASG_NAMES; do
+                aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$asg" --desired-capacity 0 --min-size 0 2>/dev/null || echo "⚠️ Could not scale ASG: $asg"
+            done
+            echo "✅ Auto scaling groups scaled to 0"
+        else
+            echo "⚠️ No auto scaling groups found"
+        fi
+    fi
+    
+    # Clean up deployment state for services only
+    if [ -f ".deployment_state.json" ]; then
+        echo "📋 Updating deployment state (preserving infrastructure entries)..."
+        python -c "
+import json
+try:
+    with open('.deployment_state.json', 'r') as f:
+        state = json.load(f)
+    
+    # Remove service-level entries but keep infrastructure
+    preserved_keys = ['vpc', 'subnets', 'internet_gateway', 'nat_gateway', 'security_groups', 'efs', 'ecr']
+    new_state = {k: v for k, v in state.items() if any(pk in k.lower() for pk in preserved_keys)}
+    
+    with open('.deployment_state.json', 'w') as f:
+        json.dump(new_state, f, indent=2)
+    print('✅ Deployment state updated')
+except Exception as e:
+    print(f'⚠️ Could not update deployment state: {e}')
+"
+    fi
+    
+    echo ""
+    echo "✅ AWS Production Soft Cleanup Complete!"
+    echo ""
+    echo "💰 Cost Savings: Preserved expensive infrastructure:"
+    echo "   • NAT Gateway: ~$32.40/month (preserved)"
+    echo "   • Elastic IP: ~$3.60/month (preserved)"
+    echo "   • VPC/Subnets: FREE (preserved)"
+    echo "   • EFS: Pay-per-use (preserved)"
+    echo "   • ECR: Pay-per-use (preserved)"
+    echo ""
+    echo "🔄 Cleaned up pay-per-use resources:"
+    echo "   • ECS Services and Tasks: $0/month when scaled to 0"
+    echo "   • Lambda Functions: $0/month when not invoked"
+    echo "   • Auto Scaling Groups: $0/month when scaled to 0"
+    echo ""
+    echo "🚀 Next deployment will reuse existing infrastructure!"
+    echo "💡 To completely destroy everything: make aws-prod-cleanup"
 }
 
 # Show AWS production deployment status
@@ -663,8 +762,8 @@ function aws-prod-status {
     
     echo ""
     echo "💡 Commands:"
-    echo "   • View logs: docker-compose -f src/files_api/docker-compose.aws-prod.yml logs"
-    echo "   • Scale workers: docker-compose -f src/files_api/docker-compose.aws-prod.yml up --scale vlm-worker=3"
+    echo "   • View logs: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml logs"
+    echo "   • Scale workers: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml up --scale vlm-worker=3"
     echo "   • Full cleanup: make aws-prod-cleanup"
 }
 

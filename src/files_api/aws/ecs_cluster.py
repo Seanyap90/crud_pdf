@@ -1,11 +1,12 @@
 """ECS cluster management with GPU-optimized capacity provider."""
+import base64
 import logging
 from typing import Dict, Any, Optional, List
 import boto3
 from botocore.exceptions import ClientError
 
 from files_api.settings import get_settings
-from files_api.aws.utils import get_ecs_client, get_ec2_client, get_iam_client
+from files_api.aws.utils import get_ecs_client, get_ec2_client, get_iam_client, get_asg_client
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -19,7 +20,8 @@ class ECSClusterManager:
         self.ecs_client = get_ecs_client()
         self.ec2_client = get_ec2_client()
         self.iam_client = get_iam_client()
-        self.cluster_name = f"{settings.app_name}-ecs-cluster"
+        self.asg_client = get_asg_client()
+        self.cluster_name = f"{settings.app_name.lower().replace(' ', '-')}-ecs-cluster"
         self.cluster_arn = None
         self.capacity_providers = {}
         
@@ -191,7 +193,7 @@ systemctl restart ecs
                         'Arn': instance_profile_arn
                     },
                     'SecurityGroupIds': [gpu_sg_id],
-                    'UserData': user_data.encode('utf-8').hex(),
+                    'UserData': base64.b64encode(user_data.encode('utf-8')).decode('utf-8'),  # Must be Base64 encoded for launch templates
                     
                     # Spot instance configuration for 70% cost savings
                     'InstanceMarketOptions': {
@@ -245,7 +247,7 @@ systemctl restart ecs
                 return existing_asg
             
             # Create ASG
-            asg_response = self.ec2_client.create_auto_scaling_group(
+            asg_response = self.asg_client.create_auto_scaling_group(
                 AutoScalingGroupName=asg_name,
                 LaunchTemplate={
                     'LaunchTemplateId': launch_template_id,
