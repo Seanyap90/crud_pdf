@@ -108,11 +108,8 @@ class TaskDefinitionBuilder:
                         'protocol': 'tcp'
                     }
                 ],
-                'environment': [
-                    {'name': 'MONGO_INITDB_ROOT_USERNAME', 'value': 'admin'},
-                    {'name': 'MONGO_INITDB_ROOT_PASSWORD', 'value': settings.mongodb_password},
-                    {'name': 'MONGO_INITDB_DATABASE', 'value': settings.mongodb_database}
-                ],
+                # No authentication needed - MongoDB runs without auth by default
+                'environment': [],
                 'mountPoints': [
                     {
                         'sourceVolume': 'mongodb-data',
@@ -264,6 +261,75 @@ class TaskDefinitionBuilder:
         task_definition = self.build_mongodb_task_definition(efs_config)
         return self.register_task_definition(task_definition)
     
+    def build_model_downloader_task_definition(self, efs_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Build model downloader task definition - one-time task to download models to EFS."""
+        family = f"{settings.app_name}-model-downloader"
+        log_group = self.create_log_group(f"/ecs/{family}")
+        
+        # EFS volume for model storage (read-write for downloader)
+        volumes = [
+            {
+                'name': 'model-storage',
+                'efsVolumeConfiguration': {
+                    'fileSystemId': efs_config['models']['file_system_id'],
+                    'transitEncryption': 'ENABLED',
+                    'authorizationConfig': {
+                        'accessPointId': efs_config['models']['access_point_id']
+                    }
+                }
+            }
+        ]
+        
+        # Model downloader container definition
+        container_definitions = [
+            {
+                'name': 'model-downloader',
+                'image': f"{settings.ecr_registry}/{settings.ecr_repo_name}:latest",
+                'essential': True,
+                'command': ['python3', '/app/files_api/vlm/download_models.py'],
+                'environment': [
+                    {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
+                    {'name': 'HF_HOME', 'value': '/app/cache'},
+                    {'name': 'HF_HUB_OFFLINE', 'value': '0'},  # Allow downloads
+                    {'name': 'HF_HUB_DOWNLOAD_TIMEOUT', 'value': '300'},  # 5 minutes timeout
+                    {'name': 'AWS_DEFAULT_REGION', 'value': settings.aws_region},
+                    {'name': 'LOG_LEVEL', 'value': 'INFO'}
+                ],
+                'mountPoints': [
+                    {
+                        'sourceVolume': 'model-storage',
+                        'containerPath': '/app/cache',
+                        'readOnly': False  # Read-write for downloading
+                    }
+                ],
+                'logConfiguration': {
+                    'logDriver': 'awslogs',
+                    'options': {
+                        'awslogs-group': log_group,
+                        'awslogs-region': self.region,
+                        'awslogs-stream-prefix': 'model-downloader'
+                    }
+                }
+            }
+        ]
+        
+        return {
+            'family': family,
+            'networkMode': 'awsvpc',
+            'requiresCompatibilities': ['FARGATE'],  # Fargate for one-time tasks
+            'cpu': '8192',      # 8 vCPU for downloading large models
+            'memory': '16384',  # 16 GB for downloading large models
+            'executionRoleArn': self.get_ecs_execution_role_arn(),
+            'taskRoleArn': self.get_ecs_task_role_arn(),
+            'volumes': volumes,
+            'containerDefinitions': container_definitions
+        }
+
+    def create_model_downloader_task_definition(self, efs_config: Dict[str, Any]) -> str:
+        """Create and register model downloader task definition."""
+        task_definition = self.build_model_downloader_task_definition(efs_config)
+        return self.register_task_definition(task_definition)
+
     def create_vlm_worker_task_definition(self, efs_config: Dict[str, Any]) -> str:
         """Create and register VLM worker task definition."""
         task_definition = self.build_vlm_worker_task_definition(efs_config)
@@ -307,6 +373,12 @@ def create_mongodb_task_definition(efs_config: Dict[str, Any]) -> str:
     """Create MongoDB task definition."""
     builder = create_task_definition_builder()
     return builder.create_mongodb_task_definition(efs_config)
+
+
+def create_model_downloader_task_definition(efs_config: Dict[str, Any]) -> str:
+    """Create model downloader task definition."""
+    builder = create_task_definition_builder()
+    return builder.create_model_downloader_task_definition(efs_config)
 
 
 def create_vlm_worker_task_definition(efs_config: Dict[str, Any]) -> str:

@@ -175,9 +175,14 @@ def create_s3_bucket(bucket_name: str = None) -> bool:
         except Exception as e:
             logger.warning(f"Could not list existing buckets: {e}")
         
-        # No existing bucket found, create a new one with timestamp
-        timestamp = str(int(time.time()))
-        new_bucket_name = f"{base_bucket_name}-{timestamp}"
+        # No existing bucket found, create a new one
+        # For mock environments, use exact bucket name without timestamp
+        if settings.deployment_mode == 'aws-mock':
+            new_bucket_name = base_bucket_name
+        else:
+            # For production, use timestamp to ensure uniqueness
+            timestamp = str(int(time.time()))
+            new_bucket_name = f"{base_bucket_name}-{timestamp}"
         
         if region == 'us-east-1':
             s3_client.create_bucket(Bucket=new_bucket_name)

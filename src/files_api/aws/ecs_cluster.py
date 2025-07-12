@@ -254,7 +254,7 @@ systemctl restart ecs
                     'Version': '$Latest'
                 },
                 MinSize=0,          # Scale to zero when idle
-                MaxSize=3,          # HARD LIMIT: 3 instances max for cost control
+                MaxSize=2,          # HARD LIMIT: 2 instances max (adjusted for current quota)
                 DesiredCapacity=0,  # Start with zero instances
                 VPCZoneIdentifier=','.join(subnet_ids),
                 DefaultCooldown=300,  # 5 minutes cooldown
@@ -447,13 +447,30 @@ systemctl restart ecs
             return None
     
     def _find_existing_capacity_provider(self, name: str) -> Optional[Dict[str, Any]]:
-        """Find existing capacity provider."""
+        """Find existing capacity provider and verify its ASG still exists."""
         try:
             response = self.ecs_client.describe_capacity_providers(
                 capacityProviders=[name]
             )
             providers = response.get('capacityProviders', [])
             if providers and providers[0]['status'] == 'ACTIVE':
+                # Verify the ASG referenced by this capacity provider still exists
+                asg_provider = providers[0].get('autoScalingGroupProvider', {})
+                if asg_provider:
+                    asg_arn = asg_provider.get('autoScalingGroupArn', '')
+                    if asg_arn:
+                        # Extract ASG name from ARN and check if it exists
+                        asg_name = asg_arn.split('/')[-1]
+                        if not self._get_asg_details(asg_name):
+                            logger.warning(f"Capacity provider {name} references deleted ASG {asg_name}. Will recreate.")
+                            # Delete the orphaned capacity provider so it can be recreated
+                            try:
+                                self.ecs_client.delete_capacity_provider(capacityProvider=name)
+                                logger.info(f"Deleted orphaned capacity provider: {name}")
+                            except ClientError as e:
+                                logger.warning(f"Failed to delete orphaned capacity provider {name}: {e}")
+                            return None
+                
                 return {
                     'name': providers[0]['name'],
                     'arn': providers[0]['capacityProviderArn']

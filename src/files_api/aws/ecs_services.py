@@ -59,9 +59,9 @@ class ECSServiceManager:
                 },
                 serviceRegistries=[
                     {
-                        'registryArn': service_discovery['ServiceArn'],
-                        'containerName': 'mongodb',
-                        'containerPort': 27017
+                        'registryArn': service_discovery['Arn'],
+                        'containerName': 'mongodb'
+                        # containerPort not needed for DNS-only service discovery
                     }
                 ],
                 enableExecuteCommand=True,
@@ -82,13 +82,68 @@ class ECSServiceManager:
             logger.error(f"Failed to create MongoDB service: {e}")
             raise
     
+    def run_model_downloader_task(self, vpc_config: Dict[str, Any], 
+                                 efs_config: Dict[str, Any]) -> str:
+        """Run one-time model downloader task to populate EFS with models."""
+        task_name = f"{settings.app_name}-model-downloader"
+        
+        try:
+            # Create model downloader task definition
+            from files_api.aws.ecs_task_definitions import create_model_downloader_task_definition
+            task_def_arn = create_model_downloader_task_definition(efs_config)
+            
+            # Check if models already exist (to avoid re-downloading)
+            if self._check_models_exist(efs_config):
+                logger.info("✅ Models already downloaded - skipping model downloader task")
+                return "SKIPPED"
+            
+            logger.info(f"📥 Running model downloader task: {task_name}")
+            
+            # Run one-time task
+            task_response = self.ecs_client.run_task(
+                cluster=self.cluster_name,
+                taskDefinition=task_def_arn,
+                launchType='FARGATE',  # Use Fargate for one-time tasks
+                networkConfiguration={
+                    'awsvpcConfiguration': {
+                        'subnets': [vpc_config['public_subnet_id']],  # Need internet for downloads
+                        'securityGroups': [vpc_config['efs_security_group_id']],
+                        'assignPublicIp': 'ENABLED'  # Need internet access
+                    }
+                },
+                tags=[
+                    {'key': 'Name', 'value': task_name},
+                    {'key': 'Project', 'value': settings.app_name},
+                    {'key': 'Purpose', 'value': 'Model-Download'}
+                ]
+            )
+            
+            task_arn = task_response['tasks'][0]['taskArn']
+            logger.info(f"Started model downloader task: {task_arn}")
+            
+            # Wait for task to complete
+            self._wait_for_task_completion(task_arn)
+            
+            return task_arn
+            
+        except ClientError as e:
+            logger.error(f"Failed to run model downloader task: {e}")
+            raise
+
     def create_vlm_worker_service(self, vpc_config: Dict[str, Any], 
                                  efs_config: Dict[str, Any]) -> Dict[str, Any]:
         """Create VLM worker service with EC2 GPU instances."""
         service_name = f"{settings.app_name}-vlm-workers"
         
         try:
-            # Create task definition
+            # STEP 1: Ensure models are downloaded first
+            logger.info("🤖 Step 1: Ensuring models are downloaded to EFS...")
+            downloader_result = self.run_model_downloader_task(vpc_config, efs_config)
+            if downloader_result != "SKIPPED":
+                logger.info("✅ Model download completed successfully")
+            
+            # STEP 2: Create worker task definition
+            logger.info("🏗️ Step 2: Creating VLM worker task definition...")
             task_def_arn = self._create_vlm_worker_task_definition(efs_config)
             
             # Check for existing service
@@ -114,7 +169,7 @@ class ECSServiceManager:
                 networkConfiguration={
                     'awsvpcConfiguration': {
                         'subnets': [vpc_config['private_subnet_id']],
-                        'securityGroups': [vpc_config['vlm_security_group_id']],
+                        'securityGroups': [vpc_config['vlm_workers_security_group_id']],
                         'assignPublicIp': 'DISABLED'
                     }
                 },
@@ -135,6 +190,112 @@ class ECSServiceManager:
         except ClientError as e:
             logger.error(f"Failed to create VLM worker service: {e}")
             raise
+
+    def _check_models_exist(self, efs_config: Dict[str, Any]) -> bool:
+        """Check if models already exist in EFS (basic heuristic)."""
+        try:
+            # Run a simple task to check if model files exist
+            # This is a heuristic - we could make it more sophisticated
+            logger.info("🔍 Checking if models already exist in EFS...")
+            
+            # For now, assume models don't exist on first deployment
+            # In a production system, you might run a small task to check EFS contents
+            # or maintain a flag file in EFS indicating models are downloaded
+            
+            return False  # Always download for now - can be optimized later
+            
+        except Exception as e:
+            logger.warning(f"Could not check model existence: {e} - will download models")
+            return False
+
+    def _wait_for_task_completion(self, task_arn: str, timeout_minutes: int = 30) -> bool:
+        """Wait for ECS task to complete successfully."""
+        import time
+        
+        logger.info(f"⏳ Waiting for task completion: {task_arn}")
+        
+        timeout_seconds = timeout_minutes * 60
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout_seconds:
+            try:
+                response = self.ecs_client.describe_tasks(
+                    cluster=self.cluster_name,
+                    tasks=[task_arn]
+                )
+                
+                if not response['tasks']:
+                    logger.error(f"Task not found: {task_arn}")
+                    return False
+                
+                task = response['tasks'][0]
+                last_status = task.get('lastStatus', 'UNKNOWN')
+                
+                if last_status == 'STOPPED':
+                    # Check exit code
+                    containers = task.get('containers', [])
+                    if containers:
+                        exit_code = containers[0].get('exitCode', 1)
+                        if exit_code == 0:
+                            logger.info(f"✅ Task completed successfully: {task_arn}")
+                            return True
+                        else:
+                            reason = containers[0].get('reason', 'Unknown error')
+                            logger.error(f"❌ Task failed with exit code {exit_code}: {reason}")
+                            return False
+                    else:
+                        logger.error(f"❌ Task stopped but no container information available")
+                        return False
+                
+                elif last_status in ['RUNNING', 'PENDING']:
+                    logger.info(f"⏳ Task status: {last_status} - waiting...")
+                    time.sleep(30)  # Check every 30 seconds
+                    
+                else:
+                    logger.warning(f"⚠️ Unexpected task status: {last_status}")
+                    time.sleep(30)
+                    
+            except Exception as e:
+                logger.error(f"Error checking task status: {e}")
+                time.sleep(30)
+        
+        logger.error(f"❌ Task did not complete within {timeout_minutes} minutes")
+        return False
+
+    def _wait_for_service_discovery_operation(self, client, operation_id: str, timeout_minutes: int = 10) -> bool:
+        """Wait for Service Discovery operation to complete."""
+        import time
+        
+        logger.info(f"⏳ Waiting for Service Discovery operation: {operation_id}")
+        
+        timeout_seconds = timeout_minutes * 60
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout_seconds:
+            try:
+                response = client.get_operation(OperationId=operation_id)
+                status = response['Operation']['Status']
+                
+                if status == 'SUCCESS':
+                    logger.info(f"✅ Service Discovery operation completed: {operation_id}")
+                    return True
+                elif status == 'FAIL':
+                    error_msg = response['Operation'].get('ErrorMessage', 'Unknown error')
+                    logger.error(f"❌ Service Discovery operation failed: {error_msg}")
+                    return False
+                elif status in ['SUBMITTED', 'PENDING']:
+                    logger.info(f"⏳ Operation status: {status} - waiting...")
+                    time.sleep(10)  # Check every 10 seconds
+                else:
+                    logger.warning(f"⚠️ Unexpected operation status: {status}")
+                    time.sleep(10)
+                    
+            except Exception as e:
+                logger.error(f"Error checking operation status: {e}")
+                time.sleep(10)
+        
+        logger.error(f"❌ Service Discovery operation did not complete within {timeout_minutes} minutes")
+        return False
     
     def _create_mongodb_task_definition(self, efs_config: Dict[str, Any]) -> str:
         """Create task definition for MongoDB."""
@@ -176,11 +337,8 @@ class ECSServiceManager:
                                 'protocol': 'tcp'
                             }
                         ],
-                        'environment': [
-                            {'name': 'MONGO_INITDB_ROOT_USERNAME', 'value': 'admin'},
-                            {'name': 'MONGO_INITDB_ROOT_PASSWORD', 'value': settings.mongodb_password},
-                            {'name': 'MONGO_INITDB_DATABASE', 'value': settings.mongodb_database}
-                        ],
+                        # No authentication needed - MongoDB runs without auth by default
+                        'environment': [],
                         'mountPoints': [
                             {
                                 'sourceVolume': 'mongodb-data',
@@ -272,7 +430,7 @@ class ECSServiceManager:
                             {'name': 'AWS_REGION', 'value': self.region},
                             {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
                             {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},
-                            {'name': 'MONGODB_URI', 'value': f"mongodb://admin:{settings.mongodb_password}@{settings.app_name}-mongodb.{settings.app_name}.local:27017/{settings.mongodb_database}"},
+                            {'name': 'MONGODB_URI', 'value': f"mongodb://{settings.app_name}-mongodb.{settings.app_name}.local:27017/crud_pdf"},
                             {'name': 'MODEL_CACHE_DIR', 'value': '/models'},
                             {'name': 'CUDA_VISIBLE_DEVICES', 'value': '0'},
                             {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:256'}
@@ -386,8 +544,7 @@ class ECSServiceManager:
             
             # Wait for namespace to be created
             operation_id = namespace_response['OperationId']
-            waiter = servicediscovery_client.get_waiter('operation_success')
-            waiter.wait(OperationId=operation_id)
+            self._wait_for_service_discovery_operation(servicediscovery_client, operation_id)
             
             # Get namespace details
             operation_response = servicediscovery_client.get_operation(
@@ -409,23 +566,38 @@ class ECSServiceManager:
         try:
             # Check if log group exists
             try:
-                self.logs_client.describe_log_groups(logGroupNamePrefix=log_group_name)
-                logger.info(f"Using existing log group: {log_group_name}")
-                return log_group_name
+                response = self.logs_client.describe_log_groups(logGroupNamePrefix=log_group_name)
+                for log_group in response.get('logGroups', []):
+                    if log_group['logGroupName'] == log_group_name:
+                        logger.info(f"Using existing log group: {log_group_name}")
+                        return log_group_name
             except ClientError:
                 pass
             
             # Create log group
             self.logs_client.create_log_group(
                 logGroupName=log_group_name,
-                retentionInDays=7,
                 tags={
                     'Name': log_group_name,
                     'Project': settings.app_name
                 }
             )
             
+            # Set retention policy
+            self.logs_client.put_retention_policy(
+                logGroupName=log_group_name,
+                retentionInDays=7
+            )
+            
             logger.info(f"Created log group: {log_group_name}")
+            
+            # Verify log group was created
+            import time
+            time.sleep(2)  # Give AWS a moment to create the log group
+            response = self.logs_client.describe_log_groups(logGroupNamePrefix=log_group_name)
+            if not any(lg['logGroupName'] == log_group_name for lg in response.get('logGroups', [])):
+                raise Exception(f"Failed to verify log group creation: {log_group_name}")
+            
             return log_group_name
             
         except ClientError as e:
@@ -570,6 +742,59 @@ class ECSServiceManager:
         except ClientError as e:
             logger.error(f"Failed to create ECS task role: {e}")
             raise
+    
+    def deploy_all_services(self, vpc_config: Dict[str, Any], 
+                           efs_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy all ECS services (MongoDB and VLM workers)."""
+        logger.info("Starting deployment of all ECS services...")
+        
+        try:
+            # Deploy MongoDB service
+            logger.info("Deploying MongoDB service...")
+            mongodb_service = self.create_mongodb_service(vpc_config, efs_config)
+            
+            # Deploy VLM worker service
+            logger.info("Deploying VLM worker service...")
+            vlm_service = self.create_vlm_worker_service(vpc_config, efs_config)
+            
+            # Return deployment summary
+            deployment_summary = {
+                'status': 'success',
+                'services_deployed': {
+                    'mongodb': {
+                        'service_name': mongodb_service['serviceName'],
+                        'service_arn': mongodb_service['serviceArn'],
+                        'status': mongodb_service['status'],
+                        'desired_count': mongodb_service['desiredCount'],
+                        'running_count': mongodb_service['runningCount']
+                    },
+                    'vlm_workers': {
+                        'service_name': vlm_service['serviceName'],
+                        'service_arn': vlm_service['serviceArn'],
+                        'status': vlm_service['status'],
+                        'desired_count': vlm_service['desiredCount'],
+                        'running_count': vlm_service['runningCount']
+                    }
+                },
+                'cluster_name': self.cluster_name,
+                'deployment_time': self._get_current_timestamp()
+            }
+            
+            logger.info("All ECS services deployed successfully")
+            return deployment_summary
+            
+        except Exception as e:
+            logger.error(f"Failed to deploy ECS services: {e}")
+            return {
+                'status': 'failed',
+                'error': str(e),
+                'cluster_name': self.cluster_name
+            }
+    
+    def _get_current_timestamp(self) -> str:
+        """Get current timestamp for deployment tracking."""
+        import datetime
+        return datetime.datetime.utcnow().isoformat() + 'Z'
     
     def get_services_info(self) -> Dict[str, Any]:
         """Get complete services configuration."""

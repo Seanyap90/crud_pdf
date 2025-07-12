@@ -226,6 +226,12 @@ function aws-mock {
         exit 1
     fi
     
+    # Set AWS mock environment variables
+    export AWS_ENDPOINT_URL="http://localhost:5000"
+    export AWS_SECRET_ACCESS_KEY="mock"
+    export AWS_ACCESS_KEY_ID="mock"
+    export S3_BUCKET_NAME="rag-pdf-storage"
+    
     # Deploy ECS infrastructure using deploy_ecs.py
     echo "Creating ECS mock resources (S3, SQS, etc.)..."
     python -m files_api.aws.deploy_ecs --mode aws-mock
@@ -364,48 +370,13 @@ function aws-prod {
         exit 1
     fi
     
-    # Phase 2: Mount EFS file systems
-    echo "💾 Phase 2: Setting up EFS mount points..."
+    # Phase 2: Skip local EFS mounting (EFS will be mounted by ECS tasks on AWS)
+    echo "💾 Phase 2: Skipping local EFS mounting (ECS tasks will mount EFS on AWS)..."
+    echo "✅ EFS configuration ready for ECS services"
     
-    # Create mount directories
-    sudo mkdir -p /mnt/efs/mongodb /mnt/efs/models 2>/dev/null || true
-    
-    # Mount EFS file systems
-    echo "📁 Mounting MongoDB EFS: ${EFS_MONGODB_ID}"
-    sudo mount -t efs ${EFS_MONGODB_ID}:/ /mnt/efs/mongodb || {
-        echo "⚠️ Note: EFS mount may require EC2 instance with EFS client installed"
-        echo "💡 For local testing, using Docker volumes instead"
-        export EFS_MONGODB_MOUNT_PATH="/tmp/efs-mongodb"
-        export EFS_MODELS_MOUNT_PATH="/tmp/efs-models"
-        mkdir -p "$EFS_MONGODB_MOUNT_PATH" "$EFS_MODELS_MOUNT_PATH"
-    }
-    
-    echo "📁 Mounting Models EFS: ${EFS_MODELS_ID}"
-    sudo mount -t efs ${EFS_MODELS_ID}:/ /mnt/efs/models 2>/dev/null || {
-        echo "⚠️ Using local mount points for development"
-    }
-    
-    echo "✅ EFS mount points configured"
-    
-    # Phase 3: Populate EFS with models (one-time task)
-    echo "🤖 Phase 3: Populating EFS with HuggingFace models..."
-    
-    # Check if models already exist to skip download
-    if [ -f "${EFS_MODELS_MOUNT_PATH:-/mnt/efs/models}/colpali/.model_ready" ]; then
-        echo "✅ Models already downloaded, skipping population"
-    else
-        echo "📥 Running one-time model population task..."
-        python -m files_api.aws.populate_efs_models \
-            --cluster-name "$ECS_CLUSTER_NAME" \
-            --subnet-id "$PUBLIC_SUBNET_ID" \
-            --security-group-id "$VPC_ID" \
-            --efs-config .env.aws-prod.json 2>/dev/null || {
-                echo "⚠️ Model population task failed or not available"
-                echo "💡 Models will be downloaded by workers on first run"
-            }
-    fi
-    
-    echo "✅ Model population completed"
+    # Phase 3: Skip model population (models will be downloaded by ECS tasks on first run)
+    echo "🤖 Phase 3: Skipping model population (ECS tasks will download models on first run)..."
+    echo "✅ Model downloading will be handled by ECS workers"
     
     # Phase 4: Deploy services using Docker Compose
     echo "🐳 Phase 4: Deploying services with Docker Compose..."
@@ -427,18 +398,16 @@ function aws-prod {
         export ECR_REPO_NAME="crud-pdf-vlm:latest"
     }
     
-    # docker push "$ECR_URI:latest" 2>/dev/null || echo "⚠️ Using local image"
-    
-    # Deploy with Docker Compose
-    echo "🚀 Starting Docker Compose services..."
-    docker-compose --env-file .env.aws-prod -f docker-compose.aws-prod.yml up -d
+    # Phase 4: Deploy ECS services
+    echo "🚀 Phase 4: Deploying ECS services (MongoDB + VLM workers)..."
+    python -m files_api.aws.deploy_ecs --mode aws-prod --deploy-services
     
     if [ $? -ne 0 ]; then
-        echo "❌ Error: Docker Compose deployment failed"
+        echo "❌ Error: ECS services deployment failed"
         exit 1
     fi
     
-    echo "✅ Docker Compose services started"
+    echo "✅ ECS services deployed successfully"
     
     # Phase 5: Deploy Lambda functions (Files API)
     echo "📋 Phase 5: Deploying Lambda functions..."
@@ -463,14 +432,14 @@ function aws-prod {
     echo ""
     echo "🔗 Services:"
     echo "   • MongoDB: Running on ECS with EFS persistence"
-    echo "   • VLM Workers: Docker Compose with EFS model cache"
+    echo "   • VLM Workers: Native ECS services with EFS model cache"
     echo "   • Files API: Lambda with scale-to-zero"
     echo "   • Auto-scaling: Native CloudWatch integration"
     echo ""
     echo "📋 Management commands:"
-    echo "   • View logs: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml logs"
-    echo "   • Scale workers: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml up --scale vlm-worker=3"
-    echo "   • Stop services: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml down"
+    echo "   • View logs: aws ecs describe-services --cluster fastapi-app-ecs-cluster --services fastapi-app-vlm-workers fastapi-app-mongodb"
+    echo "   • Scale workers: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 3"
+    echo "   • Stop services: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 0"
     echo ""
     echo "🔗 Access your deployment via the Lambda function URL"
 }
@@ -519,12 +488,15 @@ function aws-prod-cleanup {
         source .env.aws-prod
     fi
     
-    # Phase 1: Stop and remove Docker Compose services
-    echo "🐳 Phase 1: Stopping Docker Compose services..."
-    cd src/files_api 2>/dev/null || true
-    docker-compose --env-file .env.aws-prod -f docker-compose.aws-prod.yml down --volumes --remove-orphans 2>/dev/null || true
-    cd ../.. 2>/dev/null || true
-    echo "✅ Docker Compose services stopped"
+    # Phase 1: Stop ECS services
+    echo "🐳 Phase 1: Stopping ECS services..."
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-vlm-workers" --desired-count 0 2>/dev/null || echo "⚠️ VLM workers service not found"
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-mongodb" --desired-count 0 2>/dev/null || echo "⚠️ MongoDB service not found"
+        echo "✅ ECS services stopped"
+    else
+        echo "⚠️ ECS_CLUSTER_NAME not found - cannot stop services"
+    fi
     
     # Phase 2: Unmount EFS file systems
     echo "💾 Phase 2: Unmounting EFS file systems..."
@@ -599,12 +571,15 @@ function aws-prod-cleanup-soft {
         source .env.aws-prod
     fi
     
-    # Phase 1: Stop and remove Docker Compose services
-    echo "🐳 Phase 1: Stopping Docker Compose services..."
-    cd src/files_api 2>/dev/null || true
-    docker-compose --env-file .env.aws-prod -f docker-compose.aws-prod.yml down --volumes --remove-orphans 2>/dev/null || true
-    cd ../.. 2>/dev/null || true
-    echo "✅ Docker Compose services stopped"
+    # Phase 1: Stop ECS services
+    echo "🐳 Phase 1: Stopping ECS services..."
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-vlm-workers" --desired-count 0 2>/dev/null || echo "⚠️ VLM workers service not found"
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-mongodb" --desired-count 0 2>/dev/null || echo "⚠️ MongoDB service not found"
+        echo "✅ ECS services stopped"
+    else
+        echo "⚠️ ECS_CLUSTER_NAME not found - cannot stop services"
+    fi
     
     # Phase 2: Scale down ECS services (preserve infrastructure)
     echo "🏗️ Phase 2: Scaling down ECS services (preserving infrastructure)..."
@@ -709,16 +684,16 @@ function aws-prod-status {
     fi
     echo ""
     
-    # Check Docker Compose services
-    echo "🐳 Docker Compose Services:"
-    cd src/files_api 2>/dev/null || true
-    if [ -f "docker-compose.aws-prod.yml" ]; then
+    # Check ECS services
+    echo "🐳 ECS Services:"
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
         echo "   📦 Services status:"
-        docker-compose -f docker-compose.aws-prod.yml ps 2>/dev/null | sed 's/^/      /' || echo "      ⚠️ No running services"
+        aws ecs describe-services --cluster "$ECS_CLUSTER_NAME" --services "fastapi-app-vlm-workers" "fastapi-app-mongodb" \
+            --query 'services[*].[serviceName,status,runningCount,desiredCount]' --output table 2>/dev/null | sed 's/^/      /' \
+            || echo "      ⚠️ No ECS services found"
     else
-        echo "   ❌ docker-compose.aws-prod.yml (missing)"
+        echo "   ❌ ECS_CLUSTER_NAME not set"
     fi
-    cd ../.. 2>/dev/null || true
     echo ""
     
     # Check EFS mounts
@@ -762,8 +737,8 @@ function aws-prod-status {
     
     echo ""
     echo "💡 Commands:"
-    echo "   • View logs: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml logs"
-    echo "   • Scale workers: docker-compose --env-file .env.aws-prod -f src/files_api/docker-compose.aws-prod.yml up --scale vlm-worker=3"
+    echo "   • View logs: aws logs describe-log-groups --log-group-name-prefix '/ecs/fastapi-app'"
+    echo "   • Scale workers: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 3"
     echo "   • Full cleanup: make aws-prod-cleanup"
 }
 

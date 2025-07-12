@@ -125,9 +125,9 @@ class LambdaLayerManager:
                 "python-multipart==0.0.6"  # For form uploads
             ]
             
-            # Install packages
+            # Install packages to target directory only
             subprocess.run([
-                "pip", "install", "--target", str(python_dir), "--no-deps"
+                "pip", "install", "--target", str(python_dir), "--no-cache-dir", "--upgrade"
             ] + requirements, check=True)
             
             # Create layer ZIP
@@ -232,7 +232,7 @@ class LambdaDeployer:
                             'AWS_REGION': self.region,
                             'S3_BUCKET_NAME': settings.s3_bucket_name,
                             'SQS_QUEUE_URL': settings.sqs_queue_url or '',
-                            'MONGODB_URI': f"mongodb://admin:{settings.mongodb_password}@{settings.app_name}-mongodb.{settings.app_name}.local:27017/{settings.mongodb_database}"
+                            'MONGODB_URI': f"mongodb://{settings.app_name}-mongodb.{settings.app_name}.local:27017/crud_pdf"
                         }
                     },
                     Tags={

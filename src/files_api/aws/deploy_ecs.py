@@ -165,13 +165,14 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         try:
             import boto3
             client = boto3.client('service-quotas', region_name=region)
+            # Check Spot quota since we're using Spot instances  
             response = client.get_service_quota(
                 ServiceCode='ec2',
-                QuotaCode='L-DB2E81BA'
+                QuotaCode='L-3819A6DF'  # All G and VT Spot Instance Requests
             )
             
             current_quota = response['Quota']['Value']
-            required_quota = 12.0  # 3× g4dn.xlarge = 12 vCPUs
+            required_quota = 8.0  # 2× g4dn.xlarge = 8 vCPUs (adjusted for current quota)
             
             if current_quota >= required_quota:
                 logger.info(f"✅ GPU quota sufficient: {current_quota} vCPUs available")
@@ -339,20 +340,26 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
     @log_operation("ECS services deployment")
     def _deploy_services(self, vpc_config: Dict[str, Any], efs_config: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy MongoDB and VLM worker services."""
-        # Create MongoDB service
-        mongodb_service = self.service_manager.create_mongodb_service(
-            vpc_config, efs_config
-        )
+        # Deploy all services using the orchestration method
+        deployment_result = self.service_manager.deploy_all_services(vpc_config, efs_config)
         
-        # Create VLM worker service
-        vlm_service = self.service_manager.create_vlm_worker_service(
-            vpc_config, efs_config
-        )
-        
-        services_config = self.service_manager.get_services_info()
-        logger.info(f"Services deployed: MongoDB={mongodb_service['serviceName']}, VLM={vlm_service['serviceName']}")
-        
-        return services_config
+        if deployment_result['status'] == 'success':
+            services_deployed = deployment_result['services_deployed']
+            logger.info(f"Services deployed successfully:")
+            logger.info(f"  MongoDB: {services_deployed['mongodb']['service_name']}")
+            logger.info(f"  VLM Workers: {services_deployed['vlm_workers']['service_name']}")
+            
+            # Return in expected format for backwards compatibility
+            return {
+                'services': {
+                    'mongodb': services_deployed['mongodb'],
+                    'vlm_workers': services_deployed['vlm_workers']
+                },
+                'deployment_summary': deployment_result
+            }
+        else:
+            logger.error(f"Service deployment failed: {deployment_result.get('error')}")
+            raise Exception(f"ECS services deployment failed: {deployment_result.get('error')}")
     
     @log_operation("Auto-scaling configuration")
     def _setup_auto_scaling(self, services_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -424,8 +431,13 @@ class ECSDeploymentBuilder:
             account_id = token_data['proxyEndpoint'].split('.')[0].split('//')[-1]
             self.ecr_uri = f"{account_id}.dkr.ecr.{DEFAULT_REGION}.amazonaws.com/{ECR_REPO_NAME}:latest"
             
-            # Docker build and push operations
-            self._build_and_push_image(docker_image_path, token_data)
+            # Check if image already exists
+            if self._check_image_exists(ecr_client):
+                logger.info(f"✅ Using existing ECR image: {self.ecr_uri}")
+            else:
+                logger.info(f"📦 Building and pushing new ECR image: {self.ecr_uri}")
+                # Docker build and push operations
+                self._build_and_push_image(docker_image_path, token_data)
             
             logger.info(f"ECR image ready: {self.ecr_uri}")
             
@@ -435,9 +447,30 @@ class ECSDeploymentBuilder:
         
         return self
     
+    def _check_image_exists(self, ecr_client) -> bool:
+        """Check if ECR image already exists."""
+        try:
+            response = ecr_client.describe_images(
+                repositoryName=ECR_REPO_NAME,
+                imageIds=[{'imageTag': 'latest'}]
+            )
+            images = response.get('imageDetails', [])
+            if images:
+                image_size_mb = images[0].get('imageSizeInBytes', 0) / (1024 * 1024)
+                logger.info(f"Found existing image: {image_size_mb:.1f} MB, pushed {images[0].get('imagePushedAt', 'unknown time')}")
+                return True
+            return False
+        except ecr_client.exceptions.ImageNotFoundException:
+            logger.info("No existing image found - will build new one")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check for existing image: {e} - will build new one")
+            return False
+    
     def _build_and_push_image(self, docker_path: str, token_data: Dict[str, Any]) -> None:
         """Build and push Docker image to ECR."""
         import base64
+        import os
         
         # Decode ECR token
         token = base64.b64decode(token_data['authorizationToken']).decode('utf-8')
@@ -449,10 +482,21 @@ class ECSDeploymentBuilder:
             token_data['proxyEndpoint']
         ], input=password.encode(), check=True)
         
-        # Build image
+        # Get the project root directory (where src/ directory exists)
+        current_dir = os.getcwd()
+        project_root = current_dir
+        
+        # If we're not in the project root, find it
+        while not os.path.exists(os.path.join(project_root, "src")):
+            parent = os.path.dirname(project_root)
+            if parent == project_root:  # Reached filesystem root
+                raise Exception("Could not find project root (directory containing 'src' folder)")
+            project_root = parent
+        
+        # Build image from project root
         subprocess.run([
-            "docker", "build", "-t", self.ecr_uri, docker_path
-        ], check=True)
+            "docker", "build", "-t", self.ecr_uri, "-f", f"{docker_path}/Dockerfile", "."
+        ], check=True, cwd=project_root)
         
         # Push image
         subprocess.run([
@@ -620,6 +664,8 @@ def main():
                        help="Path to Docker build context")
     parser.add_argument("--infrastructure-only", action="store_true",
                        help="Deploy only infrastructure and export config for docker-compose")
+    parser.add_argument("--deploy-services", action="store_true",
+                       help="Deploy ECS services (full deployment with containers)")
     parser.add_argument("--export-config", default=".env.aws-prod",
                        help="File to export infrastructure configuration")
     
@@ -633,15 +679,22 @@ def main():
         # Execute deployment
         builder = ECSDeploymentBuilder(args.mode, args.infrastructure_only)
         
-        # Skip ECR image preparation for infrastructure-only mode
+        # Choose deployment type based on flags
         if args.infrastructure_only:
+            # Infrastructure only - no ECR or services
             result = (builder
                      .setup_supporting_services()
                      .deploy())
-        else:
+        elif args.deploy_services:
+            # Full deployment with ECR images and services
             result = (builder
                      .setup_supporting_services()
                      .prepare_ecr_image(args.docker_path)
+                     .deploy())
+        else:
+            # Default: infrastructure only for backward compatibility
+            result = (builder
+                     .setup_supporting_services()
                      .deploy())
         
         # Output deployment summary
