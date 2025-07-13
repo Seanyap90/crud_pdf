@@ -226,6 +226,12 @@ function aws-mock {
         exit 1
     fi
     
+    # Set AWS mock environment variables
+    export AWS_ENDPOINT_URL="http://localhost:5000"
+    export AWS_SECRET_ACCESS_KEY="mock"
+    export AWS_ACCESS_KEY_ID="mock"
+    export S3_BUCKET_NAME="rag-pdf-storage"
+    
     # Deploy ECS infrastructure using deploy_ecs.py
     echo "Creating ECS mock resources (S3, SQS, etc.)..."
     python -m files_api.aws.deploy_ecs --mode aws-mock
@@ -364,81 +370,56 @@ function aws-prod {
         exit 1
     fi
     
-    # Phase 2: Mount EFS file systems
-    echo "💾 Phase 2: Setting up EFS mount points..."
+    # Phase 2: Skip local EFS mounting (EFS will be mounted by ECS tasks on AWS)
+    echo "💾 Phase 2: Skipping local EFS mounting (ECS tasks will mount EFS on AWS)..."
+    echo "✅ EFS configuration ready for ECS services"
     
-    # Create mount directories
-    sudo mkdir -p /mnt/efs/mongodb /mnt/efs/models 2>/dev/null || true
-    
-    # Mount EFS file systems
-    echo "📁 Mounting MongoDB EFS: ${EFS_MONGODB_ID}"
-    sudo mount -t efs ${EFS_MONGODB_ID}:/ /mnt/efs/mongodb || {
-        echo "⚠️ Note: EFS mount may require EC2 instance with EFS client installed"
-        echo "💡 For local testing, using Docker volumes instead"
-        export EFS_MONGODB_MOUNT_PATH="/tmp/efs-mongodb"
-        export EFS_MODELS_MOUNT_PATH="/tmp/efs-models"
-        mkdir -p "$EFS_MONGODB_MOUNT_PATH" "$EFS_MODELS_MOUNT_PATH"
-    }
-    
-    echo "📁 Mounting Models EFS: ${EFS_MODELS_ID}"
-    sudo mount -t efs ${EFS_MODELS_ID}:/ /mnt/efs/models 2>/dev/null || {
-        echo "⚠️ Using local mount points for development"
-    }
-    
-    echo "✅ EFS mount points configured"
-    
-    # Phase 3: Populate EFS with models (one-time task)
-    echo "🤖 Phase 3: Populating EFS with HuggingFace models..."
-    
-    # Check if models already exist to skip download
-    if [ -f "${EFS_MODELS_MOUNT_PATH:-/mnt/efs/models}/colpali/.model_ready" ]; then
-        echo "✅ Models already downloaded, skipping population"
-    else
-        echo "📥 Running one-time model population task..."
-        python -m files_api.aws.populate_efs_models \
-            --cluster-name "$ECS_CLUSTER_NAME" \
-            --subnet-id "$PUBLIC_SUBNET_ID" \
-            --security-group-id "$VPC_ID" \
-            --efs-config .env.aws-prod.json 2>/dev/null || {
-                echo "⚠️ Model population task failed or not available"
-                echo "💡 Models will be downloaded by workers on first run"
-            }
-    fi
-    
-    echo "✅ Model population completed"
+    # Phase 3: Skip model population (models will be downloaded by ECS tasks on first run)
+    echo "🤖 Phase 3: Skipping model population (ECS tasks will download models on first run)..."
+    echo "✅ Model downloading will be handled by ECS workers"
     
     # Phase 4: Deploy services using Docker Compose
     echo "🐳 Phase 4: Deploying services with Docker Compose..."
     
     # Build ECR image if needed
-    echo "🔨 Building and pushing ECR image..."
+    echo "🔨 Checking ECR image availability..."
+    # Load ECR repository name from settings
+    ECR_REPO_NAME=$(python3 -c "from files_api.settings import get_settings; print(get_settings().ecr_repo_name)")
+    
     # Get ECR repository URI
     ECR_URI="${AWS_ACCOUNT_ID:-123456789012}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}"
     
-    # Build and push image (simplified for demo)
-    echo "📦 Building VLM worker image..."
-    cd src/files_api
-    docker build -t "$ECR_URI:latest" -f vlm/Dockerfile ../..
+    # Check if ECR image already exists
+    echo "🔍 Checking if ECR image exists: ${ECR_REPO_NAME}:latest"
+    if aws ecr describe-images --repository-name "$ECR_REPO_NAME" --image-ids imageTag=latest --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1; then
+        echo "✅ ECR image ${ECR_REPO_NAME}:latest already exists, skipping build"
+    else
+        echo "❌ ECR image not found, building and pushing..."
+        
+        # Build and push image
+        echo "📦 Building VLM worker image..."
+        cd src/files_api
+        docker build -t "$ECR_URI:latest" -f vlm/Dockerfile ../..
+        
+        # Push to ECR (requires AWS credentials)
+        echo "📤 Pushing to ECR..."
+        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_URI" 2>/dev/null || {
+            echo "⚠️ ECR push failed - image will be built during deployment"
+            echo "💡 Deployment will fail if ECR image doesn't exist. Please fix AWS credentials and try again."
+        }
+        cd ../..
+    fi
     
-    # Push to ECR (requires AWS credentials)
-    echo "📤 Pushing to ECR..."
-    aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_URI" 2>/dev/null || {
-        echo "⚠️ ECR push failed - using local image for testing"
-        export ECR_REPO_NAME="crud-pdf-vlm:latest"
-    }
-    
-    # docker push "$ECR_URI:latest" 2>/dev/null || echo "⚠️ Using local image"
-    
-    # Deploy with Docker Compose
-    echo "🚀 Starting Docker Compose services..."
-    docker-compose -f docker-compose.aws-prod.yml up -d
+    # Phase 4: Deploy ECS services
+    echo "🚀 Phase 4: Deploying ECS services (MongoDB + VLM workers)..."
+    python -m files_api.aws.deploy_ecs --mode aws-prod --deploy-services
     
     if [ $? -ne 0 ]; then
-        echo "❌ Error: Docker Compose deployment failed"
+        echo "❌ Error: ECS services deployment failed"
         exit 1
     fi
     
-    echo "✅ Docker Compose services started"
+    echo "✅ ECS services deployed successfully"
     
     # Phase 5: Deploy Lambda functions (Files API)
     echo "📋 Phase 5: Deploying Lambda functions..."
@@ -463,14 +444,14 @@ function aws-prod {
     echo ""
     echo "🔗 Services:"
     echo "   • MongoDB: Running on ECS with EFS persistence"
-    echo "   • VLM Workers: Docker Compose with EFS model cache"
+    echo "   • VLM Workers: Native ECS services with EFS model cache"
     echo "   • Files API: Lambda with scale-to-zero"
     echo "   • Auto-scaling: Native CloudWatch integration"
     echo ""
     echo "📋 Management commands:"
-    echo "   • View logs: docker-compose -f src/files_api/docker-compose.aws-prod.yml logs"
-    echo "   • Scale workers: docker-compose -f src/files_api/docker-compose.aws-prod.yml up --scale vlm-worker=3"
-    echo "   • Stop services: docker-compose -f src/files_api/docker-compose.aws-prod.yml down"
+    echo "   • View logs: aws ecs describe-services --cluster fastapi-app-ecs-cluster --services fastapi-app-vlm-workers fastapi-app-mongodb"
+    echo "   • Scale workers: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 3"
+    echo "   • Stop services: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 0"
     echo ""
     echo "🔗 Access your deployment via the Lambda function URL"
 }
@@ -519,12 +500,15 @@ function aws-prod-cleanup {
         source .env.aws-prod
     fi
     
-    # Phase 1: Stop and remove Docker Compose services
-    echo "🐳 Phase 1: Stopping Docker Compose services..."
-    cd src/files_api 2>/dev/null || true
-    docker-compose -f docker-compose.aws-prod.yml down --volumes --remove-orphans 2>/dev/null || true
-    cd ../.. 2>/dev/null || true
-    echo "✅ Docker Compose services stopped"
+    # Phase 1: Stop ECS services
+    echo "🐳 Phase 1: Stopping ECS services..."
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-vlm-workers" --desired-count 0 2>/dev/null || echo "⚠️ VLM workers service not found"
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-mongodb" --desired-count 0 2>/dev/null || echo "⚠️ MongoDB service not found"
+        echo "✅ ECS services stopped"
+    else
+        echo "⚠️ ECS_CLUSTER_NAME not found - cannot stop services"
+    fi
     
     # Phase 2: Unmount EFS file systems
     echo "💾 Phase 2: Unmounting EFS file systems..."
@@ -557,11 +541,17 @@ function aws-prod-cleanup {
     rm -f .env.aws-prod .env.aws-prod.json .deployment_state.json
     echo "✅ Local configuration files removed"
     
-    # Phase 6: Remove ECR images (optional)
-    echo "📦 Phase 6: ECR image cleanup..."
+    # Phase 6: Remove ECR images and repository
+    echo "📦 Phase 6: ECR repository cleanup..."
     if [ -n "$ECR_REPO_NAME" ]; then
-        echo "⚠️ ECR repository '$ECR_REPO_NAME' may contain images"
-        echo "💡 Manual cleanup: aws ecr delete-repository --repository-name $ECR_REPO_NAME --force"
+        echo "🗑️ Deleting ECR repository: $ECR_REPO_NAME"
+        if aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$AWS_DEFAULT_REGION" 2>/dev/null; then
+            echo "✅ ECR repository '$ECR_REPO_NAME' deleted successfully"
+        else
+            echo "⚠️ ECR repository '$ECR_REPO_NAME' not found or already deleted"
+        fi
+    else
+        echo "⚠️ ECR_REPO_NAME not set - skipping ECR cleanup"
     fi
     
     echo ""
@@ -580,6 +570,108 @@ function aws-prod-cleanup {
     echo "   • Check CloudWatch log groups"
     echo ""
     echo "🔍 Cost verification: aws ce get-cost-and-usage --help"
+}
+
+# Soft cleanup AWS production deployment (preserves expensive infrastructure)
+function aws-prod-cleanup-soft {
+    set +e
+    
+    echo "🧹 AWS Production Soft Cleanup - Preserve Infrastructure"
+    echo "💰 This preserves NAT Gateway, VPC, EFS, and ECR to avoid recreation costs"
+    echo "🔄 Only cleans up: ECS Services, Tasks, Auto Scaling Groups, Lambda functions"
+    
+    # Set deployment mode for cleanup
+    export DEPLOYMENT_MODE="aws-prod"
+    
+    # Load infrastructure config if available
+    if [ -f ".env.aws-prod" ]; then
+        echo "📋 Loading infrastructure configuration..."
+        source .env.aws-prod
+    fi
+    
+    # Phase 1: Stop ECS services
+    echo "🐳 Phase 1: Stopping ECS services..."
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-vlm-workers" --desired-count 0 2>/dev/null || echo "⚠️ VLM workers service not found"
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-mongodb" --desired-count 0 2>/dev/null || echo "⚠️ MongoDB service not found"
+        echo "✅ ECS services stopped"
+    else
+        echo "⚠️ ECS_CLUSTER_NAME not found - cannot stop services"
+    fi
+    
+    # Phase 2: Scale down ECS services (preserve infrastructure)
+    echo "🏗️ Phase 2: Scaling down ECS services (preserving infrastructure)..."
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "vlm-worker" --desired-count 0 2>/dev/null || echo "⚠️ vlm-worker service not found or already scaled down"
+        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "mongodb" --desired-count 0 2>/dev/null || echo "⚠️ mongodb service not found or already scaled down"
+        echo "✅ ECS services scaled to 0 (infrastructure preserved)"
+    else
+        echo "⚠️ ECS_CLUSTER_NAME not found - skipping service scaling"
+    fi
+    
+    # Phase 3: Cleanup Lambda functions
+    echo "⚡ Phase 3: Cleaning up Lambda functions..."
+    python -m files_api.aws.deploy_lambda --mode aws-prod --cleanup
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ Lambda functions cleaned up"
+    else
+        echo "⚠️ Lambda cleanup had issues - check AWS console for remaining functions"
+    fi
+    
+    # Phase 4: Scale down auto scaling groups to 0 (don't delete)
+    echo "📊 Phase 4: Scaling down auto scaling groups..."
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
+        # Find and scale down auto scaling groups
+        ASG_NAMES=$(aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?contains(Tags[?Key=='Project'].Value, 'FastAPI App')].AutoScalingGroupName" --output text 2>/dev/null || echo "")
+        if [ -n "$ASG_NAMES" ]; then
+            for asg in $ASG_NAMES; do
+                aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$asg" --desired-capacity 0 --min-size 0 2>/dev/null || echo "⚠️ Could not scale ASG: $asg"
+            done
+            echo "✅ Auto scaling groups scaled to 0"
+        else
+            echo "⚠️ No auto scaling groups found"
+        fi
+    fi
+    
+    # Clean up deployment state for services only
+    if [ -f ".deployment_state.json" ]; then
+        echo "📋 Updating deployment state (preserving infrastructure entries)..."
+        python -c "
+import json
+try:
+    with open('.deployment_state.json', 'r') as f:
+        state = json.load(f)
+    
+    # Remove service-level entries but keep infrastructure
+    preserved_keys = ['vpc', 'subnets', 'internet_gateway', 'nat_gateway', 'security_groups', 'efs', 'ecr']
+    new_state = {k: v for k, v in state.items() if any(pk in k.lower() for pk in preserved_keys)}
+    
+    with open('.deployment_state.json', 'w') as f:
+        json.dump(new_state, f, indent=2)
+    print('✅ Deployment state updated')
+except Exception as e:
+    print(f'⚠️ Could not update deployment state: {e}')
+"
+    fi
+    
+    echo ""
+    echo "✅ AWS Production Soft Cleanup Complete!"
+    echo ""
+    echo "💰 Cost Savings: Preserved expensive infrastructure:"
+    echo "   • NAT Gateway: ~$32.40/month (preserved)"
+    echo "   • Elastic IP: ~$3.60/month (preserved)"
+    echo "   • VPC/Subnets: FREE (preserved)"
+    echo "   • EFS: Pay-per-use (preserved)"
+    echo "   • ECR: Pay-per-use (preserved)"
+    echo ""
+    echo "🔄 Cleaned up pay-per-use resources:"
+    echo "   • ECS Services and Tasks: $0/month when scaled to 0"
+    echo "   • Lambda Functions: $0/month when not invoked"
+    echo "   • Auto Scaling Groups: $0/month when scaled to 0"
+    echo ""
+    echo "🚀 Next deployment will reuse existing infrastructure!"
+    echo "💡 To completely destroy everything: make aws-prod-cleanup"
 }
 
 # Show AWS production deployment status
@@ -610,16 +702,16 @@ function aws-prod-status {
     fi
     echo ""
     
-    # Check Docker Compose services
-    echo "🐳 Docker Compose Services:"
-    cd src/files_api 2>/dev/null || true
-    if [ -f "docker-compose.aws-prod.yml" ]; then
+    # Check ECS services
+    echo "🐳 ECS Services:"
+    if [ -n "$ECS_CLUSTER_NAME" ]; then
         echo "   📦 Services status:"
-        docker-compose -f docker-compose.aws-prod.yml ps 2>/dev/null | sed 's/^/      /' || echo "      ⚠️ No running services"
+        aws ecs describe-services --cluster "$ECS_CLUSTER_NAME" --services "fastapi-app-vlm-workers" "fastapi-app-mongodb" \
+            --query 'services[*].[serviceName,status,runningCount,desiredCount]' --output table 2>/dev/null | sed 's/^/      /' \
+            || echo "      ⚠️ No ECS services found"
     else
-        echo "   ❌ docker-compose.aws-prod.yml (missing)"
+        echo "   ❌ ECS_CLUSTER_NAME not set"
     fi
-    cd ../.. 2>/dev/null || true
     echo ""
     
     # Check EFS mounts
@@ -663,8 +755,8 @@ function aws-prod-status {
     
     echo ""
     echo "💡 Commands:"
-    echo "   • View logs: docker-compose -f src/files_api/docker-compose.aws-prod.yml logs"
-    echo "   • Scale workers: docker-compose -f src/files_api/docker-compose.aws-prod.yml up --scale vlm-worker=3"
+    echo "   • View logs: aws logs describe-log-groups --log-group-name-prefix '/ecs/fastapi-app'"
+    echo "   • Scale workers: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 3"
     echo "   • Full cleanup: make aws-prod-cleanup"
 }
 

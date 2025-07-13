@@ -1,11 +1,12 @@
 """ECS cluster management with GPU-optimized capacity provider."""
+import base64
 import logging
 from typing import Dict, Any, Optional, List
 import boto3
 from botocore.exceptions import ClientError
 
 from files_api.settings import get_settings
-from files_api.aws.utils import get_ecs_client, get_ec2_client, get_iam_client
+from files_api.aws.utils import get_ecs_client, get_ec2_client, get_iam_client, get_asg_client
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -19,7 +20,8 @@ class ECSClusterManager:
         self.ecs_client = get_ecs_client()
         self.ec2_client = get_ec2_client()
         self.iam_client = get_iam_client()
-        self.cluster_name = f"{settings.app_name}-ecs-cluster"
+        self.asg_client = get_asg_client()
+        self.cluster_name = f"{settings.app_name.lower().replace(' ', '-')}-ecs-cluster"
         self.cluster_arn = None
         self.capacity_providers = {}
         
@@ -128,11 +130,20 @@ class ECSClusterManager:
         template_name = f"{self.cluster_name}-gpu-template"
         
         try:
-            # Check for existing launch template
+            # Check for existing launch template and validate its security groups
             existing_template = self._find_existing_launch_template(template_name)
             if existing_template:
-                logger.info(f"Using existing launch template: {template_name}")
-                return existing_template
+                # Validate that the launch template's security groups are still valid for current VPC
+                if self._validate_launch_template_for_vpc(existing_template['LaunchTemplateId'], vpc_id):
+                    logger.info(f"Using existing launch template: {template_name}")
+                    return existing_template
+                else:
+                    logger.warning(f"Launch template {template_name} has invalid security groups for VPC {vpc_id}, deleting and recreating")
+                    try:
+                        self.ec2_client.delete_launch_template(LaunchTemplateId=existing_template['LaunchTemplateId'])
+                        logger.info(f"Deleted invalid launch template: {template_name}")
+                    except ClientError as e:
+                        logger.warning(f"Failed to delete invalid launch template: {e}")
             
             # Get ECS-optimized GPU AMI
             gpu_ami_id = self._get_ecs_gpu_ami()
@@ -186,12 +197,21 @@ systemctl restart ecs
                 LaunchTemplateName=template_name,
                 LaunchTemplateData={
                     'ImageId': gpu_ami_id,
-                    'InstanceType': 'g4dn.xlarge',  # 1 GPU, 16GB RAM, cost-effective
+                    'InstanceType': settings.primary_instance_type,
                     'IamInstanceProfile': {
                         'Arn': instance_profile_arn
                     },
                     'SecurityGroupIds': [gpu_sg_id],
-                    'UserData': user_data.encode('utf-8').hex(),
+                    'UserData': base64.b64encode(user_data.encode('utf-8')).decode('utf-8'),  # Must be Base64 encoded for launch templates
+                    
+                    # Spot instance configuration for 70% cost savings
+                    'InstanceMarketOptions': {
+                        'MarketType': 'spot',
+                        'SpotOptions': {
+                            'MaxPrice': str(settings.regional_config[settings.aws_region]['spot_max_price']),
+                            'SpotInstanceType': 'one-time'
+                        }
+                    },
                     'TagSpecifications': [
                         {
                             'ResourceType': 'instance',
@@ -236,14 +256,14 @@ systemctl restart ecs
                 return existing_asg
             
             # Create ASG
-            asg_response = self.ec2_client.create_auto_scaling_group(
+            asg_response = self.asg_client.create_auto_scaling_group(
                 AutoScalingGroupName=asg_name,
                 LaunchTemplate={
                     'LaunchTemplateId': launch_template_id,
                     'Version': '$Latest'
                 },
-                MinSize=0,  # Scale to zero when no tasks
-                MaxSize=3,  # Max 3 GPU instances
+                MinSize=0,          # Scale to zero when idle
+                MaxSize=2,          # HARD LIMIT: 2 instances max (adjusted for current quota)
                 DesiredCapacity=0,  # Start with zero instances
                 VPCZoneIdentifier=','.join(subnet_ids),
                 DefaultCooldown=300,  # 5 minutes cooldown
@@ -436,13 +456,30 @@ systemctl restart ecs
             return None
     
     def _find_existing_capacity_provider(self, name: str) -> Optional[Dict[str, Any]]:
-        """Find existing capacity provider."""
+        """Find existing capacity provider and verify its ASG still exists."""
         try:
             response = self.ecs_client.describe_capacity_providers(
                 capacityProviders=[name]
             )
             providers = response.get('capacityProviders', [])
             if providers and providers[0]['status'] == 'ACTIVE':
+                # Verify the ASG referenced by this capacity provider still exists
+                asg_provider = providers[0].get('autoScalingGroupProvider', {})
+                if asg_provider:
+                    asg_arn = asg_provider.get('autoScalingGroupArn', '')
+                    if asg_arn:
+                        # Extract ASG name from ARN and check if it exists
+                        asg_name = asg_arn.split('/')[-1]
+                        if not self._get_asg_details(asg_name):
+                            logger.warning(f"Capacity provider {name} references deleted ASG {asg_name}. Will recreate.")
+                            # Delete the orphaned capacity provider so it can be recreated
+                            try:
+                                self.ecs_client.delete_capacity_provider(capacityProvider=name)
+                                logger.info(f"Deleted orphaned capacity provider: {name}")
+                            except ClientError as e:
+                                logger.warning(f"Failed to delete orphaned capacity provider {name}: {e}")
+                            return None
+                
                 return {
                     'name': providers[0]['name'],
                     'arn': providers[0]['capacityProviderArn']
@@ -463,6 +500,50 @@ systemctl restart ecs
             return None
         except ClientError:
             return None
+    
+    def _validate_launch_template_for_vpc(self, launch_template_id: str, vpc_id: str) -> bool:
+        """Validate that launch template's security groups are valid for the given VPC."""
+        try:
+            # Get launch template details
+            response = self.ec2_client.describe_launch_template_versions(
+                LaunchTemplateId=launch_template_id,
+                Versions=['$Latest']
+            )
+            
+            if not response.get('LaunchTemplateVersions'):
+                return False
+            
+            template_data = response['LaunchTemplateVersions'][0]['LaunchTemplateData']
+            security_group_ids = template_data.get('SecurityGroupIds', [])
+            
+            if not security_group_ids:
+                return False
+            
+            # Check if all security groups exist and belong to the target VPC
+            for sg_id in security_group_ids:
+                try:
+                    sg_response = self.ec2_client.describe_security_groups(GroupIds=[sg_id])
+                    security_groups = sg_response.get('SecurityGroups', [])
+                    
+                    if not security_groups:
+                        logger.warning(f"Security group {sg_id} not found")
+                        return False
+                    
+                    sg_vpc_id = security_groups[0]['VpcId']
+                    if sg_vpc_id != vpc_id:
+                        logger.warning(f"Security group {sg_id} belongs to VPC {sg_vpc_id}, expected {vpc_id}")
+                        return False
+                        
+                except ClientError as e:
+                    logger.warning(f"Failed to validate security group {sg_id}: {e}")
+                    return False
+            
+            logger.info(f"Launch template {launch_template_id} security groups are valid for VPC {vpc_id}")
+            return True
+            
+        except ClientError as e:
+            logger.warning(f"Failed to validate launch template {launch_template_id}: {e}")
+            return False
     
     def _find_existing_asg(self, name: str) -> Optional[Dict[str, Any]]:
         """Find existing Auto Scaling Group."""
@@ -561,6 +642,82 @@ systemctl restart ecs
                     logger.info(f"Deleted capacity provider: {cp_info['name']}")
                 except ClientError as e:
                     logger.warning(f"Failed to delete capacity provider: {e}")
+            
+            # Delete Auto Scaling Groups (after capacity providers are deleted)
+            asg_name = f"{self.cluster_name}-gpu-asg"
+            try:
+                from files_api.aws.utils import get_asg_client
+                asg_client = get_asg_client()
+                
+                # Check if ASG exists
+                existing_asg = self._get_asg_details(asg_name)
+                if existing_asg:
+                    logger.info(f"Deleting Auto Scaling Group: {asg_name}")
+                    # Force delete ASG (will terminate all instances)
+                    asg_client.delete_auto_scaling_group(
+                        AutoScalingGroupName=asg_name,
+                        ForceDelete=True
+                    )
+                    logger.info(f"✅ Deleted Auto Scaling Group: {asg_name}")
+                else:
+                    logger.info(f"Auto Scaling Group {asg_name} not found")
+            except ClientError as e:
+                logger.warning(f"Failed to delete Auto Scaling Group: {e}")
+            
+            # Delete launch templates (after ASGs are deleted)
+            template_name = f"{self.cluster_name}-gpu-template"
+            try:
+                existing_template = self._find_existing_launch_template(template_name)
+                if existing_template:
+                    self.ec2_client.delete_launch_template(
+                        LaunchTemplateId=existing_template['LaunchTemplateId']
+                    )
+                    logger.info(f"Deleted launch template: {template_name}")
+            except ClientError as e:
+                logger.warning(f"Failed to delete launch template: {e}")
+            
+            # Delete IAM instance profile and role (after launch templates are deleted)
+            role_name = f"{self.cluster_name}-instance-role"
+            profile_name = f"{self.cluster_name}-instance-profile"
+            try:
+                import boto3
+                iam_client = boto3.client('iam', region_name=self.region)
+                
+                # Remove role from instance profile first
+                try:
+                    iam_client.remove_role_from_instance_profile(
+                        InstanceProfileName=profile_name,
+                        RoleName=role_name
+                    )
+                    logger.info(f"Removed role from instance profile: {profile_name}")
+                except ClientError:
+                    pass  # May not exist or already removed
+                
+                # Delete instance profile
+                try:
+                    iam_client.delete_instance_profile(InstanceProfileName=profile_name)
+                    logger.info(f"✅ Deleted IAM instance profile: {profile_name}")
+                except ClientError:
+                    pass  # May not exist
+                
+                # Detach managed policies from role
+                try:
+                    iam_client.detach_role_policy(
+                        RoleName=role_name,
+                        PolicyArn='arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role'
+                    )
+                except ClientError:
+                    pass  # May not be attached
+                
+                # Delete IAM role
+                try:
+                    iam_client.delete_role(RoleName=role_name)
+                    logger.info(f"✅ Deleted IAM role: {role_name}")
+                except ClientError:
+                    pass  # May not exist
+                    
+            except Exception as e:
+                logger.warning(f"Failed to cleanup IAM resources: {e}")
                     
         except Exception as e:
             logger.error(f"Error during cluster cleanup: {e}")

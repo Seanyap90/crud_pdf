@@ -44,7 +44,21 @@ class AWSClientManager:
             'region_name': self.region
         }
         
-        # Add credentials from settings
+        # Check for AWS profile in environment (for SSO)
+        aws_profile = os.environ.get('AWS_PROFILE')
+        if aws_profile and self.mode == 'aws-prod':
+            # Use session with profile for SSO
+            try:
+                session = boto3.Session(profile_name=aws_profile)
+                client = session.client(service_name, region_name=self.region)
+                self._clients[service_name] = client
+                logger.debug(f"Created {service_name} client using profile: {aws_profile}")
+                return client
+            except Exception as e:
+                logger.warning(f"Failed to create client with profile {aws_profile}: {e}")
+                # Fall back to manual credential configuration
+        
+        # Add credentials from settings (fallback or for non-SSO modes)
         if self.settings.aws_access_key_id:
             client_kwargs['aws_access_key_id'] = self.settings.aws_access_key_id
         if self.settings.aws_secret_access_key:
@@ -114,36 +128,112 @@ def get_application_autoscaling_client():
     """Get the Application Auto Scaling client."""
     return AWSClientManager().get_client('application-autoscaling')
 
+def get_lambda_client():
+    """Get the Lambda client."""
+    return AWSClientManager().get_client('lambda')
+
 def get_logs_client():
     """Get the CloudWatch Logs client."""
     return AWSClientManager().get_client('logs')
 
 def create_s3_bucket(bucket_name: str = None) -> bool:
-    """Create an S3 bucket with proper error handling."""
+    """Create an S3 bucket with smart naming and reuse strategy."""
+    import time
+    
     settings = get_settings()
-    bucket_name = bucket_name or settings.s3_bucket_name
+    base_bucket_name = bucket_name or settings.s3_bucket_name.rstrip('-0123456789')
     
     try:
         s3_client = get_s3_client()
         region = settings.aws_region
         
+        # First, look for existing buckets with the base name
+        try:
+            response = s3_client.list_buckets()
+            existing_buckets = []
+            
+            for bucket in response.get('Buckets', []):
+                bucket_name_check = bucket['Name']
+                if bucket_name_check.startswith(base_bucket_name):
+                    # Check if we own this bucket
+                    try:
+                        s3_client.head_bucket(Bucket=bucket_name_check)
+                        existing_buckets.append({
+                            'name': bucket_name_check,
+                            'created': bucket['CreationDate']
+                        })
+                    except Exception:
+                        # We don't own this bucket, skip it
+                        continue
+            
+            if existing_buckets:
+                # Use the latest bucket we own
+                latest_bucket = max(existing_buckets, key=lambda x: x['created'])
+                latest_bucket_name = latest_bucket['name']
+                logger.info(f"Using existing S3 bucket: {latest_bucket_name}")
+                
+                # Update settings to use this bucket name
+                settings.s3_bucket_name = latest_bucket_name
+                return True
+                
+        except Exception as e:
+            logger.warning(f"Could not list existing buckets: {e}")
+        
+        # No existing bucket found, create a new one
+        # For mock environments, use exact bucket name without timestamp
+        if settings.deployment_mode == 'aws-mock':
+            new_bucket_name = base_bucket_name
+        else:
+            # For production, use timestamp to ensure uniqueness
+            timestamp = str(int(time.time()))
+            new_bucket_name = f"{base_bucket_name}-{timestamp}"
+        
         if region == 'us-east-1':
-            s3_client.create_bucket(Bucket=bucket_name)
+            s3_client.create_bucket(Bucket=new_bucket_name)
         else:
             s3_client.create_bucket(
-                Bucket=bucket_name,
+                Bucket=new_bucket_name,
                 CreateBucketConfiguration={'LocationConstraint': region}
             )
-        logger.info(f"Created S3 bucket: {bucket_name}")
+        
+        logger.info(f"Created new S3 bucket: {new_bucket_name}")
+        
+        # Update settings to use this bucket name
+        settings.s3_bucket_name = new_bucket_name
         return True
-    except s3_client.exceptions.BucketAlreadyExists:
-        logger.info(f"S3 bucket already exists: {bucket_name}")
-        return True
-    except s3_client.exceptions.BucketAlreadyOwnedByYou:
-        logger.info(f"S3 bucket already owned by you: {bucket_name}")
-        return True
+        
     except Exception as e:
-        logger.error(f"Error creating S3 bucket {bucket_name}: {str(e)}")
+        # Check for specific S3 exceptions
+        if hasattr(e, 'response') and e.response.get('Error', {}).get('Code') == 'BucketAlreadyExists':
+            logger.warning(f"Bucket name {new_bucket_name if 'new_bucket_name' in locals() else 'unknown'} is taken globally")
+            # Try one more time with a more unique timestamp
+            try:
+                import random
+                unique_suffix = f"{int(time.time())}-{random.randint(1000, 9999)}"
+                fallback_bucket_name = f"{base_bucket_name}-{unique_suffix}"
+                
+                if region == 'us-east-1':
+                    s3_client.create_bucket(Bucket=fallback_bucket_name)
+                else:
+                    s3_client.create_bucket(
+                        Bucket=fallback_bucket_name,
+                        CreateBucketConfiguration={'LocationConstraint': region}
+                    )
+                
+                logger.info(f"Created fallback S3 bucket: {fallback_bucket_name}")
+                settings.s3_bucket_name = fallback_bucket_name
+                return True
+                
+            except Exception as fallback_error:
+                logger.error(f"Failed to create fallback bucket: {fallback_error}")
+                return False
+        elif hasattr(e, 'response') and e.response.get('Error', {}).get('Code') == 'BucketAlreadyOwnedByYou':
+            bucket_to_use = new_bucket_name if 'new_bucket_name' in locals() else base_bucket_name
+            logger.info(f"S3 bucket already owned by you: {bucket_to_use}")
+            settings.s3_bucket_name = bucket_to_use
+            return True
+        
+        logger.error(f"Error creating S3 bucket: {str(e)}")
         return False
 
 def create_sqs_queue(queue_name: str = None, attributes: Optional[Dict[str, str]] = None) -> Optional[str]:

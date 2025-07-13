@@ -5,6 +5,7 @@ Creates reusable task definitions for MongoDB and VLM workers with GPU and EFS s
 import logging
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
+import boto3
 from botocore.exceptions import ClientError
 
 from files_api.aws.utils import get_ecs_client, get_logs_client
@@ -69,13 +70,13 @@ class TaskDefinitionBuilder:
         """Get ECS task execution role ARN."""
         # This should match the role created in ecs_services.py
         role_name = f"{settings.app_name}-ecs-execution-role"
-        return f"arn:aws:iam::{settings.aws_account_id}:role/{role_name}"
+        return f"arn:aws:iam::{settings.account_id}:role/{role_name}"
     
     def get_ecs_task_role_arn(self) -> str:
         """Get ECS task role ARN."""
         # This should match the role created in ecs_services.py
         role_name = f"{settings.app_name}-ecs-task-role"
-        return f"arn:aws:iam::{settings.aws_account_id}:role/{role_name}"
+        return f"arn:aws:iam::{settings.account_id}:role/{role_name}"
     
     def build_mongodb_task_definition(self, efs_config: Dict[str, Any]) -> Dict[str, Any]:
         """Build MongoDB task definition with EFS storage."""
@@ -108,10 +109,18 @@ class TaskDefinitionBuilder:
                         'protocol': 'tcp'
                     }
                 ],
+                # No authentication needed - MongoDB runs without auth by default
                 'environment': [
-                    {'name': 'MONGO_INITDB_ROOT_USERNAME', 'value': 'admin'},
-                    {'name': 'MONGO_INITDB_ROOT_PASSWORD', 'value': settings.mongodb_password},
-                    {'name': 'MONGO_INITDB_DATABASE', 'value': settings.mongodb_database}
+                    # Reduce MongoDB connection logging noise
+                    {'name': 'MONGO_LOG_LEVEL', 'value': 'warn'},
+                ],
+                # Override default mongod command to reduce network verbosity
+                'command': [
+                    'mongod',
+                    '--bind_ip_all',
+                    '--logpath', '/dev/stdout',
+                    '--logappend',
+                    '--quiet'  # Reduces connection noise in logs
                 ],
                 'mountPoints': [
                     {
@@ -189,7 +198,8 @@ class TaskDefinitionBuilder:
                     {'name': 'AWS_DEFAULT_REGION', 'value': settings.aws_region},
                     {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},
                     {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
-                    {'name': 'MODEL_MEMORY_LIMIT', 'value': settings.model_memory_limit},
+                    {'name': 'MODEL_MEMORY_LIMIT', 'value': settings.regional_config[settings.aws_region]['gpu_memory_limit']},
+                    {'name': 'INSTANCE_TYPE', 'value': settings.primary_instance_type},
                     {'name': 'DISABLE_DUPLICATE_LOADING', 'value': str(settings.disable_duplicate_loading).lower()},
                     {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
                     {'name': 'HF_HOME', 'value': '/app/cache'},
@@ -235,8 +245,8 @@ class TaskDefinitionBuilder:
             'family': family,
             'networkMode': 'awsvpc',
             'requiresCompatibilities': ['EC2'],  # GPU requires EC2, not Fargate
-            'cpu': '3584',  # 3.5 vCPU for g4dn.xlarge
-            'memory': '14336',  # 14 GB for g4dn.xlarge (leaving headroom)
+            'cpu': '3584',      # 3.5 vCPU (leave 0.5 for system)
+            'memory': '14336',  # 14 GB (leave 2GB headroom for 16GB total)
             'executionRoleArn': self.get_ecs_execution_role_arn(),
             'taskRoleArn': self.get_ecs_task_role_arn(),
             'volumes': volumes,
@@ -246,6 +256,9 @@ class TaskDefinitionBuilder:
     def register_task_definition(self, task_definition: Dict[str, Any]) -> str:
         """Register task definition with ECS and return ARN."""
         try:
+            # Validate ECR images exist before registering task definition
+            self._validate_ecr_images_in_task_definition(task_definition)
+            
             response = self.ecs_client.register_task_definition(**task_definition)
             task_def_arn = response['taskDefinition']['taskDefinitionArn']
             
@@ -258,11 +271,124 @@ class TaskDefinitionBuilder:
             logger.error(f"Failed to register task definition {task_definition['family']}: {e}")
             raise
     
+    def _validate_ecr_images_in_task_definition(self, task_definition: Dict[str, Any]) -> None:
+        """Validate that all ECR images referenced in task definition exist."""
+        ecr_client = boto3.client('ecr', region_name=self.region)
+        
+        container_definitions = task_definition.get('containerDefinitions', [])
+        for container in container_definitions:
+            image = container.get('image', '')
+            
+            # Check if this is an ECR image (contains ecr in the URL)
+            if '.ecr.' in image and '.amazonaws.com/' in image:
+                # Extract repository name and tag from ECR URI
+                # Format: {account}.dkr.ecr.{region}.amazonaws.com/{repo}:{tag}
+                try:
+                    ecr_parts = image.split('/')[-1]  # Get the repo:tag part
+                    if ':' in ecr_parts:
+                        repo_name, tag = ecr_parts.split(':', 1)
+                    else:
+                        repo_name = ecr_parts
+                        tag = 'latest'
+                    
+                    # Validate the ECR image exists
+                    try:
+                        response = ecr_client.describe_images(
+                            repositoryName=repo_name,
+                            imageIds=[{'imageTag': tag}]
+                        )
+                        if response.get('imageDetails'):
+                            logger.info(f"✅ ECR image validated: {repo_name}:{tag}")
+                        else:
+                            raise Exception(f"ECR image {repo_name}:{tag} not found")
+                            
+                    except ecr_client.exceptions.ImageNotFoundException:
+                        logger.error(f"❌ ECR image not found: {repo_name}:{tag}")
+                        logger.error(f"Container '{container['name']}' references missing ECR image")
+                        raise Exception(f"ECR image {repo_name}:{tag} not found - cannot register task definition")
+                        
+                except Exception as e:
+                    if "ECR image" in str(e):
+                        raise  # Re-raise ECR-specific errors
+                    logger.warning(f"Could not parse ECR image URI: {image} - {e}")
+            else:
+                # Non-ECR image (e.g., Docker Hub), skip validation
+                logger.debug(f"Skipping validation for non-ECR image: {image}")
+    
     def create_mongodb_task_definition(self, efs_config: Dict[str, Any]) -> str:
         """Create and register MongoDB task definition."""
         task_definition = self.build_mongodb_task_definition(efs_config)
         return self.register_task_definition(task_definition)
     
+    def build_model_downloader_task_definition(self, efs_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Build model downloader task definition - one-time task to download models to EFS."""
+        family = f"{settings.app_name}-model-downloader"
+        log_group = self.create_log_group(f"/ecs/{family}")
+        
+        # EFS volume for model storage (read-write for downloader)
+        volumes = [
+            {
+                'name': 'model-storage',
+                'efsVolumeConfiguration': {
+                    'fileSystemId': efs_config['models']['file_system_id'],
+                    'transitEncryption': 'ENABLED',
+                    'authorizationConfig': {
+                        'accessPointId': efs_config['models']['access_point_id']
+                    }
+                }
+            }
+        ]
+        
+        # Model downloader container definition
+        container_definitions = [
+            {
+                'name': 'model-downloader',
+                'image': f"{settings.ecr_registry}/{settings.ecr_repo_name}:latest",
+                'essential': True,
+                'command': ['python3', '/app/files_api/vlm/download_models.py'],
+                'environment': [
+                    {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
+                    {'name': 'HF_HOME', 'value': '/app/cache'},
+                    {'name': 'HF_HUB_OFFLINE', 'value': '0'},  # Allow downloads
+                    {'name': 'HF_HUB_DOWNLOAD_TIMEOUT', 'value': '300'},  # 5 minutes timeout
+                    {'name': 'AWS_DEFAULT_REGION', 'value': settings.aws_region},
+                    {'name': 'LOG_LEVEL', 'value': 'INFO'}
+                ],
+                'mountPoints': [
+                    {
+                        'sourceVolume': 'model-storage',
+                        'containerPath': '/app/cache',
+                        'readOnly': False  # Read-write for downloading
+                    }
+                ],
+                'logConfiguration': {
+                    'logDriver': 'awslogs',
+                    'options': {
+                        'awslogs-group': log_group,
+                        'awslogs-region': self.region,
+                        'awslogs-stream-prefix': 'model-downloader'
+                    }
+                }
+            }
+        ]
+        
+        return {
+            'family': family,
+            'networkMode': 'awsvpc',
+            'requiresCompatibilities': ['FARGATE'],  # Fargate for one-time tasks
+            'cpu': '8192',      # 8 vCPU for downloading large models
+            'memory': '16384',  # 16 GB for downloading large models
+            'executionRoleArn': self.get_ecs_execution_role_arn(),
+            'taskRoleArn': self.get_ecs_task_role_arn(),
+            'volumes': volumes,
+            'containerDefinitions': container_definitions
+        }
+
+    def create_model_downloader_task_definition(self, efs_config: Dict[str, Any]) -> str:
+        """Create and register model downloader task definition."""
+        task_definition = self.build_model_downloader_task_definition(efs_config)
+        return self.register_task_definition(task_definition)
+
     def create_vlm_worker_task_definition(self, efs_config: Dict[str, Any]) -> str:
         """Create and register VLM worker task definition."""
         task_definition = self.build_vlm_worker_task_definition(efs_config)
@@ -306,6 +432,12 @@ def create_mongodb_task_definition(efs_config: Dict[str, Any]) -> str:
     """Create MongoDB task definition."""
     builder = create_task_definition_builder()
     return builder.create_mongodb_task_definition(efs_config)
+
+
+def create_model_downloader_task_definition(efs_config: Dict[str, Any]) -> str:
+    """Create model downloader task definition."""
+    builder = create_task_definition_builder()
+    return builder.create_model_downloader_task_definition(efs_config)
 
 
 def create_vlm_worker_task_definition(efs_config: Dict[str, Any]) -> str:

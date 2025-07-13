@@ -32,6 +32,10 @@ aws-prod:
 aws-prod-cleanup:
 	bash run.sh aws-prod-cleanup
 
+# Soft cleanup AWS production deployment (preserves NAT Gateway, VPC, EFS, ECR)
+aws-prod-cleanup-soft:
+	bash run.sh aws-prod-cleanup-soft
+
 # Show AWS production deployment status
 aws-prod-status:
 	bash run.sh aws-prod-status

@@ -77,11 +77,15 @@ class LambdaLayerManager:
                 self.layers['fastapi'] = existing_layer
                 return existing_layer
             
+            logger.info("No existing layer found, creating new layer...")
+            
             # Create lightweight layer with minimal dependencies
             layer_zip_path = self._create_fastapi_layer_zip()
+            logger.info(f"Created layer ZIP: {layer_zip_path}")
             
             # Upload layer
             with open(layer_zip_path, 'rb') as f:
+                logger.info(f"Publishing layer {layer_name}...")
                 layer_response = self.lambda_client.publish_layer_version(
                     LayerName=layer_name,
                     Description="Lightweight FastAPI layer for Files API and IoT Backend",
@@ -90,10 +94,16 @@ class LambdaLayerManager:
                     CompatibleArchitectures=['x86_64']
                 )
             
+            logger.info(f"Layer response keys: {list(layer_response.keys())}")
+            
+            # Extract layer ARN from layer version ARN (remove :version at the end)
+            layer_version_arn = layer_response['LayerVersionArn']
+            layer_arn = ':'.join(layer_version_arn.split(':')[:-1])
+            
             layer_info = {
                 'layer_name': layer_name,
-                'layer_arn': layer_response['LayerArn'],
-                'layer_version_arn': layer_response['LayerVersionArn'],
+                'layer_arn': layer_arn,
+                'layer_version_arn': layer_version_arn,
                 'version': layer_response['Version']
             }
             
@@ -125,9 +135,9 @@ class LambdaLayerManager:
                 "python-multipart==0.0.6"  # For form uploads
             ]
             
-            # Install packages
+            # Install packages to target directory only
             subprocess.run([
-                "pip", "install", "--target", str(python_dir), "--no-deps"
+                "pip", "install", "--target", str(python_dir), "--no-cache-dir", "--upgrade"
             ] + requirements, check=True)
             
             # Create layer ZIP
@@ -150,10 +160,14 @@ class LambdaLayerManager:
             response = self.lambda_client.list_layer_versions(LayerName=layer_name)
             if response['LayerVersions']:
                 latest_version = response['LayerVersions'][0]
+                # Extract layer ARN from layer version ARN if LayerArn not available
+                layer_version_arn = latest_version['LayerVersionArn']
+                layer_arn = latest_version.get('LayerArn', ':'.join(layer_version_arn.split(':')[:-1]))
+                
                 return {
                     'layer_name': layer_name,
-                    'layer_arn': latest_version['LayerArn'],
-                    'layer_version_arn': latest_version['LayerVersionArn'],
+                    'layer_arn': layer_arn,
+                    'layer_version_arn': layer_version_arn,
                     'version': latest_version['Version']
                 }
             return None
@@ -232,7 +246,7 @@ class LambdaDeployer:
                             'AWS_REGION': self.region,
                             'S3_BUCKET_NAME': settings.s3_bucket_name,
                             'SQS_QUEUE_URL': settings.sqs_queue_url or '',
-                            'MONGODB_URI': f"mongodb://admin:{settings.mongodb_password}@{settings.app_name}-mongodb.{settings.app_name}.local:27017/{settings.mongodb_database}"
+                            'MONGODB_URI': f"mongodb://{settings.app_name}-mongodb.{settings.app_name}.local:27017/crud_pdf"
                         }
                     },
                     Tags={
@@ -342,7 +356,9 @@ class LambdaDeployer:
             package_dir.mkdir()
             
             # Copy Files API source code (excluding heavy dependencies)
-            src_files_api = Path("src/files_api")
+            # Use absolute path to handle different working directories
+            project_root = Path(__file__).parent.parent.parent.parent
+            src_files_api = project_root / "src" / "files_api"
             dest_files_api = package_dir / "files_api"
             
             shutil.copytree(src_files_api, dest_files_api, ignore=shutil.ignore_patterns(
@@ -350,7 +366,7 @@ class LambdaDeployer:
             ))
             
             # Copy database module (for NoSQL adapter)
-            src_database = Path("src/database")
+            src_database = project_root / "src" / "database"
             dest_database = package_dir / "database"
             shutil.copytree(src_database, dest_database, ignore=shutil.ignore_patterns(
                 '*.pyc', '__pycache__'
@@ -538,11 +554,8 @@ def deploy_all_lambdas(region: str = None) -> Dict[str, Any]:
     deployer = LambdaDeployer(region)
     
     try:
-        # Deploy Files API
+        # Deploy Files API only (IoT deployment removed)
         files_api_info = deployer.deploy_files_api_lambda()
-        
-        # Deploy IoT Backend
-        iot_info = deployer.deploy_iot_lambda()
         
         deployment_summary = deployer.get_deployment_summary()
         deployment_summary['status'] = 'success'

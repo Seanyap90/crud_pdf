@@ -107,17 +107,21 @@ class LayerManager:
                     CompatibleArchitectures=[layer_config.architecture]
                 )
             
-            layer_arn = response['LayerArn']
+            layer_version_arn = response['LayerVersionArn']
             version = response['Version']
+            
+            # Extract layer ARN from layer version ARN (remove :version at the end)
+            layer_arn = ':'.join(layer_version_arn.split(':')[:-1])
             
             logger.info(f"Published layer: {layer_config.layer_name}")
             logger.info(f"Layer ARN: {layer_arn}")
+            logger.info(f"Layer Version ARN: {layer_version_arn}")
             logger.info(f"Version: {version}")
             
             return {
                 'layer_arn': layer_arn,
                 'version': version,
-                'layer_version_arn': response['LayerVersionArn'],
+                'layer_version_arn': layer_version_arn,
                 'size': response['Content']['CodeSize']
             }
             

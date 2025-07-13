@@ -37,9 +37,7 @@ class EFSManager:
                 fs_response = self.efs_client.create_file_system(
                     CreationToken=f"{settings.app_name}-mongodb-{hash(fs_name) % 10000}",
                     PerformanceMode='generalPurpose',
-                    StorageClass='Standard',
-                    ThroughputMode='provisioned',
-                    ProvisionedThroughputInMibps=10,  # 10 MiB/s for MongoDB
+                    ThroughputMode='bursting',
                     Tags=[
                         {'Key': 'Name', 'Value': fs_name},
                         {'Key': 'Project', 'Value': settings.app_name},
@@ -49,6 +47,11 @@ class EFSManager:
                 fs_id = fs_response['FileSystemId']
                 self.file_systems['mongodb'] = fs_response
                 logger.info(f"Created MongoDB EFS: {fs_id}")
+                
+                # Wait for file system to become available
+                logger.info("Waiting for MongoDB EFS to become available...")
+                self._wait_for_file_system_available(fs_id)
+                logger.info(f"MongoDB EFS is now available: {fs_id}")
             
             # Create mount target in public subnet (for MongoDB service)
             mount_target = self._create_mount_target(
@@ -84,13 +87,11 @@ class EFSManager:
                 logger.info(f"Using existing models EFS: {fs_id}")
                 self.file_systems['models'] = existing_fs
             else:
-                # Create new file system with higher throughput for model loading
+                # Create new file system with general purpose throughput for model loading
                 fs_response = self.efs_client.create_file_system(
                     CreationToken=f"{settings.app_name}-models-{hash(fs_name) % 10000}",
                     PerformanceMode='generalPurpose',
-                    StorageClass='Standard',
-                    ThroughputMode='provisioned',
-                    ProvisionedThroughputInMibps=50,  # 50 MiB/s for model loading
+                    ThroughputMode='bursting',
                     Tags=[
                         {'Key': 'Name', 'Value': fs_name},
                         {'Key': 'Project', 'Value': settings.app_name},
@@ -100,6 +101,11 @@ class EFSManager:
                 fs_id = fs_response['FileSystemId']
                 self.file_systems['models'] = fs_response
                 logger.info(f"Created models EFS: {fs_id}")
+                
+                # Wait for file system to become available
+                logger.info("Waiting for models EFS to become available...")
+                self._wait_for_file_system_available(fs_id)
+                logger.info(f"Models EFS is now available: {fs_id}")
             
             # Create mount target in private subnet (for VLM workers)
             mount_target = self._create_mount_target(
@@ -128,8 +134,7 @@ class EFSManager:
         for purpose, mount_target_id in self.mount_targets.items():
             try:
                 logger.info(f"Waiting for {purpose} mount target to become available: {mount_target_id}")
-                waiter = self.efs_client.get_waiter('mount_target_available')
-                waiter.wait(MountTargetId=mount_target_id)
+                self._wait_for_mount_target_available(mount_target_id)
                 logger.info(f"{purpose} mount target available: {mount_target_id}")
             except ClientError as e:
                 logger.error(f"Failed waiting for {purpose} mount target: {e}")
@@ -280,10 +285,16 @@ class EFSManager:
             # Wait for mount targets to be deleted before deleting file systems
             for purpose, mount_target_id in self.mount_targets.items():
                 try:
-                    waiter = self.efs_client.get_waiter('mount_target_deleted')
-                    waiter.wait(MountTargetId=mount_target_id)
-                except ClientError:
-                    pass  # May not exist
+                    self._wait_for_efs_resource_state(
+                        resource_type='mount_target',
+                        resource_id=mount_target_id,
+                        target_state='deleted',
+                        describe_method='describe_mount_targets',
+                        id_key='MountTargetId',
+                        collection_key='MountTargets'
+                    )
+                except Exception:
+                    pass  # May not exist or already deleted
             
             # Delete file systems
             for purpose, file_system in self.file_systems.items():
@@ -297,3 +308,108 @@ class EFSManager:
         except Exception as e:
             logger.error(f"Error during EFS cleanup: {e}")
             raise
+    
+    def _wait_for_file_system_available(self, file_system_id: str, max_attempts: int = 20, delay: int = 10) -> None:
+        """Wait for EFS file system to become available (custom implementation since no built-in waiter exists)."""
+        import time
+        
+        for attempt in range(max_attempts):
+            try:
+                response = self.efs_client.describe_file_systems(FileSystemId=file_system_id)
+                file_systems = response.get('FileSystems', [])
+                
+                if not file_systems:
+                    raise ClientError(
+                        error_response={'Error': {'Code': 'FileSystemNotFound'}},
+                        operation_name='DescribeFileSystems'
+                    )
+                
+                lifecycle_state = file_systems[0]['LifeCycleState']
+                logger.debug(f"EFS {file_system_id} lifecycle state: {lifecycle_state} (attempt {attempt + 1}/{max_attempts})")
+                
+                if lifecycle_state == 'available':
+                    return
+                elif lifecycle_state in ['deleting', 'deleted']:
+                    raise ClientError(
+                        error_response={'Error': {'Code': 'FileSystemDeleted'}},
+                        operation_name='DescribeFileSystems'
+                    )
+                elif lifecycle_state == 'creating':
+                    # Continue waiting
+                    if attempt < max_attempts - 1:  # Don't sleep on last attempt
+                        time.sleep(delay)
+                    continue
+                else:
+                    logger.warning(f"Unknown EFS lifecycle state: {lifecycle_state}")
+                    if attempt < max_attempts - 1:
+                        time.sleep(delay)
+                        
+            except ClientError as e:
+                if e.response['Error']['Code'] in ['FileSystemNotFound', 'FileSystemDeleted']:
+                    raise
+                logger.warning(f"Error checking EFS state (attempt {attempt + 1}): {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(delay)
+        
+        # If we get here, we've exceeded max attempts
+        raise Exception(f"EFS file system {file_system_id} did not become available within {max_attempts * delay} seconds")
+    
+    def _wait_for_mount_target_available(self, mount_target_id: str) -> None:
+        """Wait for mount target to become available."""
+        self._wait_for_efs_resource_state(
+            resource_type='mount_target',
+            resource_id=mount_target_id,
+            target_state='available',
+            describe_method='describe_mount_targets',
+            id_key='MountTargetId',
+            collection_key='MountTargets'
+        )
+    
+    def _wait_for_efs_resource_state(self, resource_type: str, resource_id: str, target_state: str,
+                                   describe_method: str, id_key: str, collection_key: str,
+                                   max_attempts: int = 20, delay: int = 10) -> None:
+        """Generic waiter for EFS resources (file systems, mount targets, etc.)."""
+        import time
+        
+        for attempt in range(max_attempts):
+            try:
+                # Dynamically call the appropriate describe method
+                describe_func = getattr(self.efs_client, describe_method)
+                kwargs = {id_key: resource_id}
+                response = describe_func(**kwargs)
+                
+                resources = response.get(collection_key, [])
+                if not resources:
+                    raise ClientError(
+                        error_response={'Error': {'Code': f'{resource_type.title()}NotFound'}},
+                        operation_name=describe_method
+                    )
+                
+                lifecycle_state = resources[0]['LifeCycleState']
+                logger.debug(f"{resource_type} {resource_id} state: {lifecycle_state} (attempt {attempt + 1}/{max_attempts})")
+                
+                if lifecycle_state == target_state:
+                    return
+                elif lifecycle_state in ['deleting', 'deleted']:
+                    raise ClientError(
+                        error_response={'Error': {'Code': f'{resource_type.title()}Deleted'}},
+                        operation_name=describe_method
+                    )
+                elif lifecycle_state == 'creating':
+                    if attempt < max_attempts - 1:
+                        time.sleep(delay)
+                    continue
+                else:
+                    logger.warning(f"Unknown {resource_type} lifecycle state: {lifecycle_state}")
+                    if attempt < max_attempts - 1:
+                        time.sleep(delay)
+                        
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                if 'NotFound' in error_code or 'Deleted' in error_code:
+                    raise
+                logger.warning(f"Error checking {resource_type} state (attempt {attempt + 1}): {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(delay)
+        
+        raise Exception(f"{resource_type} {resource_id} did not reach {target_state} state within {max_attempts * delay} seconds")

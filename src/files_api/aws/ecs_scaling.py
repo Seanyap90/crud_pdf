@@ -28,10 +28,10 @@ class ECSScalingConfig:
     service_name: str
     cluster_name: str
     min_capacity: int = 0  # Scale to zero capability
-    max_capacity: int = 3  # Max 3 GPU instances
+    max_capacity: int = 3  # HARD LIMIT: cost-controlled GPU instances
     target_queue_messages_per_task: int = 1  # 1 message = 1 task
     scale_out_cooldown: int = 300  # 5 minutes
-    scale_in_cooldown: int = 300   # 5 minutes
+    scale_in_cooldown: int = 600   # 10 minutes (longer for cost control)
     evaluation_periods: int = 2    # Consecutive periods before scaling
     datapoint_period: int = 60     # 1 minute periods
 

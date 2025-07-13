@@ -1,6 +1,6 @@
 # src/files_api/settings.py
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 from pydantic import Field, validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     
     # Application Settings
     app_name: str = Field(
-        default="FastAPI App",
+        default="fastapi-app",
         description="Application name"
     )
     
@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     aws_endpoint_url: Optional[str] = Field(
         default=None,
         alias="AWS_ENDPOINT_URL"
+    )
+    
+    aws_account_id: Optional[str] = Field(
+        default=None,
+        alias="AWS_ACCOUNT_ID",
+        description="AWS Account ID (auto-detected if not provided)"
     )
     
     # S3 Configuration
@@ -89,10 +95,16 @@ class Settings(BaseSettings):
         description="IAM instance profile name"
     )
     
+    # GPU Instance Configuration
+    primary_instance_type: str = Field(
+        default="g4dn.xlarge",
+        description="Primary GPU instance type for cost optimization"
+    )
+    
     # Model Configuration
     model_memory_limit: str = Field(
-        default="24GiB",
-        description="Memory limit for models"
+        default="12GiB",
+        description="Memory limit for models (optimized for T4 GPU)"
     )
     
     disable_duplicate_loading: bool = Field(
@@ -161,6 +173,47 @@ class Settings(BaseSettings):
             if mode in ["local-dev", "aws-mock"]:
                 return "mock"
         return v
+    
+    @property
+    def account_id(self) -> str:
+        """Get AWS account ID with auto-detection fallback."""
+        if self.aws_account_id:
+            return self.aws_account_id
+        
+        # Auto-detect account ID for production modes
+        if self.deployment_mode in ["aws-prod"]:
+            try:
+                # Use existing client manager that handles SSO
+                from files_api.aws.utils import AWSClientManager
+                sts_client = AWSClientManager().get_client('sts')
+                return sts_client.get_caller_identity()['Account']
+            except Exception:
+                # Fallback for local development
+                return "123456789012"
+        
+        # Mock account ID for development modes
+        return "123456789012"
+    
+    @property
+    def ecr_registry(self) -> str:
+        """Get ECR registry URL."""
+        return f"{self.account_id}.dkr.ecr.{self.aws_region}.amazonaws.com"
+    
+    @property
+    def regional_config(self) -> Dict[str, Any]:
+        """GPU optimization configuration per region."""
+        return {
+            'us-east-1': {
+                'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge', 'g4dn.large'],
+                'spot_max_price': 0.20,  # Conservative for g4dn.xlarge
+                'gpu_memory_limit': '12GiB'  # Safe for 16GB T4
+            },
+            'us-west-2': {
+                'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge'],
+                'spot_max_price': 0.22,  # Slightly higher for us-west-2
+                'gpu_memory_limit': '12GiB'
+            }
+        }
     
     @validator('sqs_queue_url', always=True)
     def generate_queue_url_if_needed(cls, v, values):
