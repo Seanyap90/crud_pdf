@@ -4,6 +4,7 @@ import json
 import time
 import subprocess
 import argparse
+import boto3
 from typing import Dict, Any, List
 
 # Import settings
@@ -337,9 +338,38 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         logger.info(f"ECS cluster created: {cluster_config['clusterName']}")
         return self.cluster_manager.get_cluster_info()
     
+    def _check_image_exists(self, ecr_client) -> bool:
+        """Check if ECR image already exists."""
+        try:
+            response = ecr_client.describe_images(
+                repositoryName=ECR_REPO_NAME,
+                imageIds=[{'imageTag': 'latest'}]
+            )
+            images = response.get('imageDetails', [])
+            if images:
+                image_size_mb = images[0].get('imageSizeInBytes', 0) / (1024 * 1024)
+                logger.info(f"Found existing image: {image_size_mb:.1f} MB, pushed {images[0].get('imagePushedAt', 'unknown time')}")
+                return True
+            return False
+        except ecr_client.exceptions.ImageNotFoundException:
+            logger.info("No existing image found")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check for existing image: {e}")
+            return False
+    
     @log_operation("ECS services deployment")
     def _deploy_services(self, vpc_config: Dict[str, Any], efs_config: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy MongoDB and VLM worker services."""
+        # Validate ECR image exists before deploying services
+        ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+        if not self._check_image_exists(ecr_client):
+            logger.error(f"Required ECR image {ECR_REPO_NAME}:latest not found. Services cannot be deployed.")
+            logger.error("Please ensure the ECR image is built and pushed before deploying services.")
+            raise Exception(f"ECR image {ECR_REPO_NAME}:latest not found - cannot deploy services")
+        
+        logger.info(f"✅ ECR image {ECR_REPO_NAME}:latest validated successfully")
+        
         # Deploy all services using the orchestration method
         deployment_result = self.service_manager.deploy_all_services(vpc_config, efs_config)
         

@@ -382,21 +382,33 @@ function aws-prod {
     echo "🐳 Phase 4: Deploying services with Docker Compose..."
     
     # Build ECR image if needed
-    echo "🔨 Building and pushing ECR image..."
+    echo "🔨 Checking ECR image availability..."
+    # Load ECR repository name from settings
+    ECR_REPO_NAME=$(python3 -c "from files_api.settings import get_settings; print(get_settings().ecr_repo_name)")
+    
     # Get ECR repository URI
     ECR_URI="${AWS_ACCOUNT_ID:-123456789012}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}"
     
-    # Build and push image (simplified for demo)
-    echo "📦 Building VLM worker image..."
-    cd src/files_api
-    docker build -t "$ECR_URI:latest" -f vlm/Dockerfile ../..
-    
-    # Push to ECR (requires AWS credentials)
-    echo "📤 Pushing to ECR..."
-    aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_URI" 2>/dev/null || {
-        echo "⚠️ ECR push failed - using local image for testing"
-        export ECR_REPO_NAME="crud-pdf-vlm:latest"
-    }
+    # Check if ECR image already exists
+    echo "🔍 Checking if ECR image exists: ${ECR_REPO_NAME}:latest"
+    if aws ecr describe-images --repository-name "$ECR_REPO_NAME" --image-ids imageTag=latest --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1; then
+        echo "✅ ECR image ${ECR_REPO_NAME}:latest already exists, skipping build"
+    else
+        echo "❌ ECR image not found, building and pushing..."
+        
+        # Build and push image
+        echo "📦 Building VLM worker image..."
+        cd src/files_api
+        docker build -t "$ECR_URI:latest" -f vlm/Dockerfile ../..
+        
+        # Push to ECR (requires AWS credentials)
+        echo "📤 Pushing to ECR..."
+        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_URI" 2>/dev/null || {
+            echo "⚠️ ECR push failed - image will be built during deployment"
+            echo "💡 Deployment will fail if ECR image doesn't exist. Please fix AWS credentials and try again."
+        }
+        cd ../..
+    fi
     
     # Phase 4: Deploy ECS services
     echo "🚀 Phase 4: Deploying ECS services (MongoDB + VLM workers)..."
@@ -529,11 +541,17 @@ function aws-prod-cleanup {
     rm -f .env.aws-prod .env.aws-prod.json .deployment_state.json
     echo "✅ Local configuration files removed"
     
-    # Phase 6: Remove ECR images (optional)
-    echo "📦 Phase 6: ECR image cleanup..."
+    # Phase 6: Remove ECR images and repository
+    echo "📦 Phase 6: ECR repository cleanup..."
     if [ -n "$ECR_REPO_NAME" ]; then
-        echo "⚠️ ECR repository '$ECR_REPO_NAME' may contain images"
-        echo "💡 Manual cleanup: aws ecr delete-repository --repository-name $ECR_REPO_NAME --force"
+        echo "🗑️ Deleting ECR repository: $ECR_REPO_NAME"
+        if aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$AWS_DEFAULT_REGION" 2>/dev/null; then
+            echo "✅ ECR repository '$ECR_REPO_NAME' deleted successfully"
+        else
+            echo "⚠️ ECR repository '$ECR_REPO_NAME' not found or already deleted"
+        fi
+    else
+        echo "⚠️ ECR_REPO_NAME not set - skipping ECR cleanup"
     fi
     
     echo ""

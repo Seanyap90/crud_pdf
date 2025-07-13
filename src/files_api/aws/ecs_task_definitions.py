@@ -5,6 +5,7 @@ Creates reusable task definitions for MongoDB and VLM workers with GPU and EFS s
 import logging
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
+import boto3
 from botocore.exceptions import ClientError
 
 from files_api.aws.utils import get_ecs_client, get_logs_client
@@ -109,7 +110,18 @@ class TaskDefinitionBuilder:
                     }
                 ],
                 # No authentication needed - MongoDB runs without auth by default
-                'environment': [],
+                'environment': [
+                    # Reduce MongoDB connection logging noise
+                    {'name': 'MONGO_LOG_LEVEL', 'value': 'warn'},
+                ],
+                # Override default mongod command to reduce network verbosity
+                'command': [
+                    'mongod',
+                    '--bind_ip_all',
+                    '--logpath', '/dev/stdout',
+                    '--logappend',
+                    '--quiet'  # Reduces connection noise in logs
+                ],
                 'mountPoints': [
                     {
                         'sourceVolume': 'mongodb-data',
@@ -244,6 +256,9 @@ class TaskDefinitionBuilder:
     def register_task_definition(self, task_definition: Dict[str, Any]) -> str:
         """Register task definition with ECS and return ARN."""
         try:
+            # Validate ECR images exist before registering task definition
+            self._validate_ecr_images_in_task_definition(task_definition)
+            
             response = self.ecs_client.register_task_definition(**task_definition)
             task_def_arn = response['taskDefinition']['taskDefinitionArn']
             
@@ -255,6 +270,50 @@ class TaskDefinitionBuilder:
         except ClientError as e:
             logger.error(f"Failed to register task definition {task_definition['family']}: {e}")
             raise
+    
+    def _validate_ecr_images_in_task_definition(self, task_definition: Dict[str, Any]) -> None:
+        """Validate that all ECR images referenced in task definition exist."""
+        ecr_client = boto3.client('ecr', region_name=self.region)
+        
+        container_definitions = task_definition.get('containerDefinitions', [])
+        for container in container_definitions:
+            image = container.get('image', '')
+            
+            # Check if this is an ECR image (contains ecr in the URL)
+            if '.ecr.' in image and '.amazonaws.com/' in image:
+                # Extract repository name and tag from ECR URI
+                # Format: {account}.dkr.ecr.{region}.amazonaws.com/{repo}:{tag}
+                try:
+                    ecr_parts = image.split('/')[-1]  # Get the repo:tag part
+                    if ':' in ecr_parts:
+                        repo_name, tag = ecr_parts.split(':', 1)
+                    else:
+                        repo_name = ecr_parts
+                        tag = 'latest'
+                    
+                    # Validate the ECR image exists
+                    try:
+                        response = ecr_client.describe_images(
+                            repositoryName=repo_name,
+                            imageIds=[{'imageTag': tag}]
+                        )
+                        if response.get('imageDetails'):
+                            logger.info(f"✅ ECR image validated: {repo_name}:{tag}")
+                        else:
+                            raise Exception(f"ECR image {repo_name}:{tag} not found")
+                            
+                    except ecr_client.exceptions.ImageNotFoundException:
+                        logger.error(f"❌ ECR image not found: {repo_name}:{tag}")
+                        logger.error(f"Container '{container['name']}' references missing ECR image")
+                        raise Exception(f"ECR image {repo_name}:{tag} not found - cannot register task definition")
+                        
+                except Exception as e:
+                    if "ECR image" in str(e):
+                        raise  # Re-raise ECR-specific errors
+                    logger.warning(f"Could not parse ECR image URI: {image} - {e}")
+            else:
+                # Non-ECR image (e.g., Docker Hub), skip validation
+                logger.debug(f"Skipping validation for non-ECR image: {image}")
     
     def create_mongodb_task_definition(self, efs_config: Dict[str, Any]) -> str:
         """Create and register MongoDB task definition."""

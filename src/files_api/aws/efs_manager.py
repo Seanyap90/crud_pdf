@@ -37,8 +37,7 @@ class EFSManager:
                 fs_response = self.efs_client.create_file_system(
                     CreationToken=f"{settings.app_name}-mongodb-{hash(fs_name) % 10000}",
                     PerformanceMode='generalPurpose',
-                    ThroughputMode='provisioned',
-                    ProvisionedThroughputInMibps=10,  # 10 MiB/s for MongoDB
+                    ThroughputMode='bursting',
                     Tags=[
                         {'Key': 'Name', 'Value': fs_name},
                         {'Key': 'Project', 'Value': settings.app_name},
@@ -88,12 +87,11 @@ class EFSManager:
                 logger.info(f"Using existing models EFS: {fs_id}")
                 self.file_systems['models'] = existing_fs
             else:
-                # Create new file system with higher throughput for model loading
+                # Create new file system with general purpose throughput for model loading
                 fs_response = self.efs_client.create_file_system(
                     CreationToken=f"{settings.app_name}-models-{hash(fs_name) % 10000}",
                     PerformanceMode='generalPurpose',
-                    ThroughputMode='provisioned',
-                    ProvisionedThroughputInMibps=50,  # 50 MiB/s for model loading
+                    ThroughputMode='bursting',
                     Tags=[
                         {'Key': 'Name', 'Value': fs_name},
                         {'Key': 'Project', 'Value': settings.app_name},
