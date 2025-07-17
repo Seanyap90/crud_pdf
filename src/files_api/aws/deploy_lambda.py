@@ -132,6 +132,7 @@ class LambdaLayerManager:
                 "uvicorn==0.24.0",
                 "pydantic==2.4.2",
                 "mangum==0.17.0",
+                "pymongo>=4.0.0",
                 "python-multipart==0.0.6"  # For form uploads
             ]
             
