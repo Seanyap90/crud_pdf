@@ -33,6 +33,22 @@ class ECSClusterManager:
             if existing_cluster:
                 self.cluster_arn = existing_cluster['clusterArn']
                 logger.info(f"Using existing ECS cluster: {self.cluster_name}")
+                
+                # Check if GPU capacity provider exists for this cluster
+                cp_name = f"{self.cluster_name}-gpu-cp"
+                existing_cp = self._find_existing_capacity_provider(cp_name)
+                if not existing_cp:
+                    logger.info(f"GPU capacity provider not found, creating: {cp_name}")
+                    # Create GPU capacity provider for existing cluster
+                    gpu_capacity_provider = self._create_gpu_capacity_provider(
+                        vpc_id, private_subnet_ids
+                    )
+                    # Associate capacity providers with cluster
+                    self._associate_capacity_providers([gpu_capacity_provider['name']])
+                else:
+                    logger.info(f"Using existing GPU capacity provider: {cp_name}")
+                    self.capacity_providers['gpu'] = existing_cp
+                
                 return existing_cluster
             
             # Create cluster
@@ -153,6 +169,7 @@ class ECSClusterManager:
             
             # Create IAM instance profile for ECS instances
             instance_profile_arn = self._create_ecs_instance_profile()
+            instance_profile_name = f"{self.cluster_name}-instance-profile"
             
             # User data script for ECS agent configuration
             user_data = f"""#!/bin/bash
@@ -199,7 +216,7 @@ systemctl restart ecs
                     'ImageId': gpu_ami_id,
                     'InstanceType': settings.primary_instance_type,
                     'IamInstanceProfile': {
-                        'Arn': instance_profile_arn
+                        'Name': instance_profile_name
                     },
                     'SecurityGroupIds': [gpu_sg_id],
                     'UserData': base64.b64encode(user_data.encode('utf-8')).decode('utf-8'),  # Must be Base64 encoded for launch templates
