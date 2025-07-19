@@ -37,3 +37,7 @@ recycling_db_schema_current.mermaid
 roadmap.csv
 tasks.csv
 archive/*
+*.csv
+.agent.local.md
+.agent.md
+tmp_rovodev_comprehensive_refactor_tasks.md
