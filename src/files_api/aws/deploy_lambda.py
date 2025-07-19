@@ -132,6 +132,7 @@ class LambdaLayerManager:
                 "uvicorn==0.24.0",
                 "pydantic==2.4.2",
                 "mangum==0.17.0",
+                "pymongo>=4.0.0",
                 "python-multipart==0.0.6"  # For form uploads
             ]
             
@@ -243,7 +244,6 @@ class LambdaDeployer:
                     Environment={
                         'Variables': {
                             'DEPLOYMENT_MODE': 'aws-prod',
-                            'AWS_REGION': self.region,
                             'S3_BUCKET_NAME': settings.s3_bucket_name,
                             'SQS_QUEUE_URL': settings.sqs_queue_url or '',
                             'MONGODB_URI': f"mongodb://{settings.app_name}-mongodb.{settings.app_name}.local:27017/crud_pdf"
@@ -318,7 +318,6 @@ class LambdaDeployer:
                     Environment={
                         'Variables': {
                             'DEPLOYMENT_MODE': 'aws-prod',
-                            'AWS_REGION': self.region,
                             'DATABASE_PATH': '/tmp/recycling.db'  # SQLite for IoT
                         }
                     },
@@ -392,11 +391,27 @@ lambda_handler = handler
             
             # Create ZIP package
             zip_path = f"/tmp/files-api-{int(time.time())}.zip"
+            file_count = 0
+            
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for file_path in package_dir.rglob('*'):
                     if file_path.is_file():
                         arcname = file_path.relative_to(package_dir)
                         zipf.write(file_path, arcname)
+                        file_count += 1
+            
+            # Validate ZIP file
+            zip_size = os.path.getsize(zip_path)
+            logger.info(f"Created ZIP package: {zip_path} ({zip_size} bytes, {file_count} files)")
+            
+            # Verify ZIP file integrity
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zipf:
+                    zipf.testzip()
+                    logger.info("ZIP file integrity verified")
+            except Exception as e:
+                logger.error(f"ZIP file integrity check failed: {e}")
+                raise
             
             return zip_path
     
