@@ -4,8 +4,8 @@ services:
   # Model Downloader - downloads models to shared volume then exits
   model-downloader:
     build:
-      context: ../..  # Build from project root
-      dockerfile: src/files_api/vlm/Dockerfile
+      context: ../../..  # Build from project root
+      dockerfile: deployment/docker/vlm-worker/Dockerfile
     environment:
       - TRANSFORMERS_CACHE=/app/cache
       - HF_HOME=/app/cache
@@ -13,16 +13,16 @@ services:
       - HF_HUB_DOWNLOAD_TIMEOUT=300  # 5 minutes timeout for downloads
     volumes:
       - model_cache:/app/cache
-    command: python3 /app/files_api/vlm/download_models.py
+    command: python3 -m vlm_workers.models.downloader
     networks:
-      - ecs-network
+      - vlm-network
     restart: "no"  # Run once and exit
 
   # VLM+RAG Worker - simulates ECS worker environment
-  ecs-worker:
+  vlm-worker:
     build:
-      context: ../..  # Build from project root
-      dockerfile: src/files_api/vlm/Dockerfile
+      context: ../../..  # Build from project root
+      dockerfile: deployment/docker/vlm-worker/Dockerfile
     environment:
       # Core deployment configuration
       - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-aws-mock}
@@ -83,7 +83,7 @@ services:
     
     deploy:
       mode: replicated
-      replicas: ${ECS_WORKER_REPLICAS:-1}  # Can be scaled to simulate ECS auto-scaling
+      replicas: ${VLM_WORKER_REPLICAS:-1}  # Can be scaled to simulate auto-scaling
       resources:
         reservations:
           devices:
@@ -102,7 +102,7 @@ services:
     runtime: nvidia
     
     networks:
-      - ecs-network
+      - vlm-network
     
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -125,8 +125,8 @@ volumes:
     driver: local
 
 networks:
-  ecs-network:
+  vlm-network:
     driver: bridge
 
-# To simulate ECS auto-scaling locally, you can scale the worker:
-# docker-compose -f docker-compose.ecs-mock.yml up --scale ecs-worker=3
+# To simulate VLM worker auto-scaling locally, you can scale the worker:
+# docker-compose -f aws-mock.yml up --scale vlm-worker=3

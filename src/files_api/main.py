@@ -9,8 +9,10 @@ from files_api.errors import (
     handle_broad_exceptions,
     handle_pydantic_validation_errors,
 )
-from files_api.routes import ROUTER
-from files_api.settings import Settings
+from files_api.routers.files import router as files_router
+from files_api.routers.invoices import router as invoices_router
+from files_api.routers.health import router as health_router
+from files_api.config.settings import Settings
 from fastapi import Depends
 from database.local import init_db
 
@@ -55,7 +57,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     logger.info("creating db")
     init_db()
 
-    app.include_router(ROUTER)
+    app.include_router(files_router, prefix="/v1", tags=["files"])
+    app.include_router(invoices_router, prefix="/v1", tags=["invoices"])
+    app.include_router(health_router, tags=["health"])
 
     app.add_exception_handler(
         exc_class_or_status_code=pydantic.ValidationError,

@@ -19,7 +19,7 @@ CERT_DAYS=365
 # Function to get settings as environment variables
 function get_settings_as_env {
     python3 -c "
-from files_api.settings import get_settings
+from files_api.config.settings import get_settings
 settings = get_settings()
 print(f'export S3_BUCKET_NAME=\"{settings.s3_bucket_name}\"')
 print(f'export SQS_QUEUE_NAME=\"{settings.sqs_queue_name}\"')
@@ -88,7 +88,7 @@ EOF
     
     # Start worker in background with lazy model loading
     echo "Starting Local Worker (with lazy model loading)"
-    python src/files_api/cli.py worker --mode local-dev --no-preload-models &
+    python -m vlm_workers.cli worker --mode local-dev --no-preload-models &
     
     # Wait a moment to ensure worker has started
     sleep 2
@@ -234,7 +234,7 @@ function aws-mock {
     
     # Deploy ECS infrastructure using deploy_ecs.py
     echo "Creating ECS mock resources (S3, SQS, etc.)..."
-    python -m files_api.aws.deploy_ecs --mode aws-mock
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-mock
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to create ECS mock resources"
@@ -248,21 +248,21 @@ function aws-mock {
     # Build images and start model downloader first
     echo "📥 Step 1: Building Docker images and downloading models..."
     echo "💡 This will run the model-downloader service first, then start the worker"
-    cd "$PROJECT_ROOT/src/files_api"  # Updated path - docker-compose is now here
+    cd "$PROJECT_ROOT"  # Use project root for new docker-compose location
     
     # Use docker-compose up with dependency management
     # The model-downloader will run first and download models to the volume
-    # Then ecs-worker will start automatically once downloader completes successfully
-    docker-compose -f docker-compose.ecs-mock.yml up -d --build
+    # Then vlm-worker will start automatically once downloader completes successfully
+    docker-compose -f deployment/docker/compose/aws-mock.yml up -d --build
     
     # Check if model downloader completed successfully
     echo "🔍 Checking model downloader completion status..."
-    if docker-compose -f docker-compose.ecs-mock.yml ps model-downloader | grep -q "Exit 0"; then
+    if docker-compose -f deployment/docker/compose/aws-mock.yml ps model-downloader | grep -q "Exit 0"; then
         echo "✅ Model downloader completed successfully!"
-    elif docker-compose -f docker-compose.ecs-mock.yml ps model-downloader | grep -q "Exit [1-9]"; then
-        exit_code=$(docker-compose -f docker-compose.ecs-mock.yml ps model-downloader | grep "Exit" | sed 's/.*Exit \([0-9]*\).*/\1/')
+    elif docker-compose -f deployment/docker/compose/aws-mock.yml ps model-downloader | grep -q "Exit [1-9]"; then
+        exit_code=$(docker-compose -f deployment/docker/compose/aws-mock.yml ps model-downloader | grep "Exit" | sed 's/.*Exit \([0-9]*\).*/\1/')
         echo "❌ Model downloader failed with exit code: $exit_code"
-        echo "🔍 Check logs: docker-compose -f docker-compose.ecs-mock.yml logs model-downloader"
+        echo "🔍 Check logs: docker-compose -f deployment/docker/compose/aws-mock.yml logs model-downloader"
         cd "$PROJECT_ROOT"
         kill $MOTO_PID 2>/dev/null
         aws-mock-down
@@ -275,11 +275,11 @@ function aws-mock {
     echo "🔍 Verifying worker container is running..."
     sleep 5  # Give worker a moment to start
     
-    worker_status=$(docker-compose -f docker-compose.ecs-mock.yml ps -q ecs-worker | xargs docker inspect --format='{{.State.Status}}' 2>/dev/null || echo "not_found")
+    worker_status=$(docker-compose -f deployment/docker/compose/aws-mock.yml ps -q vlm-worker | xargs docker inspect --format='{{.State.Status}}' 2>/dev/null || echo "not_found")
     
     if [ "$worker_status" != "running" ]; then
         echo "❌ Worker container failed to start (status: $worker_status)"
-        echo "🔍 Check logs: docker-compose -f docker-compose.ecs-mock.yml logs ecs-worker"
+        echo "🔍 Check logs: docker-compose -f deployment/docker/compose/aws-mock.yml logs vlm-worker"
         cd "$PROJECT_ROOT"
         kill $MOTO_PID 2>/dev/null
         aws-mock-down
@@ -291,7 +291,7 @@ function aws-mock {
     
     # Start autoscaling simulator in background
     echo "Starting ECS Autoscaling Simulator (mock mode)..."
-    python -m files_api.aws.ecs_scale_sim \
+    python -m vlm_workers.scaling.auto_scaler \
         --queue-url "$SQS_QUEUE_URL" \
         --min-instances 0 \
         --max-instances 3 \
@@ -310,8 +310,8 @@ function aws-mock {
     echo "📊 Monitor autoscaling decisions in the logs above"
     echo "📈 Upload PDFs to trigger queue activity and observe scaling behavior"
     echo "🔧 Container logs:"
-    echo "   - Model downloads: docker-compose -f src/files_api/docker-compose.ecs-mock.yml logs model-downloader"
-    echo "   - Worker activity: docker-compose -f src/files_api/docker-compose.ecs-mock.yml logs ecs-worker"
+    echo "   - Model downloads: docker-compose -f deployment/docker/compose/aws-mock.yml logs model-downloader"
+    echo "   - Worker activity: docker-compose -f deployment/docker/compose/aws-mock.yml logs vlm-worker"
     echo "🛑 Press Ctrl+C to shutdown everything"
     
     python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000
@@ -330,10 +330,10 @@ function aws-mock-down {
     pkill -f "eb_autoscaling_simulator" || true
     
     # Stop and remove containers, networks, and volumes
-    cd src/files_api && docker-compose -f docker-compose.ecs-mock.yml down
+    docker-compose -f deployment/docker/compose/aws-mock.yml down
     
     # Force remove any remaining containers
-    docker rm -f model-downloader ecs-worker 2>/dev/null || true
+    docker rm -f model-downloader vlm-worker 2>/dev/null || true
     
     echo "✅ AWS mock environment completely cleaned up"
     echo "💡 All containers, volumes, and networks removed"
@@ -351,7 +351,7 @@ function aws-prod {
     
     # Phase 1: Deploy infrastructure only and export configuration
     echo "🏗️ Phase 1: Deploying ECS infrastructure and exporting configuration..."
-    python -m files_api.aws.deploy_ecs --mode aws-prod --infrastructure-only --export-config .env.aws-prod
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --infrastructure-only --export-config .env.aws-prod
     
     if [ $? -ne 0 ]; then
         echo "❌ Error: Infrastructure deployment failed"
@@ -384,7 +384,7 @@ function aws-prod {
     # Build ECR image if needed
     echo "🔨 Checking ECR image availability..."
     # Load ECR repository name from settings
-    ECR_REPO_NAME=$(python3 -c "from files_api.settings import get_settings; print(get_settings().ecr_repo_name)")
+    ECR_REPO_NAME=$(python3 -c "from files_api.config.settings import get_settings; print(get_settings().ecr_repo_name)")
     
     # Get ECR repository URI
     ECR_URI="${AWS_ACCOUNT_ID:-123456789012}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}"
@@ -412,7 +412,7 @@ function aws-prod {
     
     # Phase 4: Deploy ECS services
     echo "🚀 Phase 4: Deploying ECS services (MongoDB + VLM workers)..."
-    python -m files_api.aws.deploy_ecs --mode aws-prod --deploy-services
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --deploy-services
     
     if [ $? -ne 0 ]; then
         echo "❌ Error: ECS services deployment failed"
@@ -423,8 +423,7 @@ function aws-prod {
     
     # Phase 5: Deploy Lambda functions (Files API)
     echo "📋 Phase 5: Deploying Lambda functions..."
-    cd ../..
-    python -m files_api.aws.deploy_lambda
+    python -m deployment.aws.services.lambda_deploy
     
     if [ $? -ne 0 ]; then
         echo "❌ Error: Lambda deployment failed"
@@ -468,7 +467,7 @@ function aws-prod-cleanup {
         echo "📋 Found deployment state - using LIFO rollback strategy"
         
         # Show current deployment status
-        python -m files_api.aws.deployment_state --action status --state-file .deployment_state.json
+        python -m deployment.aws.state.state_manager --action status --state-file .deployment_state.json
         
         echo ""
         read -p "🤔 Proceed with rollback? (y/N): " -n 1 -r
@@ -476,7 +475,7 @@ function aws-prod-cleanup {
         
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             echo "🔄 Executing LIFO rollback..."
-            python -m files_api.aws.deployment_state --action rollback --state-file .deployment_state.json
+            python -m deployment.aws.state.state_manager --action rollback --state-file .deployment_state.json
             
             if [ $? -eq 0 ]; then
                 echo "✅ State-based rollback completed"
@@ -522,7 +521,7 @@ function aws-prod-cleanup {
     
     # Phase 3: Cleanup AWS ECS infrastructure
     echo "🏗️ Phase 3: Cleaning up ECS infrastructure..."
-    python -m files_api.aws.deploy_ecs --mode aws-prod --cleanup
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --cleanup
     
     if [ $? -eq 0 ]; then
         echo "✅ ECS infrastructure cleaned up"
@@ -532,7 +531,7 @@ function aws-prod-cleanup {
     
     # Phase 4: Cleanup Lambda functions
     echo "📋 Phase 4: Cleaning up Lambda functions..."
-    python -m files_api.aws.deploy_lambda --cleanup 2>/dev/null || {
+    python -m deployment.aws.services.lambda_deploy --cleanup 2>/dev/null || {
         echo "⚠️ Lambda cleanup script not available - manual cleanup may be needed"
     }
     
@@ -684,7 +683,7 @@ function aws-prod-status {
     # Check deployment state
     if [ -f ".deployment_state.json" ]; then
         echo "📋 Deployment State:"
-        python -m files_api.aws.deployment_state --action status --state-file .deployment_state.json
+        python -m deployment.aws.state.state_manager --action status --state-file .deployment_state.json
         echo ""
     else
         echo "📋 No deployment state file found"
