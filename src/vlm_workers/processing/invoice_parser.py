@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from pdf2image import convert_from_path
-from vlm_workers.models.loader_container import ModelManager, model_on_device
+from vlm_workers.models.loader_container import ContainerModelLoader, model_on_device
 from typing import Optional, List, Tuple, Dict, Any
 from transformers import GenerationConfig
 
@@ -123,7 +123,7 @@ class PDFProcessor:
         init_storage(self.mode)
         
         # Share the model manager instance but don't create models yet
-        self.model_manager = ModelManager()
+        self.model_manager = ContainerModelLoader()
         
         # Don't initialize models immediately
         self.rag = None
@@ -611,7 +611,7 @@ class Worker:
                 
                 # Unload VLM to free memory but keep RAG model
                 try:
-                    model_manager = ModelManager()
+                    model_manager = ContainerModelLoader()
                     model_manager.unload_vlm()
                     
                     # Clear VLM reference in processor but keep RAG

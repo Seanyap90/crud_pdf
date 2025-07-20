@@ -2,7 +2,7 @@
 cd /app
 
 # Make sure Python path is set
-export PYTHONPATH=/app:$PYTHONPATH
+export PYTHONPATH=/app/src:$PYTHONPATH
 
 # Function to check if models are available
 check_models_available() {
@@ -57,9 +57,9 @@ wait_for_models() {
 echo "🔧 Initializing storage adapter..."
 python3 -c "
 import sys
-sys.path.append('/app')
+sys.path.append('/app/src')
 
-from src.files_api.storage_adapter import init_storage
+from files_api.storage_adapter import init_storage
 import os
 
 mode = os.environ.get('QUEUE_TYPE', 'aws-mock')
@@ -84,11 +84,11 @@ python3 -c "
 import asyncio
 import sys
 import os
-sys.path.append('/app')
+sys.path.append('/app/src')
 
 # Import worker and queue
 from vlm_workers.processing.invoice_parser import Worker
-from src.files_api.msg_queue import QueueFactory
+from files_api.msg_queue import QueueFactory
 
 print('🎯 Initializing worker components...')
 queue = QueueFactory.get_queue_handler()

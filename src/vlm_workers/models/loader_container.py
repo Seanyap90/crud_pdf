@@ -66,8 +66,8 @@ class ContainerModelLoader:
     def __new__(cls):
         with cls._lock:
             if cls._instance is None:
-                logger.info("Creating new ModelManager instance")
-                cls._instance = super(ModelManager, cls).__new__(cls)
+                logger.info("Creating new ContainerModelLoader instance")
+                cls._instance = super(ContainerModelLoader, cls).__new__(cls)
                 
                 # Initialize containers but don't load models yet
                 cls._instance.rag = None
@@ -210,7 +210,7 @@ class ContainerModelLoader:
                             "vidore/colpali", 
                             local_files_only=True
                         )
-                        ModelManager._is_rag_initialized = True
+                        ContainerModelLoader._is_rag_initialized = True
                         logger.info("RAG model initialized from local files successfully")
                     except Exception as local_error:
                         logger.warning(f"Could not load RAG model from local files: {str(local_error)}")
@@ -220,7 +220,7 @@ class ContainerModelLoader:
                             raise local_error
                         logger.info("Falling back to remote loading...")
                         self.rag = self._load_rag_model()
-                        ModelManager._is_rag_initialized = True
+                        ContainerModelLoader._is_rag_initialized = True
                         logger.info("RAG model initialized successfully from remote")
                 except Exception as e:
                     logger.error(f"Error initializing RAG model: {str(e)}")
@@ -269,7 +269,7 @@ class ContainerModelLoader:
                         self._thread_local.vlm = vlm
                         self._thread_local.processor = processor
                         
-                        ModelManager._is_vlm_initialized = True
+                        ContainerModelLoader._is_vlm_initialized = True
                         logger.info("VLM model initialized from local files successfully")
                     except Exception as local_error:
                         logger.warning(f"Could not load VLM model from local files: {str(local_error)}")
@@ -288,7 +288,7 @@ class ContainerModelLoader:
                         self._thread_local.vlm = vlm
                         self._thread_local.processor = processor
                         
-                        ModelManager._is_vlm_initialized = True
+                        ContainerModelLoader._is_vlm_initialized = True
                         logger.info("VLM model initialized from remote successfully")
                 except Exception as e:
                     logger.error(f"Error initializing VLM: {str(e)}")
@@ -497,9 +497,9 @@ class ContainerModelLoader:
     def check_model_status(self):
         """Check current model status"""
         return {
-            "rag_initialized": ModelManager._is_rag_initialized,
-            "vlm_initialized": ModelManager._is_vlm_initialized,
-            "ready": ModelManager._is_rag_initialized  # Consider ready if RAG is loaded
+            "rag_initialized": ContainerModelLoader._is_rag_initialized,
+            "vlm_initialized": ContainerModelLoader._is_vlm_initialized,
+            "ready": ContainerModelLoader._is_rag_initialized  # Consider ready if RAG is loaded
         }
     
     def unload_vlm(self):
@@ -509,7 +509,7 @@ class ContainerModelLoader:
                 logger.info("Unloading VLM to free memory")
                 self.vlm = None
                 self.processor = None
-                ModelManager._is_vlm_initialized = False
+                ContainerModelLoader._is_vlm_initialized = False
                 
                 # Force garbage collection
                 gc.collect()

@@ -45,7 +45,7 @@ ENV TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX" \
     USE_FLASH_ATTENTION=0 \
     TRANSFORMERS_CACHE="/app/cache" \
     HF_HOME="/app/cache" \
-    PYTHONPATH="/app:${PYTHONPATH}" \
+    PYTHONPATH="/app/src:${PYTHONPATH}" \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     CACHE_IMPLEMENTATION=offloaded \
@@ -75,6 +75,7 @@ RUN touch /app/src/__init__.py \
 # Copy application modules - copy these layers last as they change most frequently
 COPY src/files_api/config/ /app/src/files_api/config/
 COPY src/files_api/settings.py /app/src/files_api/
+COPY src/files_api/msg_queue.py /app/src/files_api/
 COPY src/files_api/adapters/ /app/src/files_api/adapters/
 COPY src/files_api/storage_adapter.py /app/src/files_api/
 COPY src/vlm_workers/ /app/src/vlm_workers/
