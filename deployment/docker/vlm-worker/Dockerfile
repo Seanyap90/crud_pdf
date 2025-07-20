@@ -30,7 +30,7 @@ WORKDIR /deps
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Copy only requirements file for better caching
-COPY src/files_api/vlm/requirements.txt .
+COPY src/vlm_workers/requirements.txt .
 
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
@@ -65,23 +65,22 @@ COPY --from=python-deps /usr/local/bin /usr/local/bin
 
 # Create necessary directories (cache will be mounted as volume)
 RUN mkdir -p /app/cache /app/temp_pdfs /app/.byaldi /app/offload_folder /app/logs \
-    && mkdir -p /app/files_api/vlm
+    && mkdir -p /app/src/files_api /app/src/vlm_workers
 
 # Create package structure
-RUN touch /app/files_api/__init__.py \
-    && touch /app/files_api/vlm/__init__.py
+RUN touch /app/src/__init__.py \
+    && touch /app/src/files_api/__init__.py \
+    && touch /app/src/vlm_workers/__init__.py
 
 # Copy application modules - copy these layers last as they change most frequently
-COPY src/files_api/config.py /app/files_api/
-COPY src/files_api/settings.py /app/files_api/
-COPY src/files_api/msg_queue.py /app/files_api/
-COPY src/files_api/storage_adapter.py /app/files_api/
-COPY src/files_api/vlm/load_models_ecs.py /app/files_api/vlm/
-COPY src/files_api/vlm/worker.py /app/files_api/vlm/
-COPY src/files_api/vlm/download_models.py /app/files_api/vlm/
+COPY src/files_api/config/ /app/src/files_api/config/
+COPY src/files_api/settings.py /app/src/files_api/
+COPY src/files_api/adapters/ /app/src/files_api/adapters/
+COPY src/files_api/storage_adapter.py /app/src/files_api/
+COPY src/vlm_workers/ /app/src/vlm_workers/
 
 # Copy startup script
-COPY src/files_api/vlm/start-worker.sh /app/start-worker.sh
+COPY deployment/docker/vlm-worker/start-worker.sh /app/start-worker.sh
 RUN chmod +x /app/start-worker.sh
 
 # Create a non-root user and set ownership
