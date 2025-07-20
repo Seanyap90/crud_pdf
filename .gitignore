@@ -40,4 +40,8 @@ archive/*
 *.csv
 .agent.local.md
 .agent.md
+.env.local
+.env.aws
+CLAUDE.md
+CLAUDE.local.md
 tmp_rovodev_comprehensive_refactor_tasks.md
