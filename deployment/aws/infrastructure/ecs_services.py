@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 import json
 from botocore.exceptions import ClientError
 
-from files_api.config.settings import get_settings
+from src.files_api.config.settings import get_settings
 from deployment.aws.utils.aws_clients import get_ecs_client, get_logs_client
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ class ECSServiceManager:
         
         try:
             # Create model downloader task definition
-            from files_api.aws.ecs_task_definitions import create_model_downloader_task_definition  # TODO: Move this file
+            from deployment.aws.infrastructure.ecs_task_definitions import create_model_downloader_task_definition
             task_def_arn = create_model_downloader_task_definition(efs_config)
             
             # Check if models already exist (to avoid re-downloading)

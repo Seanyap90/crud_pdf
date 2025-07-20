@@ -59,7 +59,7 @@ python3 -c "
 import sys
 sys.path.append('/app')
 
-from files_api.storage_adapter import init_storage
+from src.files_api.storage_adapter import init_storage
 import os
 
 mode = os.environ.get('QUEUE_TYPE', 'aws-mock')
@@ -87,8 +87,8 @@ import os
 sys.path.append('/app')
 
 # Import worker and queue
-from files_api.vlm.worker import Worker
-from files_api.msg_queue import QueueFactory
+from vlm_workers.processing.invoice_parser import Worker
+from src.files_api.msg_queue import QueueFactory
 
 print('🎯 Initializing worker components...')
 queue = QueueFactory.get_queue_handler()

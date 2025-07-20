@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional, List
 import boto3
 from botocore.exceptions import ClientError
 
-from files_api.config.settings import get_settings
+from src.files_api.config.settings import get_settings
 from deployment.aws.utils.aws_clients import get_ecs_client, get_ec2_client, get_iam_client, get_asg_client
 
 logger = logging.getLogger(__name__)

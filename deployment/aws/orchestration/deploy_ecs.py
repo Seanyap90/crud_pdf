@@ -8,7 +8,7 @@ import boto3
 from typing import Dict, Any, List
 
 # Import settings
-from files_api.config.settings import get_settings
+from src.files_api.config.settings import get_settings
 
 # Import AWS utilities
 from deployment.aws.utils.aws_clients import (

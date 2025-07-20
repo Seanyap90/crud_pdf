@@ -9,7 +9,7 @@ import boto3
 import json
 from typing import Dict, List, Optional, Any, Tuple
 from botocore.exceptions import ClientError, NoCredentialsError
-from files_api.config.settings import get_settings
+from src.files_api.config.settings import get_settings
 
 
 class ResourceValidator:

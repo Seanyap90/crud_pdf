@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
 from deployment.aws.utils.aws_clients import get_lambda_client
-from files_api.config.settings import get_settings
+from src.files_api.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

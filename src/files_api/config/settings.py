@@ -184,7 +184,7 @@ class Settings(BaseSettings):
         if self.deployment_mode in ["aws-prod"]:
             try:
                 # Use existing client manager that handles SSO
-                from files_api.aws.utils import AWSClientManager
+                from deployment.aws.utils.aws_clients import AWSClientManager
                 sts_client = AWSClientManager().get_client('sts')
                 return sts_client.get_caller_identity()['Account']
             except Exception:

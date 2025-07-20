@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Any
 from botocore.exceptions import ClientError, NoCredentialsError
 
 from deployment.aws.utils.aws_clients import get_ecs_client, get_lambda_client, get_efs_client
-from files_api.config.settings import get_settings
+from src.files_api.config.settings import get_settings
 
 
 class StatusMonitor:

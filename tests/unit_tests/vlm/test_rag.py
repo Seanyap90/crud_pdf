@@ -1,5 +1,5 @@
 from files_api.msg_queue import QueueFactory
-from files_api.vlm.rag import Worker
+from vlm_workers.worker import Worker
 from tests.fixtures.rag_fixtures import TEST_QUEUE
 import asyncio
 import pytest

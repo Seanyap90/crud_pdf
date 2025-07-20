@@ -30,7 +30,7 @@ def object_exists_in_s3(bucket_name: str, object_key: str, s3_client: Optional["
     #s3_client = s3_client or boto3.client("s3")
     if s3_client is None:
         # Use the centralized client that respects mock settings
-        from files_api.aws.utils import get_s3_client
+        from deployment.aws.utils.aws_clients import get_s3_client
         s3_client = get_s3_client()
     
     try:
@@ -60,7 +60,7 @@ def fetch_s3_object(
     #s3_client = s3_client or boto3.client("s3")
     if s3_client is None:
         # Use the centralized client that respects mock settings
-        from files_api.aws.utils import get_s3_client
+        from deployment.aws.utils.aws_clients import get_s3_client
         s3_client = get_s3_client()
     response = s3_client.get_object(Bucket=bucket_name, Key=object_key)
     return response
@@ -87,7 +87,7 @@ def fetch_s3_objects_using_page_token(
     #s3_client = s3_client or boto3.client("s3")
     if s3_client is None:
         # Use the centralized client that respects mock settings
-        from files_api.aws.utils import get_s3_client
+        from deployment.aws.utils.aws_clients import get_s3_client
         s3_client = get_s3_client()
 
     response: "ListObjectsV2OutputTypeDef" = s3_client.list_objects_v2(
@@ -122,7 +122,7 @@ def fetch_s3_objects_metadata(
     #s3_client = s3_client or boto3.client("s3")
     if s3_client is None:
         # Use the centralized client that respects mock settings
-        from files_api.aws.utils import get_s3_client
+        from deployment.aws.utils.aws_clients import get_s3_client
         s3_client = get_s3_client()
     response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix or "", MaxKeys=max_keys)
     files: list["ObjectTypeDef"] = response.get("Contents", [])

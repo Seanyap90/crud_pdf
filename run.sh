@@ -797,7 +797,7 @@ function aws-prod-validate {
     echo "========================================="
     
     # Use the resource validator to check prerequisites
-    python -m deployment.aws.monitoring.resource_validator --mode aws-prod
+    python -m deployment.aws.monitoring.resource_validator
     
     if [ $? -eq 0 ]; then
         echo ""

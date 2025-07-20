@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, List
 import boto3
 from botocore.exceptions import ClientError
 
-from files_api.config.settings import get_settings
+from src.files_api.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

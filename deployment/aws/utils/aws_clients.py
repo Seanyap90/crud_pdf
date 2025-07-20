@@ -3,7 +3,7 @@ import os
 import boto3
 import logging
 from typing import Dict, Optional, Any
-from files_api.config.settings import get_settings
+from src.files_api.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
