@@ -40,6 +40,26 @@ aws-prod-cleanup-soft:
 aws-prod-status:
 	bash run.sh aws-prod-status
 
+# Show AWS production cost analysis
+aws-prod-costs:
+	bash run.sh aws-prod-costs
+
+# Scan for orphaned AWS resources
+aws-prod-orphans:
+	bash run.sh aws-prod-orphans
+
+# Validate AWS production deployment prerequisites
+aws-prod-validate:
+	bash run.sh aws-prod-validate
+
+# Validate AWS mock deployment prerequisites
+aws-mock-validate:
+	bash run.sh aws-mock-validate
+
+# Validate local development prerequisites
+local-dev-validate:
+	bash run.sh local-dev-validate
+
 iot-backend-start:
 	bash run.sh iot-backend-start
 

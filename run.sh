@@ -759,6 +759,134 @@ function aws-prod-status {
     echo "   • Full cleanup: make aws-prod-cleanup"
 }
 
+# Show AWS production cost analysis
+function aws-prod-costs {
+    set +e
+    
+    echo "💰 AWS Production Cost Analysis"
+    echo "==============================="
+    
+    # Use the cost optimizer to analyze current deployment costs
+    python -m deployment.aws.cleanup.orphan_detector --estimate-costs
+    
+    echo ""
+    echo "💡 Use 'make aws-prod-cleanup-soft' to reduce costs while preserving infrastructure"
+    echo "🚨 Use 'make aws-prod-cleanup' for full cleanup to minimize costs"
+}
+
+# Scan for orphaned AWS resources
+function aws-prod-orphans {
+    set +e
+    
+    echo "🔍 Scanning for Orphaned AWS Resources"
+    echo "======================================"
+    
+    # Use the orphan detector to scan for untracked resources
+    python -m deployment.aws.cleanup.orphan_detector --scan
+    
+    echo ""
+    echo "💡 Review the report above for resources that may need cleanup"
+    echo "🚨 Use caution when cleaning up orphaned resources"
+}
+
+# Validate AWS production deployment prerequisites
+function aws-prod-validate {
+    set +e
+    
+    echo "✅ Validating AWS Production Prerequisites"
+    echo "========================================="
+    
+    # Use the resource validator to check prerequisites
+    python -m deployment.aws.monitoring.resource_validator --mode aws-prod
+    
+    if [ $? -eq 0 ]; then
+        echo ""
+        echo "✅ All prerequisites validated successfully"
+        echo "🚀 Ready for AWS production deployment"
+    else
+        echo ""
+        echo "❌ Prerequisites validation failed"
+        echo "🔧 Please address the issues above before deployment"
+        exit 1
+    fi
+}
+
+# Validate AWS mock deployment prerequisites
+function aws-mock-validate {
+    set +e
+    
+    echo "✅ Validating AWS Mock Prerequisites"
+    echo "==================================="
+    
+    # Check Docker availability
+    if ! command -v docker &> /dev/null; then
+        echo "❌ Docker is not installed or not in PATH"
+        exit 1
+    fi
+    
+    if ! docker info &> /dev/null; then
+        echo "❌ Docker daemon is not running"
+        exit 1
+    fi
+    
+    # Check Docker Compose availability
+    if ! command -v docker-compose &> /dev/null; then
+        echo "❌ Docker Compose is not installed or not in PATH"
+        exit 1
+    fi
+    
+    # Check moto server health if running
+    if curl -s http://localhost:5000 &> /dev/null; then
+        echo "✅ Moto server is running and accessible"
+    else
+        echo "ℹ️  Moto server not running (will be started during deployment)"
+    fi
+    
+    echo ""
+    echo "✅ All prerequisites validated successfully"
+    echo "🚀 Ready for AWS mock deployment"
+}
+
+# Validate local development prerequisites
+function local-dev-validate {
+    set +e
+    
+    echo "✅ Validating Local Development Prerequisites"
+    echo "============================================"
+    
+    # Check Python and required packages
+    if ! python -c "import torch; import transformers; import byaldi" &> /dev/null; then
+        echo "❌ Required ML packages not installed (torch, transformers, byaldi)"
+        echo "💡 Run 'make install' to install dependencies"
+        exit 1
+    fi
+    
+    # Check GPU availability (optional)
+    if python -c "import torch; print('GPU available:', torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
+        echo "✅ GPU available for model acceleration"
+    else
+        echo "ℹ️  No GPU detected - models will run on CPU (slower)"
+    fi
+    
+    # Check model cache status
+    if [ -d "$HOME/.cache/huggingface" ] && [ "$(ls -A $HOME/.cache/huggingface 2>/dev/null)" ]; then
+        echo "✅ HuggingFace model cache found"
+    else
+        echo "ℹ️  No model cache found - models will be downloaded on first use"
+    fi
+    
+    # Check moto server health if running
+    if curl -s http://localhost:5000 &> /dev/null; then
+        echo "✅ Moto server is running and accessible"
+    else
+        echo "ℹ️  Moto server not running (will be started during deployment)"
+    fi
+    
+    echo ""
+    echo "✅ All prerequisites validated successfully"
+    echo "🚀 Ready for local development"
+}
+
 # New function to install npm dependencies
 function npm-install {
     if [ -d "$FRONTEND_DIR" ]; then
