@@ -27,8 +27,8 @@ router = APIRouter()
 
 @router.post("/invoices/{file_key}/process")
 async def process_invoice(
-    file_key: str = Path(..., description="The key/path of the invoice file to process"),
-    settings: Settings = Depends()
+    request: Request,
+    file_key: str = Path(..., description="The key/path of the invoice file to process")
 ):
     """
     Submit an invoice file for VLM processing.
@@ -41,6 +41,8 @@ async def process_invoice(
         dict: Processing confirmation with task details
     """
     try:
+        settings: Settings = request.app.state.settings
+        
         # Get queue handler
         queue = QueueFactory.get_queue_handler()
         
@@ -78,10 +80,10 @@ async def process_invoice(
 
 @router.get("/invoices", response_model=InvoiceListResponse)
 async def get_invoices(
+    request: Request,
     limit: int = Query(50, ge=1, le=100, description="Maximum number of invoices to return"),
     offset: int = Query(0, ge=0, description="Number of invoices to skip"),
-    status_filter: Optional[str] = Query(None, description="Filter by processing status"),
-    settings: Settings = Depends()
+    status_filter: Optional[str] = Query(None, description="Filter by processing status")
 ):
     """
     Retrieve a list of processed invoices with optional filtering.
@@ -90,12 +92,13 @@ async def get_invoices(
         limit: Maximum number of invoices to return
         offset: Number of invoices to skip for pagination
         status_filter: Optional status filter
-        settings: Application settings
         
     Returns:
         InvoiceListResponse: List of invoices with metadata
     """
     try:
+        settings: Settings = request.app.state.settings
+        
         invoice_service = get_invoice_service()
         
         # Get invoices with filtering
@@ -132,10 +135,76 @@ async def get_invoices(
             detail=f"Failed to retrieve invoices: {str(e)}"
         )
 
+@router.get("/{vendor_id}/invoices", response_model=InvoiceListResponse)
+async def get_vendor_invoices(
+    request: Request,
+    vendor_id: str = Path(..., description="The vendor ID to filter invoices"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum number of invoices to return"),
+    offset: int = Query(0, ge=0, description="Number of invoices to skip"),
+    status_filter: Optional[str] = Query(None, description="Filter by processing status")
+):
+    """
+    Retrieve invoices for a specific vendor.
+    
+    Args:
+        vendor_id: The vendor ID to filter invoices
+        limit: Maximum number of invoices to return
+        offset: Number of invoices to skip for pagination
+        status_filter: Optional status filter
+        
+    Returns:
+        InvoiceListResponse: List of invoices for the vendor
+    """
+    try:
+        settings: Settings = request.app.state.settings
+        
+        invoice_service = get_invoice_service()
+        
+        # Get invoices filtered by vendor_id
+        invoices = invoice_service.get_invoices_by_vendor(
+            vendor_id=vendor_id,
+            limit=limit
+        )
+        
+        # Apply client-side filtering for status_filter and offset if needed
+        if status_filter:
+            invoices = [inv for inv in invoices if inv.get('status') == status_filter]
+        
+        # Apply offset and limit
+        total_invoices = len(invoices)
+        invoices = invoices[offset:offset + limit]
+        
+        # Convert to response format
+        invoice_items = [
+            InvoiceListItem(
+                id=invoice.id,
+                file_key=invoice.file_key,
+                status=invoice.status,
+                created_at=invoice.created_at,
+                processed_at=invoice.processed_at,
+                vendor_name=invoice.vendor_name,
+                total_amount=invoice.total_amount
+            )
+            for invoice in invoices
+        ]
+        
+        return InvoiceListResponse(
+            invoices=invoice_items,
+            total_count=total_invoices,
+            limit=limit,
+            offset=offset
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve vendor invoices: {str(e)}"
+        )
+
 @router.get("/invoices/{invoice_id}", response_model=GetInvoiceResponse)
 async def get_invoice(
-    invoice_id: int = Path(..., description="The ID of the invoice to retrieve"),
-    settings: Settings = Depends()
+    request: Request,
+    invoice_id: int = Path(..., description="The ID of the invoice to retrieve")
 ):
     """
     Retrieve detailed information about a specific invoice.
@@ -148,6 +217,8 @@ async def get_invoice(
         GetInvoiceResponse: Detailed invoice information
     """
     try:
+        settings: Settings = request.app.state.settings
+        
         invoice_service = get_invoice_service()
         
         # Get invoice by ID
@@ -182,9 +253,9 @@ async def get_invoice(
 
 @router.patch("/invoices/{invoice_id}/status")
 async def update_invoice_status(
+    request: Request,
     invoice_id: int = Path(..., description="The ID of the invoice to update"),
-    status_update: InvoiceStatusUpdate = ...,
-    settings: Settings = Depends()
+    status_update: InvoiceStatusUpdate = ...
 ):
     """
     Update the processing status of an invoice.
@@ -198,6 +269,8 @@ async def update_invoice_status(
         dict: Update confirmation
     """
     try:
+        settings: Settings = request.app.state.settings
+        
         invoice_service = get_invoice_service()
         
         # Update invoice status
@@ -229,9 +302,9 @@ async def update_invoice_status(
 
 @router.patch("/invoices/{invoice_id}/result")
 async def update_invoice_result(
+    request: Request,
     invoice_id: int = Path(..., description="The ID of the invoice to update"),
-    result_update: InvoiceResultUpdate = ...,
-    settings: Settings = Depends()
+    result_update: InvoiceResultUpdate = ...
 ):
     """
     Update the processing result of an invoice.
@@ -245,6 +318,8 @@ async def update_invoice_result(
         dict: Update confirmation
     """
     try:
+        settings: Settings = request.app.state.settings
+        
         invoice_service = get_invoice_service()
         
         # Update invoice result

@@ -116,6 +116,13 @@ class ModelManager:
         self._vlm_model = None
         self._vlm_processor = None
         logger.info("Models cleared from memory")
+    
+    def unload_vlm(self):
+        """Unload VLM model to free memory (for backward compatibility)."""
+        self._vlm_model = None
+        self._vlm_processor = None
+        logger.info("VLM model unloaded from memory")
+        return True
 
 # Global instance for backward compatibility
 _model_manager_instance: Optional[ModelManager] = None

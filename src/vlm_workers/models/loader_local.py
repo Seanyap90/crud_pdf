@@ -105,11 +105,23 @@ class LocalModelLoader(ModelLoaderInterface):
             
             logger.info(f"GPU Memory - Total: {total_gb:.1f}GB, Free: {free_gb:.1f}GB")
             
-            # Require at least 4GB free for model loading
-            min_required_gb = 4.0
+            # Get memory requirement from settings (default to 2GB for local dev flexibility)
+            from files_api.config.settings import get_settings
+            settings = get_settings()
+            
+            # Parse memory limit setting (e.g., "12GiB" -> 12.0)
+            memory_limit_str = settings.model_memory_limit.replace('GiB', '').replace('GB', '')
+            try:
+                min_required_gb = float(memory_limit_str) / 4  # Use 1/4 of limit as minimum requirement
+            except:
+                min_required_gb = 2.0  # Fallback to 2GB minimum for local dev
+            
+            logger.info(f"Memory requirement check: Need {min_required_gb:.1f}GB, Available: {free_gb:.1f}GB")
+            
             if free_gb < min_required_gb:
-                logger.error(f"Insufficient GPU memory. Required: {min_required_gb}GB, Available: {free_gb:.1f}GB")
-                return False
+                logger.warning(f"Low GPU memory. Required: {min_required_gb:.1f}GB, Available: {free_gb:.1f}GB")
+                logger.warning("Continuing with model loading - will use quantization and offloading if needed")
+                # Don't return False - let the model loading attempt with optimizations
             
             return True
             
@@ -159,12 +171,26 @@ class LocalModelLoader(ModelLoaderInterface):
             
             model_id = "HuggingFaceTB/SmolVLM-Instruct"
             
-            # Load model and processor with local cache
+            # Use quantization for better memory efficiency (like main branch)
+            from transformers import BitsAndBytesConfig
+            
+            # Create quantization config for memory optimization
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16
+            ) if self.device == "cuda" else None
+            
+            # Load model with optimizations
             model = AutoModelForVision2Seq.from_pretrained(
                 model_id,
                 cache_dir=self.cache_dir,
-                torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
-                device_map=self.device if self.device != "cpu" else None
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                device_map="auto" if self.device != "cpu" else None,
+                quantization_config=bnb_config,
+                max_memory={0: "8GiB"} if self.device == "cuda" else None,
+                low_cpu_mem_usage=True
             )
             
             processor = AutoProcessor.from_pretrained(
