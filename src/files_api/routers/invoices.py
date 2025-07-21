@@ -101,30 +101,34 @@ async def get_invoices(
         
         invoice_service = get_invoice_service()
         
-        # Get invoices with filtering
-        invoices = invoice_service.get_invoices(
+        # Get invoices with filtering using list_invoices
+        invoices, total_count = invoice_service.list_invoices(
             limit=limit,
-            offset=offset,
-            status_filter=status_filter
+            status=status_filter
         )
         
-        # Convert to response format
+        # Apply offset (since list_invoices doesn't support offset)
+        invoices = invoices[offset:offset + limit]
+        
+        # Convert to response format (invoices already have correct NoSQL structure)
         invoice_items = [
             InvoiceListItem(
-                id=invoice.id,
-                file_key=invoice.file_key,
-                status=invoice.status,
-                created_at=invoice.created_at,
-                processed_at=invoice.processed_at,
-                vendor_name=invoice.vendor_name,
-                total_amount=invoice.total_amount
+                invoice_id=invoice.get('invoice_id'),
+                invoice_number=invoice.get('invoice_number', ''),
+                vendor=invoice.get('vendor', {}),
+                category=invoice.get('category'),
+                filename=invoice.get('filename', ''),
+                reported_weight_kg=invoice.get('reported_weight_kg'),
+                total_amount=invoice.get('total_amount'),
+                upload_date=invoice.get('upload_date'),
+                extraction_status=invoice.get('extraction_status', 'pending')
             )
             for invoice in invoices
         ]
         
         return InvoiceListResponse(
             invoices=invoice_items,
-            total_count=len(invoice_items),
+            total_count=total_count,
             limit=limit,
             offset=offset
         )
@@ -160,30 +164,28 @@ async def get_vendor_invoices(
         
         invoice_service = get_invoice_service()
         
-        # Get invoices filtered by vendor_id
-        invoices = invoice_service.get_invoices_by_vendor(
+        # Get invoices filtered by vendor_id using list_invoices
+        invoices, total_invoices = invoice_service.list_invoices(
             vendor_id=vendor_id,
-            limit=limit
+            limit=limit + offset,  # Get more to handle offset
+            status=status_filter
         )
         
-        # Apply client-side filtering for status_filter and offset if needed
-        if status_filter:
-            invoices = [inv for inv in invoices if inv.get('status') == status_filter]
-        
         # Apply offset and limit
-        total_invoices = len(invoices)
         invoices = invoices[offset:offset + limit]
         
-        # Convert to response format
+        # Convert to response format (invoices already have correct NoSQL structure)
         invoice_items = [
             InvoiceListItem(
-                id=invoice.id,
-                file_key=invoice.file_key,
-                status=invoice.status,
-                created_at=invoice.created_at,
-                processed_at=invoice.processed_at,
-                vendor_name=invoice.vendor_name,
-                total_amount=invoice.total_amount
+                invoice_id=invoice.get('invoice_id'),
+                invoice_number=invoice.get('invoice_number', ''),
+                vendor=invoice.get('vendor', {}),
+                category=invoice.get('category'),
+                filename=invoice.get('filename', ''),
+                reported_weight_kg=invoice.get('reported_weight_kg'),
+                total_amount=invoice.get('total_amount'),
+                upload_date=invoice.get('upload_date'),
+                extraction_status=invoice.get('extraction_status', 'pending')
             )
             for invoice in invoices
         ]
@@ -222,7 +224,7 @@ async def get_invoice(
         invoice_service = get_invoice_service()
         
         # Get invoice by ID
-        invoice = invoice_service.get_invoice_by_id(invoice_id)
+        invoice = invoice_service.get_invoice(invoice_id)
         
         if not invoice:
             raise HTTPException(
@@ -231,16 +233,23 @@ async def get_invoice(
             )
         
         return GetInvoiceResponse(
-            id=invoice.id,
-            file_key=invoice.file_key,
-            status=invoice.status,
-            created_at=invoice.created_at,
-            processed_at=invoice.processed_at,
-            vendor_name=invoice.vendor_name,
-            total_amount=invoice.total_amount,
-            line_items=invoice.line_items,
-            raw_text=invoice.raw_text,
-            confidence_score=invoice.confidence_score
+            invoice=InvoiceMetadata(
+                invoice_id=invoice.get('invoice_id'),
+                vendor=invoice.get('vendor', {}),
+                category=invoice.get('category'),
+                invoice_number=invoice.get('invoice_number', ''),
+                invoice_date=invoice.get('invoice_date'),
+                upload_date=invoice.get('upload_date'),
+                filename=invoice.get('filename', ''),
+                filepath=invoice.get('filepath', ''),
+                reported_weight_kg=invoice.get('reported_weight_kg'),
+                unit_price=invoice.get('unit_price'),
+                total_amount=invoice.get('total_amount'),
+                extraction_status=invoice.get('extraction_status', 'pending'),
+                processing_date=invoice.get('processing_date'),
+                completion_date=invoice.get('completion_date'),
+                error_message=invoice.get('error_message')
+            )
         )
         
     except HTTPException:
