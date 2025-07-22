@@ -128,6 +128,8 @@ def _make_api_call(method: str, endpoint: str, data: dict) -> bool:
         # Use requests for synchronous HTTP calls
         if method.upper() == 'PUT':
             response = requests.put(url, json=data, timeout=30.0)
+        elif method.upper() == 'PATCH':
+            response = requests.patch(url, json=data, timeout=30.0)
         else:
             response = requests.post(url, json=data, timeout=30.0)
         
@@ -156,7 +158,7 @@ def update_task_status(task_id: Union[str, int], status: str, timestamp: Optiona
     try:
         # Synchronous API call - no asyncio.run() needed
         success = _make_api_call(
-            method="PUT",
+            method="PATCH",
             endpoint=f"/v1/invoices/{task_id}/status",
             data=data
         )
@@ -192,7 +194,7 @@ def update_task_result(task_id: Union[str, int],
     try:
         # Synchronous API call - no asyncio.run() needed
         success = _make_api_call(
-            method="PUT",
+            method="PATCH",
             endpoint=f"/v1/invoices/{task_id}/result",
             data=data
         )

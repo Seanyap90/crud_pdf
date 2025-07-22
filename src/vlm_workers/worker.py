@@ -444,11 +444,12 @@ class Worker:
                 # Get invoice service for status updates
                 invoice_service = get_invoice_service()
                 
-                # Update status to processing
-                invoice_service.update_invoice_status(
-                    invoice_id=invoice_id,
-                    status='processing'
-                )
+                # Update status to processing via HTTP API
+                from files_api.adapters.storage import update_task_status, init_storage
+                # Initialize storage adapter for HTTP calls
+                init_storage()
+                logger.info(f"Updating invoice {invoice_id} status to 'processing' via HTTP API")
+                update_task_status(invoice_id, 'processing')
                 
                 try:
                     # Process PDF
@@ -466,20 +467,26 @@ class Worker:
                     total_amount, reported_weight = parse_invoice_data(response)
                     
                     if total_amount is not None and reported_weight is not None:
-                        # Update database with successful extraction
-                        invoice_service.update_invoice_status(
-                            invoice_id=invoice_id,
-                            status='completed',
-                            total_amount=total_amount,
-                            reported_weight_kg=reported_weight
+                        # Update database with successful extraction via HTTP API
+                        from files_api.adapters.storage import update_task_result, init_storage
+                        init_storage()
+                        logger.info(f"Updating invoice {invoice_id} result to 'completed' via HTTP API")
+                        update_task_result(
+                            task_id=invoice_id,
+                            result_data={'total_amount': total_amount, 'reported_weight': reported_weight},
+                            status='completed'
                         )
                         logger.info(f"Successfully processed invoice {invoice_id} with total amount: ${total_amount}, weight: {reported_weight}kg")
                         return f"Processed PDF {filepath} with total amount: ${total_amount}, weight: {reported_weight}kg"
                     else:
                         error_msg = f"Could not extract both price and weight from invoice. Response was: {response[:200]}..."
-                        # Update database with failed extraction
-                        invoice_service.update_invoice_status(
-                            invoice_id=invoice_id,
+                        # Update database with failed extraction via HTTP API
+                        from files_api.adapters.storage import update_task_result, init_storage
+                        init_storage()
+                        logger.info(f"Updating invoice {invoice_id} result to 'failed' via HTTP API")
+                        update_task_result(
+                            task_id=invoice_id,
+                            result_data=None,
                             status='failed',
                             error_message=error_msg
                         )
@@ -495,9 +502,13 @@ class Worker:
                     # Log error
                     logger.error(f"Error processing invoice {invoice_id}: {error_message}", exc_info=True)
                     
-                    # Update database
-                    invoice_service.update_invoice_status(
-                        invoice_id=invoice_id,
+                    # Update database via HTTP API
+                    from files_api.adapters.storage import update_task_result, init_storage
+                    init_storage()
+                    logger.info(f"Updating invoice {invoice_id} result to 'failed' via HTTP API (exception)")
+                    update_task_result(
+                        task_id=invoice_id,
+                        result_data=None,
                         status='failed',
                         error_message=str(processing_error)[:500]
                     )

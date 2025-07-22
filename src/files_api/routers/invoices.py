@@ -331,14 +331,13 @@ async def update_invoice_result(
         
         invoice_service = get_invoice_service()
         
-        # Update invoice result
-        updated = invoice_service.update_invoice_result(
+        # Update invoice result using the existing update_invoice_status method
+        updated = invoice_service.update_invoice_status(
             invoice_id=invoice_id,
-            vendor_name=result_update.vendor_name,
+            status=result_update.status,
             total_amount=result_update.total_amount,
-            line_items=result_update.line_items,
-            raw_text=result_update.raw_text,
-            confidence_score=result_update.confidence_score
+            reported_weight_kg=result_update.reported_weight,
+            error_message=result_update.error_message
         )
         
         if not updated:
@@ -350,8 +349,9 @@ async def update_invoice_result(
         return {
             "message": f"Invoice {invoice_id} processing result updated",
             "invoice_id": invoice_id,
-            "vendor_name": result_update.vendor_name,
-            "total_amount": result_update.total_amount
+            "status": result_update.status,
+            "total_amount": result_update.total_amount,
+            "reported_weight": result_update.reported_weight
         }
         
     except HTTPException:
