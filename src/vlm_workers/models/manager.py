@@ -123,6 +123,24 @@ class ModelManager:
         self._vlm_processor = None
         logger.info("VLM model unloaded from memory")
         return True
+    
+    def create_new_rag_model(self) -> Any:
+        """
+        Create a new RAG model instance (for container environments).
+        
+        This bypasses the cached model and creates a fresh instance,
+        which is useful for handling memory cleanup and fresh model loading.
+        
+        Returns:
+            A new RAG model instance
+        """
+        loader = self._get_loader()
+        if hasattr(loader, 'create_new_rag_model'):
+            return loader.create_new_rag_model()
+        else:
+            # Fallback: clear cached model and reload
+            self._rag_model = None
+            return self.get_rag_model()
 
 # Global instance for backward compatibility
 _model_manager_instance: Optional[ModelManager] = None

@@ -175,10 +175,14 @@ class PDFProcessor:
                 gc.collect()
                 torch.cuda.empty_cache()
             
-            # Create a completely new model instance using local cache
-            self.rag = RAGMultiModalModel.from_pretrained(
-                "vidore/colpali"# Force offline mode
-            )
+            # Create a completely new model instance using the model manager
+            # This ensures proper offline/cache handling in container environments
+            if hasattr(self.model_manager, 'create_new_rag_model'):
+                # Use ContainerModelLoader's method that handles offline mode properly
+                self.rag = self.model_manager.create_new_rag_model()
+            else:
+                # Fallback for local development mode
+                self.rag = self.model_manager.get_rag_model()
             
             # Clean old indices first to prevent buildup
             self._clear_old_indices()

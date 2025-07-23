@@ -141,15 +141,26 @@ class LocalModelLoader(ModelLoaderInterface):
             
             # Import here to avoid circular imports
             from byaldi import RAGMultiModalModel
+            from huggingface_hub import snapshot_download
             
-            # Load RAG model with local cache
+            # Use the same approach as ContainerModelLoader for consistency
+            logger.info(f"Downloading model to local cache: {self.cache_dir}")
+            
+            # Download/locate the model in cache
+            local_model_path = snapshot_download(
+                "vidore/colpali",
+                local_files_only=False,  # Allow downloads in local-dev mode
+                cache_dir=self.cache_dir
+            )
+            logger.info(f"Model located at: {local_model_path}")
+            
+            # Load model from local path (same as ContainerModelLoader)
             rag_model = RAGMultiModalModel.from_pretrained(
-                "vidore/colpali-v1.2",
-                cache_dir=self.cache_dir,
+                local_model_path,
                 device=self.device
             )
             
-            logger.info("RAG model loaded successfully")
+            logger.info("RAG model loaded successfully from local cache")
             return rag_model
             
         except Exception as e:
@@ -208,6 +219,16 @@ class LocalModelLoader(ModelLoaderInterface):
         except Exception as e:
             logger.error(f"Failed to load VLM model: {e}")
             raise RuntimeError(f"VLM model loading failed: {e}")
+    
+    def create_new_rag_model(self) -> Any:
+        """
+        Create a new RAG model instance for local development.
+        
+        This method provides the same interface as ContainerModelLoader
+        for consistent usage across deployment modes.
+        """
+        logger.info("Creating new RAG model instance for local development...")
+        return self.load_rag_model()
     
     def get_local_cache_path(self) -> str:
         """Get the local cache directory path."""

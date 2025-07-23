@@ -78,7 +78,6 @@ COPY src/files_api/settings.py /app/src/files_api/
 COPY src/files_api/msg_queue.py /app/src/files_api/
 COPY src/files_api/adapters/ /app/src/files_api/adapters/
 COPY src/files_api/services/ /app/src/files_api/services/
-COPY src/files_api/storage_adapter.py /app/src/files_api/
 COPY src/database/ /app/src/database/
 COPY src/vlm_workers/ /app/src/vlm_workers/
 

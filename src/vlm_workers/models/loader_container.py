@@ -13,6 +13,7 @@ from transformers import (
 )
 from contextlib import contextmanager
 import threading
+from vlm_workers.models.manager import ModelLoaderInterface
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def model_on_device(model, device='cuda'):
             else:
                 gc.collect()
 
-class ContainerModelLoader:
+class ContainerModelLoader(ModelLoaderInterface):
     _instance = None
     _lock = threading.RLock()
     _init_lock = threading.RLock()
@@ -514,4 +515,46 @@ class ContainerModelLoader:
                 gc.collect()
                 torch.cuda.empty_cache()
                 return True
+            return False
+    
+    # ModelLoaderInterface implementation
+    def load_rag_model(self):
+        """Load the RAG (Retrieval Augmented Generation) model."""
+        return self.get_rag_model()
+    
+    def load_vlm_model(self):
+        """Load the VLM (Vision Language Model) and processor."""
+        return self.get_vlm_model()
+    
+    def validate_environment(self) -> bool:
+        """Validate that the environment is ready for model loading."""
+        try:
+            # Check cache directory exists and is accessible
+            cache_dir = self._get_cache_directory()
+            if not os.path.exists(cache_dir):
+                logger.error(f"Cache directory not found: {cache_dir}")
+                return False
+            
+            # Check if we have the required models in cache
+            colpali_path = os.path.join(cache_dir, "models--vidore--colpali")
+            smolvlm_path = os.path.join(cache_dir, "models--HuggingFaceTB--SmolVLM-Instruct")
+            
+            if not os.path.exists(colpali_path):
+                logger.error(f"ColPali model not found in cache: {colpali_path}")
+                return False
+                
+            if not os.path.exists(smolvlm_path):
+                logger.error(f"SmolVLM model not found in cache: {smolvlm_path}")
+                return False
+            
+            # Additional validation for EFS mounts in aws-prod mode
+            deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
+            if deployment_mode == 'aws-prod':
+                return self._validate_efs_mount(cache_dir)
+            
+            logger.info("Environment validation passed")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Environment validation failed: {str(e)}")
             return False

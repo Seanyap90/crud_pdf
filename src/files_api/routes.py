@@ -346,6 +346,15 @@ async def update_invoice_status_internal(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@ROUTER.patch("/v1/invoices/{invoice_id}/status", tags=["Internal"])
+async def patch_invoice_status_internal(
+    invoice_id: int,
+    status_update: InvoiceStatusUpdate
+) -> dict:
+    """Internal endpoint for worker to update invoice status (PATCH method)."""
+    # Use the same logic as PUT method
+    return await update_invoice_status_internal(invoice_id, status_update)
+
 @ROUTER.put("/v1/invoices/{invoice_id}/result", tags=["Internal"])
 async def update_invoice_result_internal(
     invoice_id: int,

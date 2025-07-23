@@ -27,8 +27,14 @@ def init_storage(mode=None):
     
     _MODE = mode or os.environ.get('DEPLOYMENT_MODE', 'local-dev')
     
-    # Get API base URL for HTTP calls
-    _API_BASE_URL = os.environ.get('API_BASE_URL', 'http://host.docker.internal:8000')
+    # Get API base URL for HTTP calls - different defaults for each mode
+    if _MODE == 'local-dev':
+        default_api_url = 'http://localhost:8000'
+    else:
+        # For container modes (aws-mock, aws-prod), use host.docker.internal
+        default_api_url = 'http://host.docker.internal:8000'
+    
+    _API_BASE_URL = os.environ.get('API_BASE_URL', default_api_url)
     
     if _MODE in ['aws-mock', 'aws-prod']:
         # Initialize S3 client

@@ -59,7 +59,7 @@ python3 -c "
 import sys
 sys.path.append('/app/src')
 
-from files_api.storage_adapter import init_storage
+from files_api.adapters.storage import init_storage
 import os
 
 mode = os.environ.get('QUEUE_TYPE', 'aws-mock')
