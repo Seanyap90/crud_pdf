@@ -12,3 +12,4 @@ boto3
 pydantic
 pydantic-settings
 requests
+jsonschema

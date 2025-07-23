@@ -58,7 +58,7 @@ export const StatusList: React.FC = () => {
     
     // Cleanup interval on component unmount
     return () => clearInterval(pollInterval);
-  }, [data]); // Re-run when data changes
+  }, []); // Run only once on component mount
 
   const getStatusColor = (status: string) => {
     switch (status) {

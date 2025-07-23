@@ -33,7 +33,7 @@ from files_api.schemas import (
     InvoiceResultUpdate
 )
 from files_api.settings import Settings
-from files_api.db_layer import get_invoice_service, get_category_service
+from files_api.services.database import get_invoice_service, get_category_service
 from files_api.msg_queue import QueueFactory
 
 ROUTER = APIRouter(tags=["Files"])

@@ -95,6 +95,17 @@ class InvoiceService:
             logger.error(f"Error getting invoice: {e}")
             raise
     
+    def get_invoice_by_filepath(self, filepath: str) -> Optional[Dict[str, Any]]:
+        """Get invoice document by filepath"""
+        try:
+            # Query for invoice with matching filepath
+            query = {"filepath": filepath}
+            results = self.adapter.query_documents('vendor_invoices', query, limit=1)
+            return results[0] if results else None
+        except Exception as e:
+            logger.error(f"Error getting invoice by filepath: {e}")
+            return None
+    
     def update_invoice_status(
         self,
         invoice_id: int,

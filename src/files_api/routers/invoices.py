@@ -46,29 +46,33 @@ async def process_invoice(
         # Get queue handler
         queue = QueueFactory.get_queue_handler()
         
-        # Create task for VLM processing
+        # Find existing invoice record by filepath
+        invoice_service = get_invoice_service()
+        invoice = invoice_service.get_invoice_by_filepath(file_key)
+        
+        if not invoice:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Invoice not found for file path: {file_key}"
+            )
+        
+        # Create task for VLM processing (match main branch format)
         task_data = {
-            "file_key": file_key,
-            "task_type": "invoice_processing",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": "queued"
+            "task_type": "process_invoice",  # Match worker expectation
+            "file_info": {                   # Match worker structure
+                "filepath": file_key,
+                "invoice_id": invoice['invoice_id']
+            }
         }
         
         # Submit task to queue
         task_id = await queue.send_message(task_data)
         
-        # Store initial invoice record
-        invoice_service = get_invoice_service()
-        invoice_service.create_invoice(
-            file_key=file_key,
-            task_id=task_id,
-            status="processing"
-        )
-        
         return {
             "message": f"Invoice processing started for '{file_key}'",
             "task_id": task_id,
             "file_key": file_key,
+            "invoice_id": invoice['invoice_id'],
             "status": "queued"
         }
         

@@ -175,8 +175,10 @@ class PDFProcessor:
                 gc.collect()
                 torch.cuda.empty_cache()
             
-            # Create a completely new model instance
-            self.rag = RAGMultiModalModel.from_pretrained("vidore/colpali")
+            # Create a completely new model instance using local cache
+            self.rag = RAGMultiModalModel.from_pretrained(
+                "vidore/colpali"# Force offline mode
+            )
             
             # Clean old indices first to prevent buildup
             self._clear_old_indices()
@@ -556,7 +558,7 @@ class Worker:
                     result = await self.process_task(task)
                     logger.info(result)
                     consecutive_errors = 0  # Reset error counter on success
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(1.0)  # Reduced from 0.1s to 1s to minimize API calls
             except Exception as e:
                 consecutive_errors += 1
                 logger.error(f"Error in task processing loop: {str(e)}", exc_info=True)

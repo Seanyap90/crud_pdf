@@ -207,8 +207,7 @@ class ContainerModelLoader:
                     try:
                         logger.info("Attempting to load RAG model from local files...")
                         self.rag = RAGMultiModalModel.from_pretrained(
-                            "vidore/colpali", 
-                            local_files_only=True
+                            "vidore/colpali"
                         )
                         ContainerModelLoader._is_rag_initialized = True
                         logger.info("RAG model initialized from local files successfully")
