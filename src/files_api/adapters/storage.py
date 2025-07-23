@@ -27,11 +27,21 @@ def init_storage(mode=None):
     
     _MODE = mode or os.environ.get('DEPLOYMENT_MODE', 'local-dev')
     
-    # Get API base URL for HTTP calls - different defaults for each mode
+    # Get API base URL for HTTP calls - mode-aware with API Gateway support
     if _MODE == 'local-dev':
         default_api_url = 'http://localhost:8000'
+    elif _MODE == 'aws-mock':
+        default_api_url = 'http://host.docker.internal:8000'
+    elif _MODE == 'aws-prod':
+        # For aws-prod, expect API_GATEWAY_URL to be set by deployment
+        api_gateway_url = os.environ.get('API_GATEWAY_URL')
+        if api_gateway_url:
+            default_api_url = api_gateway_url
+            logger.info(f"Using API Gateway URL: {api_gateway_url}")
+        else:
+            logger.warning("API_GATEWAY_URL not set for aws-prod mode, falling back to default")
+            default_api_url = 'https://api-gateway-placeholder.execute-api.us-east-1.amazonaws.com'
     else:
-        # For container modes (aws-mock, aws-prod), use host.docker.internal
         default_api_url = 'http://host.docker.internal:8000'
     
     _API_BASE_URL = os.environ.get('API_BASE_URL', default_api_url)

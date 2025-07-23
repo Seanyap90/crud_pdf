@@ -197,7 +197,20 @@ class TaskDefinitionBuilder:
             logger.error(f"Failed to build MongoDB task definition: {e}")
             raise
     
-    def build_vlm_worker_task_definition(self, efs_config: Dict[str, Any]) -> Dict[str, Any]:
+    def add_api_gateway_environment(self, container_def: dict, api_gateway_url: str) -> dict:
+        """Add API Gateway URL to container environment variables."""
+        if not container_def.get('environment'):
+            container_def['environment'] = []
+
+        # Add or update API Gateway URL environment variables
+        env_vars = {env['name']: env for env in container_def['environment']}
+        env_vars['API_GATEWAY_URL'] = {'name': 'API_GATEWAY_URL', 'value': api_gateway_url}
+        env_vars['API_BASE_URL'] = {'name': 'API_BASE_URL', 'value': api_gateway_url}
+
+        container_def['environment'] = list(env_vars.values())
+        return container_def
+
+    def build_vlm_worker_task_definition(self, efs_config: Dict[str, Any], api_gateway_url: str = None) -> Dict[str, Any]:
         """Build VLM worker task definition with GPU and EFS support. Returns task definition dict.""" 
         family = f"{settings.app_name}-vlm-worker"
         
@@ -265,6 +278,12 @@ class TaskDefinitionBuilder:
                     }
                 ]
             )
+            
+            # Add API Gateway URL if provided (for aws-prod mode)
+            if api_gateway_url:
+                for container in config.container_definitions:
+                    if container['name'] == 'vlm-worker':
+                        container = self.add_api_gateway_environment(container, api_gateway_url)
             
             task_def_dict = config.to_dict()
             logger.info(f"Built VLM worker task definition: {family}")

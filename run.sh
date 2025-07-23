@@ -346,6 +346,28 @@ function aws-prod {
     echo "🚀 Deploying 4-phase Docker Compose ECS architecture to AWS..."
     echo "📦 Architecture: Lambda API + Docker Compose ECS + MongoDB + EFS"
     
+    # Check for API Gateway configuration before deployment
+    echo "🔗 Checking API Gateway configuration..."
+
+    if [ -n "$API_GATEWAY_ID" ]; then
+        echo "✅ API Gateway ID found: $API_GATEWAY_ID"
+        export API_GATEWAY_ID="$API_GATEWAY_ID"
+    elif [ -n "$API_GATEWAY_URL" ]; then
+        echo "✅ API Gateway URL found: $API_GATEWAY_URL"
+        export API_GATEWAY_URL="$API_GATEWAY_URL"
+    else
+        echo "⚠️ No API Gateway configuration found"
+        echo "💡 Set API_GATEWAY_ID or API_GATEWAY_URL environment variable"
+        echo "💡 Example: export API_GATEWAY_ID=abc123def4"
+        echo ""
+        read -p "🤔 Continue deployment without API Gateway? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "❌ Deployment cancelled"
+            exit 1
+        fi
+    fi
+    
     # Set deployment mode
     export DEPLOYMENT_MODE="aws-prod"
     

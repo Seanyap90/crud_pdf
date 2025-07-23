@@ -196,6 +196,74 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         
         logger.info("Initialized ECS infrastructure managers")
     
+    def deploy_with_api_gateway_integration(self, mode: str = 'aws-prod'):
+        """Deploy ECS services with API Gateway integration."""
+        if mode == 'aws-prod':
+            # Get API Gateway URL for aws-prod mode
+            from deployment.aws.utils.api_gateway import get_api_gateway_url_from_env_or_cli
+
+            logger.info("Detecting API Gateway URL for ECS integration...")
+            api_gateway_url = get_api_gateway_url_from_env_or_cli()
+
+            if api_gateway_url:
+                logger.info(f"✅ API Gateway URL detected: {api_gateway_url}")
+            else:
+                logger.warning("⚠️ No API Gateway URL detected - ECS workers may not be able to communicate with API")
+                logger.warning("💡 Set API_GATEWAY_ID or API_GATEWAY_URL environment variable")
+        else:
+            api_gateway_url = None
+
+        # Deploy infrastructure with API Gateway URL
+        return self._deploy_infrastructure_with_api_gateway(api_gateway_url)
+
+    def _deploy_infrastructure_with_api_gateway(self, api_gateway_url: str = None):
+        """Deploy ECS infrastructure with API Gateway URL integration."""
+        try:
+            # NEW: Pre-deployment GPU quota validation
+            if not self.validate_gpu_quota(self.settings.aws_region):
+                raise Exception("Insufficient GPU quota - request increase first")
+            
+            # Phase 1: Core Infrastructure
+            logger.info("Phase 1: Setting up core infrastructure")
+            vpc_config = self._setup_vpc_infrastructure()
+            efs_config = self._setup_efs_storage(vpc_config)
+            
+            # Phase 2: ECS Infrastructure
+            logger.info("Phase 2: Setting up ECS infrastructure")
+            cluster_config = self._setup_ecs_cluster(vpc_config)
+            
+            # Phase 3: Services (with API Gateway URL)
+            logger.info("Phase 3: Deploying services")
+            services_config = self._deploy_services_with_api_gateway(vpc_config, efs_config, api_gateway_url)
+            
+            # Phase 4: Auto-scaling
+            logger.info("Phase 4: Configuring auto-scaling")
+            scaling_config = self._setup_auto_scaling(services_config)
+            
+            # Compile deployment summary
+            self.deployment_config = {
+                "status": "success",
+                "mode": "production",
+                "region": self.settings.aws_region,
+                "cluster_name": ECS_CLUSTER_NAME,
+                "vpc": vpc_config,
+                "efs": efs_config,
+                "cluster": cluster_config,
+                "services": services_config,
+                "scaling": scaling_config,
+                "api_gateway_url": api_gateway_url,
+                "deployment_time": time.time()
+            }
+            
+            logger.info("ECS deployment with API Gateway integration completed successfully")
+            return self.deployment_config
+            
+        except Exception as e:
+            logger.error(f"ECS deployment with API Gateway integration failed: {e}")
+            self.deployment_config["status"] = "failed"
+            self.deployment_config["error"] = str(e)
+            raise
+
     @log_operation("Production ECS deployment")
     def deploy(self) -> Dict[str, Any]:
         """Deploy complete ECS infrastructure."""
@@ -358,6 +426,43 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             logger.warning(f"Could not check for existing image: {e}")
             return False
     
+    def _deploy_services_with_api_gateway(self, vpc_config: Dict[str, Any], efs_config: Dict[str, Any], api_gateway_url: str = None) -> Dict[str, Any]:
+        """Deploy MongoDB and VLM worker services with API Gateway integration."""
+        # Validate ECR image exists before deploying services
+        ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+        if not self._check_image_exists(ecr_client):
+            logger.error(f"Required ECR image {ECR_REPO_NAME}:latest not found. Services cannot be deployed.")
+            logger.error("Please ensure the ECR image is built and pushed before deploying services.")
+            raise Exception(f"ECR image {ECR_REPO_NAME}:latest not found - cannot deploy services")
+        
+        logger.info(f"✅ ECR image {ECR_REPO_NAME}:latest validated successfully")
+        
+        # Deploy services with API Gateway URL integration
+        if api_gateway_url:
+            logger.info(f"🔗 Deploying services with API Gateway integration: {api_gateway_url}")
+            deployment_result = self.service_manager.deploy_all_services_with_api_gateway(vpc_config, efs_config, api_gateway_url)
+        else:
+            logger.info("📦 Deploying services without API Gateway integration")
+            deployment_result = self.service_manager.deploy_all_services(vpc_config, efs_config)
+        
+        if deployment_result['status'] == 'success':
+            services_deployed = deployment_result['services_deployed']
+            logger.info(f"Services deployed successfully:")
+            logger.info(f"  MongoDB: {services_deployed['mongodb']['service_name']}")
+            logger.info(f"  VLM Workers: {services_deployed['vlm_workers']['service_name']}")
+            
+            # Return in expected format for backwards compatibility
+            return {
+                'services': {
+                    'mongodb': services_deployed['mongodb'],
+                    'vlm_workers': services_deployed['vlm_workers']
+                },
+                'deployment_summary': deployment_result
+            }
+        else:
+            logger.error(f"Service deployment failed: {deployment_result.get('error')}")
+            raise Exception(f"ECS services deployment failed: {deployment_result.get('error')}")
+
     @log_operation("ECS services deployment")
     def _deploy_services(self, vpc_config: Dict[str, Any], efs_config: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy MongoDB and VLM worker services."""
