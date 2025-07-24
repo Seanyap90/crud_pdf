@@ -17,6 +17,13 @@ class BaseQueue:
 
     async def get_task(self):
         raise NotImplementedError
+    
+    async def send_message(self, task):
+        """Alias for add_task to maintain compatibility with router code"""
+        result = await self.add_task(task)
+        # Return a task ID for compatibility
+        import time
+        return str(int(time.time() * 1000)) if result else None
 
 class LocalQueue(BaseQueue):
     """Handles local queue using file system for IPC"""
