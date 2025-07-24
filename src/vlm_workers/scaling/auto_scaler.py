@@ -4,6 +4,7 @@ Handles ECS task creation, termination, and scale-to-zero lifecycle for VLM work
 """
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -350,6 +351,144 @@ class AutoScalingManager:
             return "scale_in"
         else:
             return "no_change"
+    
+    def simulate_scaling(self, desired_count: int) -> bool:
+        """
+        Simulate ECS auto-scaling for aws-mock mode.
+        
+        In aws-mock mode, this simulates scaling by using docker-compose scale command.
+        In aws-prod mode, this would trigger actual ECS service scaling.
+        
+        Args:
+            desired_count: Target number of worker replicas
+            
+        Returns:
+            True if scaling simulation succeeded, False otherwise
+        """
+        try:
+            deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'local-dev')
+            
+            if deployment_mode == 'aws-mock':
+                return self._simulate_docker_compose_scaling(desired_count)
+            elif deployment_mode == 'aws-prod':
+                return self._simulate_ecs_service_scaling(desired_count)
+            else:
+                logger.warning(f"Scaling simulation not supported in {deployment_mode} mode")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Scaling simulation failed: {e}")
+            return False
+    
+    def _simulate_docker_compose_scaling(self, desired_count: int) -> bool:
+        """Simulate scaling using docker-compose for aws-mock mode."""
+        try:
+            import subprocess
+            
+            compose_file = "deployment/docker/compose/aws-mock.yml"
+            
+            # Check if compose file exists
+            if not os.path.exists(compose_file):
+                logger.error(f"Docker compose file not found: {compose_file}")
+                return False
+            
+            logger.info(f"Simulating docker-compose scaling to {desired_count} replicas")
+            
+            # Use docker-compose to scale the vlm-worker service
+            cmd = [
+                "docker-compose", 
+                "-f", compose_file, 
+                "up", "--scale", f"vlm-worker={desired_count}", 
+                "-d"
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                logger.info(f"✅ Successfully scaled vlm-worker to {desired_count} replicas")
+                
+                # Update internal tracking
+                self._update_scaling_metrics(desired_count)
+                return True
+            else:
+                logger.error(f"Docker-compose scaling failed: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.error("Docker-compose scaling timed out")
+            return False
+        except Exception as e:
+            logger.error(f"Docker-compose scaling error: {e}")
+            return False
+    
+    def _simulate_ecs_service_scaling(self, desired_count: int) -> bool:
+        """Simulate ECS service scaling for aws-prod mode."""
+        try:
+            if not self.service_name:
+                logger.error("Service name not configured for ECS scaling")
+                return False
+            
+            logger.info(f"Simulating ECS service scaling to {desired_count} tasks")
+            
+            # Update ECS service desired count
+            response = self.ecs_client.update_service(
+                cluster=self.cluster_name,
+                service=self.service_name,
+                desiredCount=desired_count
+            )
+            
+            if response['service']['desiredCount'] == desired_count:
+                logger.info(f"✅ Successfully updated ECS service desired count to {desired_count}")
+                
+                # Update internal tracking
+                self._update_scaling_metrics(desired_count)
+                return True
+            else:
+                logger.error("ECS service scaling failed - desired count not updated")
+                return False
+                
+        except Exception as e:
+            logger.error(f"ECS service scaling error: {e}")
+            return False
+    
+    def _update_scaling_metrics(self, desired_count: int) -> None:
+        """Update internal scaling metrics after scaling operation."""
+        scaling_event = {
+            'timestamp': datetime.now(),
+            'desired_count': desired_count,
+            'cluster': self.cluster_name,
+            'service': self.service_name or 'docker-compose'
+        }
+        
+        # Store scaling event for metrics
+        if not hasattr(self, 'scaling_history'):
+            self.scaling_history = []
+        
+        self.scaling_history.append(scaling_event)
+        
+        # Keep only recent history (last 24 hours)
+        cutoff_time = datetime.now() - timedelta(hours=24)
+        self.scaling_history = [
+            event for event in self.scaling_history 
+            if event['timestamp'] > cutoff_time
+        ]
+        
+        logger.debug(f"Updated scaling metrics: {scaling_event}")
+    
+    def get_scaling_history(self) -> List[Dict[str, Any]]:
+        """Get recent scaling history."""
+        if not hasattr(self, 'scaling_history'):
+            return []
+        
+        return [
+            {
+                'timestamp': event['timestamp'].isoformat(),
+                'desired_count': event['desired_count'],
+                'cluster': event['cluster'],
+                'service': event['service']
+            }
+            for event in self.scaling_history
+        ]
 
 
 def create_ecs_task_manager(cluster_name: str = None, service_name: str = None) -> AutoScalingManager:
@@ -372,43 +511,227 @@ def get_task_manager() -> AutoScalingManager:
     return _task_manager_instance
 
 
+class AutoScalingSimulator:
+    """Simulates ECS auto-scaling behavior for aws-mock mode."""
+    
+    def __init__(self, queue_url: str, min_instances: int = 0, max_instances: int = 3,
+                 scale_up_threshold: int = 1, scale_down_threshold: int = 0,
+                 cooldown: int = 300, evaluation_interval: int = 15, evaluation_periods: int = 1,
+                 simulation_only: bool = True):
+        self.queue_url = queue_url
+        self.min_instances = min_instances
+        self.max_instances = max_instances
+        self.scale_up_threshold = scale_up_threshold
+        self.scale_down_threshold = scale_down_threshold
+        self.cooldown = cooldown
+        self.evaluation_interval = evaluation_interval
+        self.evaluation_periods = evaluation_periods
+        self.simulation_only = simulation_only
+        
+        self.task_manager = get_task_manager()
+        self.last_scaling_action = None
+        self.running = False
+        self.current_replicas = min_instances  # Start with minimum replicas
+        
+        logger.info(f"AutoScaling Simulator initialized:")
+        logger.info(f"  Queue URL: {queue_url}")
+        logger.info(f"  Instance range: {min_instances}-{max_instances}")
+        logger.info(f"  Thresholds: scale_up={scale_up_threshold}, scale_down={scale_down_threshold}")
+        logger.info(f"  Cooldown: {cooldown}s, Evaluation: every {evaluation_interval}s")
+        logger.info(f"  Mode: {'SIMULATION ONLY' if simulation_only else 'REAL SCALING'}")
+    
+    def start_simulation(self):
+        """Start the auto-scaling simulation loop."""
+        self.running = True
+        logger.info("🚀 Starting auto-scaling simulation...")
+        
+        try:
+            while self.running:
+                self._evaluate_and_scale()
+                time.sleep(self.evaluation_interval)
+        except KeyboardInterrupt:
+            logger.info("🛑 Auto-scaling simulation stopped by user")
+        except Exception as e:
+            logger.error(f"❌ Auto-scaling simulation error: {e}")
+        finally:
+            self.running = False
+    
+    def stop_simulation(self):
+        """Stop the auto-scaling simulation."""
+        self.running = False
+        logger.info("🛑 Auto-scaling simulation stopping...")
+    
+    def _evaluate_and_scale(self):
+        """Evaluate queue metrics and make scaling decisions."""
+        try:
+            # Check queue status
+            scale_info = self.task_manager.check_queue_for_scale_decision(self.queue_url)
+            total_messages = scale_info.get('total_messages', 0)
+            
+            # Use simulated replica count if in simulation mode
+            if self.simulation_only:
+                running_tasks = self.current_replicas
+            else:
+                running_tasks = scale_info.get('running_tasks', 1)
+            
+            # Log queue metrics with more detail
+            if total_messages > 0:
+                logger.info(f"🔥 QUEUE ACTIVITY: {total_messages} messages detected, {running_tasks} running tasks")
+            else:
+                logger.info(f"📊 Queue metrics: {total_messages} messages, {running_tasks} running tasks")
+            
+            # Check cooldown period - but allow immediate scale-up from zero
+            if self._in_cooldown() and not (running_tasks == 0 and total_messages > 0):
+                remaining = self.cooldown - (datetime.now() - self.last_scaling_action).total_seconds()
+                logger.info(f"⏳ In cooldown period, skipping scaling evaluation ({remaining:.1f}s remaining)")
+                return
+            
+            # Make scaling decision
+            if total_messages >= self.scale_up_threshold and running_tasks < self.max_instances:
+                new_count = min(running_tasks + 1, self.max_instances)
+                self._scale_to(new_count, f"Scale up: {total_messages} messages >= {self.scale_up_threshold} threshold")
+            elif total_messages <= self.scale_down_threshold and running_tasks > self.min_instances:
+                new_count = max(running_tasks - 1, self.min_instances)
+                self._scale_to(new_count, f"Scale down: {total_messages} messages <= {self.scale_down_threshold} threshold")
+            else:
+                logger.info(f"📊 No scaling needed: {total_messages} messages, {running_tasks} tasks")
+                
+        except Exception as e:
+            logger.error(f"❌ Scaling evaluation error: {e}")
+    
+    def _scale_to(self, desired_count: int, reason: str):
+        """Execute scaling action."""
+        logger.info(f"🔧 Scaling decision: {reason} -> {desired_count} replicas")
+        
+        if self.simulation_only:
+            # Simulation only - just log what would happen
+            if desired_count > self.current_replicas:
+                logger.info(f"🚀 SIMULATION: Would SCALE UP from {self.current_replicas} to {desired_count} replicas")
+            elif desired_count < self.current_replicas:
+                logger.info(f"🔽 SIMULATION: Would SCALE DOWN from {self.current_replicas} to {desired_count} replicas")
+            else:
+                logger.info(f"🎭 SIMULATION: Would maintain {desired_count} replicas")
+            
+            self.current_replicas = desired_count
+            self.last_scaling_action = datetime.now()
+            self._update_scaling_metrics(desired_count)
+            logger.info(f"✅ Scaling simulation completed: {desired_count} replicas")
+        else:
+            # Real scaling
+            success = self.task_manager.simulate_scaling(desired_count)
+            if success:
+                self.current_replicas = desired_count
+                self.last_scaling_action = datetime.now()
+                logger.info(f"✅ Successfully scaled to {desired_count} replicas")
+            else:
+                logger.error(f"❌ Failed to scale to {desired_count} replicas")
+    
+    def _in_cooldown(self) -> bool:
+        """Check if we're in cooldown period after last scaling action."""
+        if not self.last_scaling_action:
+            return False
+        
+        time_since_last_action = (datetime.now() - self.last_scaling_action).total_seconds()
+        in_cooldown = time_since_last_action < self.cooldown
+        
+        if in_cooldown:
+            remaining = self.cooldown - time_since_last_action
+            logger.debug(f"⏳ In cooldown: {remaining:.1f}s remaining")
+        
+        return in_cooldown
+
+
 if __name__ == "__main__":
-    # Example usage and testing
-    import os
+    import argparse
+    import signal
+    import sys
+    
+    def signal_handler(sig, frame):
+        print("\n🛑 Received shutdown signal, stopping auto-scaling simulation...")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    parser = argparse.ArgumentParser(description="ECS Auto-scaling Simulator")
+    parser.add_argument("--queue-url", required=True, help="SQS queue URL to monitor")
+    parser.add_argument("--min-instances", type=int, default=0, help="Minimum number of instances")
+    parser.add_argument("--max-instances", type=int, default=3, help="Maximum number of instances")
+    parser.add_argument("--scale-up-threshold", type=int, default=1, help="Messages threshold to scale up")
+    parser.add_argument("--scale-down-threshold", type=int, default=0, help="Messages threshold to scale down")
+    parser.add_argument("--cooldown", type=int, default=300, help="Cooldown period in seconds")
+    parser.add_argument("--evaluation-interval", type=int, default=15, help="Evaluation interval in seconds")
+    parser.add_argument("--evaluation-periods", type=int, default=1, help="Number of evaluation periods")
+    parser.add_argument("--test-mode", action="store_true", help="Run in test mode (single evaluation)")
+    parser.add_argument("--real-scaling", action="store_true", help="Enable real scaling (default is simulation only)")
+    parser.add_argument("--simulation-only", action="store_true", default=True, help="Simulation only mode (default)")
+    
+    args = parser.parse_args()
     
     # Set up logging
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     
-    # Create task manager
-    manager = create_ecs_task_manager("test-cluster", "test-service")
-    
-    # Test registration
-    print("Testing task registration...")
-    task_info = manager.register_current_task()
-    if task_info:
-        print(f"Registered task: {task_info.task_id}")
-    else:
-        print("Not running in ECS - creating mock task")
-        mock_arn = "arn:aws:ecs:us-east-1:123456789012:task/test-cluster/abcd1234"
-        os.environ['ECS_TASK_ARN'] = mock_arn
+    if args.test_mode:
+        # Test mode - run example usage and testing
+        print("🧪 Running auto-scaler in test mode...")
+        
+        # Create task manager
+        manager = create_ecs_task_manager("test-cluster", "test-service")
+        
+        # Test registration
+        print("Testing task registration...")
         task_info = manager.register_current_task()
-        print(f"Mock task registered: {task_info.task_id}")
-    
-    # Test health monitoring
-    print("\nTesting health monitoring...")
-    health = manager.monitor_task_health()
-    print(f"Task health: {health}")
-    
-    # Test statistics
-    print("\nTesting statistics...")
-    stats = manager.get_task_statistics()
-    print(f"Task statistics: {stats}")
-    
-    # Test completion
-    print("\nTesting task completion...")
-    success = manager.signal_task_completion(success=True, reason="Test completed")
-    print(f"Task completion signaled: {success}")
-    
-    # Final statistics
-    final_stats = manager.get_task_statistics()
-    print(f"Final statistics: {final_stats}")
+        if task_info:
+            print(f"Registered task: {task_info.task_id}")
+        else:
+            print("Not running in ECS - creating mock task")
+            mock_arn = "arn:aws:ecs:us-east-1:123456789012:task/test-cluster/abcd1234"
+            os.environ['ECS_TASK_ARN'] = mock_arn
+            task_info = manager.register_current_task()
+            print(f"Mock task registered: {task_info.task_id}")
+        
+        # Test health monitoring
+        print("\nTesting health monitoring...")
+        health = manager.monitor_task_health()
+        print(f"Task health: {health}")
+        
+        # Test statistics
+        print("\nTesting statistics...")
+        stats = manager.get_task_statistics()
+        print(f"Task statistics: {stats}")
+        
+        # Test scaling simulation
+        print("\nTesting scaling simulation...")
+        result = manager.simulate_scaling(desired_count=2)
+        print(f"Scaling simulation result: {result}")
+        
+        # Test completion
+        print("\nTesting task completion...")
+        success = manager.signal_task_completion(success=True, reason="Test completed")
+        print(f"Task completion signaled: {success}")
+        
+        # Final statistics
+        final_stats = manager.get_task_statistics()
+        print(f"Final statistics: {final_stats}")
+        
+    else:
+        # Production mode - run auto-scaling simulator
+        # Default to simulation-only unless --real-scaling is specified
+        simulation_only = not args.real_scaling
+        
+        simulator = AutoScalingSimulator(
+            queue_url=args.queue_url,
+            min_instances=args.min_instances,
+            max_instances=args.max_instances,
+            scale_up_threshold=args.scale_up_threshold,
+            scale_down_threshold=args.scale_down_threshold,
+            cooldown=args.cooldown,
+            evaluation_interval=args.evaluation_interval,
+            evaluation_periods=args.evaluation_periods,
+            simulation_only=simulation_only
+        )
+        
+        simulator.start_simulation()

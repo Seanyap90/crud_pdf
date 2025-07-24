@@ -289,16 +289,17 @@ function aws-mock {
     echo "✅ ECS Worker container is running and ready for inference!"
     cd "$PROJECT_ROOT"
     
-    # Start autoscaling simulator in background
-    echo "Starting ECS Autoscaling Simulator (mock mode)..."
+    # Start autoscaling simulator in background (simulation-only mode)
+    echo "Starting ECS Autoscaling Simulator (simulation-only mode)..."
+    echo "💡 This will simulate scaling decisions without actually scaling containers"
     python -m vlm_workers.scaling.auto_scaler \
         --queue-url "$SQS_QUEUE_URL" \
         --min-instances 0 \
         --max-instances 3 \
         --scale-up-threshold 1 \
         --scale-down-threshold 0 \
-        --cooldown 300 \
-        --evaluation-interval 15 \
+        --cooldown 30 \
+        --evaluation-interval 5 \
         --evaluation-periods 1 &
     SIMULATOR_PID=$!
     

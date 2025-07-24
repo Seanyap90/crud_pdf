@@ -190,8 +190,8 @@ def simulate_scaling(scale):
     """Simulate auto-scaling for testing (aws-mock mode)"""
     settings = get_settings()
     
-    if settings.deployment_mode != "aws-mock":
-        print("❌ Scaling simulation only available in aws-mock mode")
+    if settings.deployment_mode not in ["aws-mock", "aws-prod"]:
+        print("❌ Scaling simulation only available in aws-mock or aws-prod mode")
         return
     
     print(f"Simulating scaling to {scale} worker replicas...")
@@ -204,11 +204,52 @@ def simulate_scaling(scale):
         
         if result:
             print(f"✅ Scaling simulation completed: {scale} replicas")
+            
+            # Show scaling history
+            history = task_manager.get_scaling_history()
+            if history:
+                print("\n📊 Recent scaling events:")
+                for event in history[-3:]:  # Show last 3 events
+                    print(f"  {event['timestamp']}: {event['desired_count']} replicas ({event['service']})")
         else:
             print("❌ Scaling simulation failed")
             
     except Exception as e:
         print(f"❌ Scaling simulation error: {e}")
+
+@cli.command()
+def show_scaling_status():
+    """Show current scaling status and history"""
+    settings = get_settings()
+    
+    try:
+        from vlm_workers.scaling.auto_scaler import get_task_manager
+        
+        task_manager = get_task_manager()
+        
+        print(f"🔧 Scaling Status ({settings.deployment_mode} mode)")
+        print(f"Cluster: {task_manager.cluster_name}")
+        print(f"Service: {task_manager.service_name or 'docker-compose'}")
+        
+        # Show task statistics
+        stats = task_manager.get_task_statistics()
+        print(f"\n📈 Task Statistics:")
+        print(f"  Active tasks: {stats['active_tasks']}")
+        print(f"  Completed tasks: {stats['completed_tasks']}")
+        print(f"  Failed tasks: {stats['failed_tasks']}")
+        print(f"  Success rate: {stats['success_rate']:.1f}%")
+        
+        # Show scaling history
+        history = task_manager.get_scaling_history()
+        if history:
+            print(f"\n📊 Scaling History ({len(history)} events):")
+            for event in history[-5:]:  # Show last 5 events
+                print(f"  {event['timestamp']}: {event['desired_count']} replicas")
+        else:
+            print("\n📊 No scaling events recorded")
+            
+    except Exception as e:
+        print(f"❌ Error getting scaling status: {e}")
 
 if __name__ == "__main__":
     cli()
