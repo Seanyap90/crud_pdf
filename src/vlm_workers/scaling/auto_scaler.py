@@ -324,6 +324,55 @@ class AutoScalingManager:
     
     def _get_service_running_task_count(self) -> int:
         """Get the number of running tasks for the service."""
+        # Check deployment mode to determine how to get task count
+        deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'local-dev')
+        
+        if deployment_mode == 'aws-mock':
+            # In aws-mock mode, get task count from docker-compose
+            return self._get_docker_compose_task_count()
+        elif deployment_mode == 'aws-prod':
+            # In aws-prod mode, use real ECS API
+            return self._get_ecs_task_count()
+        else:
+            # Default for other modes
+            return 1
+    
+    def _get_docker_compose_task_count(self) -> int:
+        """Get task count from docker-compose for aws-mock mode."""
+        try:
+            import subprocess
+            
+            compose_file = "deployment/docker/compose/aws-mock.yml"
+            
+            # Check if compose file exists
+            if not os.path.exists(compose_file):
+                logger.debug(f"Docker compose file not found: {compose_file}")
+                return 0
+            
+            # Get running containers for vlm-worker service
+            result = subprocess.run([
+                "docker-compose", "-f", compose_file, "ps", "-q", "vlm-worker"
+            ], capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0:
+                # Count non-empty lines (each line is a container ID)
+                containers = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+                task_count = len(containers)
+                logger.debug(f"Docker-compose task count: {task_count}")
+                return task_count
+            else:
+                logger.debug(f"Docker-compose ps failed: {result.stderr}")
+                return 0
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("Docker-compose ps command timed out")
+            return 0
+        except Exception as e:
+            logger.debug(f"Error getting docker-compose task count: {e}")
+            return 0
+    
+    def _get_ecs_task_count(self) -> int:
+        """Get task count from real ECS for aws-prod mode."""
         if not self.service_name:
             return 1  # Assume 1 if no service specified
         
@@ -334,11 +383,13 @@ class AutoScalingManager:
             )
             
             if response['services']:
-                return response['services'][0]['runningCount']
+                task_count = response['services'][0]['runningCount']
+                logger.debug(f"ECS task count: {task_count}")
+                return task_count
             return 0
             
         except Exception as e:
-            logger.warning(f"Could not get service task count: {e}")
+            logger.warning(f"Could not get ECS service task count: {e}")
             return 1  # Default assumption
     
     def _calculate_scale_recommendation(self, total_messages: int, running_tasks: int) -> str:

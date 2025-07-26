@@ -128,6 +128,11 @@ def get_application_autoscaling_client():
     """Get the Application Auto Scaling client."""
     return AWSClientManager().get_client('application-autoscaling')
 
+
+def get_cloudwatch_client():
+    """Get the CloudWatch client."""
+    return AWSClientManager().get_client('cloudwatch')
+
 def get_lambda_client():
     """Get the Lambda client."""
     return AWSClientManager().get_client('lambda')
