@@ -611,7 +611,7 @@ class ECSDeploymentBuilder:
     @log_operation("ECR image preparation")
     def prepare_ecr_image(self, docker_image_path: str = None) -> 'ECSDeploymentBuilder':
         """Prepare and push Docker image to ECR."""
-        docker_image_path = docker_image_path or "src/files_api/vlm"
+        docker_image_path = docker_image_path or "deployment/docker/vlm-worker"
         
         if self.mode == "aws-mock":
             logger.info("Skipping ECR for mock mode")
@@ -889,7 +889,7 @@ def main():
                        help="Deployment mode")
     parser.add_argument("--cleanup", action="store_true", 
                        help="Clean up deployment instead of deploying")
-    parser.add_argument("--docker-path", default="src/files_api/vlm",
+    parser.add_argument("--docker-path", default="deployment/docker/vlm-worker",
                        help="Path to Docker build context")
     parser.add_argument("--infrastructure-only", action="store_true",
                        help="Deploy only infrastructure and export config for docker-compose")

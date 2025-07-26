@@ -14,7 +14,10 @@ import type {
 } from '../types/invoice';
 
 // Base API URL
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// Production API Gateway URL
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://ayw7tgam04.execute-api.us-east-1.amazonaws.com/dev';
+// Local development URL (commented out)
+// const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 /**
  * API client for FastAPI backend

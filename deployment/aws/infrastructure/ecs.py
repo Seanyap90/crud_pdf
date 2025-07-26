@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional, List
 import boto3
 from botocore.exceptions import ClientError
 
-from src.files_api.config.settings import get_settings
+from files_api.config.settings import get_settings
 from deployment.aws.utils.aws_clients import get_ecs_client, get_ec2_client, get_iam_client, get_asg_client
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,11 @@ class ECSClusterManager:
             # Create IAM instance profile for ECS instances
             instance_profile_arn = self._create_ecs_instance_profile()
             instance_profile_name = f"{self.cluster_name}-instance-profile"
+            
+            # Wait for IAM instance profile to propagate
+            import time
+            logger.info("Waiting for IAM instance profile to propagate...")
+            time.sleep(10)  # Wait 10 seconds for IAM propagation
             
             # User data script for ECS agent configuration
             user_data = f"""#!/bin/bash

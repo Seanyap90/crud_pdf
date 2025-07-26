@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 # Import settings
-from src.files_api.config.settings import get_settings
+from files_api.config.settings import get_settings
 
 # Import AWS utilities
 from deployment.aws.utils.aws_clients import (
@@ -129,8 +129,9 @@ class LambdaLayerManager:
             # Install lightweight dependencies
             requirements = [
                 "fastapi==0.104.1",
-                "uvicorn==0.24.0",
+                "uvicorn==0.24.0", 
                 "pydantic==2.4.2",
+                "pydantic_core",  # Required for Pydantic v2
                 "mangum==0.17.0",
                 "pymongo>=4.0.0",
                 "python-multipart==0.0.6"  # For form uploads
@@ -231,12 +232,14 @@ class LambdaDeployer:
                 logger.info(f"Updated Files API Lambda: {function_name}")
             else:
                 # Create new function
+                with open(deployment_zip, 'rb') as f:
+                    deployment_zip_content = f.read()
                 lambda_response = self.lambda_client.create_function(
                     FunctionName=function_name,
                     Runtime=LAMBDA_RUNTIME,
                     Role=execution_role_arn,
                     Handler="files_api.lambda_handler.lambda_handler",
-                    Code={'ZipFile': deployment_zip},
+                    Code={'ZipFile': deployment_zip_content},
                     Description="Files API FastAPI application",
                     Timeout=LAMBDA_TIMEOUT,
                     MemorySize=LAMBDA_MEMORY,
@@ -305,12 +308,14 @@ class LambdaDeployer:
                 logger.info(f"Updated IoT Backend Lambda: {function_name}")
             else:
                 # Create new function
+                with open(deployment_zip, 'rb') as f:
+                    deployment_zip_content = f.read()
                 lambda_response = self.lambda_client.create_function(
                     FunctionName=function_name,
                     Runtime=LAMBDA_RUNTIME,
                     Role=execution_role_arn,
                     Handler="iot.lambda_handler.lambda_handler",
-                    Code={'ZipFile': deployment_zip},
+                    Code={'ZipFile': deployment_zip_content},
                     Description="IoT Backend FastAPI application",
                     Timeout=LAMBDA_TIMEOUT,
                     MemorySize=LAMBDA_MEMORY,

@@ -158,7 +158,7 @@ class ECSServiceManager:
                 cluster=self.cluster_name,
                 serviceName=service_name,
                 taskDefinition=task_def_arn,
-                desiredCount=0,
+                desiredCount=1,
                 capacityProviderStrategy=[
                     {
                         'capacityProvider': f"{self.cluster_name}-gpu-cp",

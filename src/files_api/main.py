@@ -45,10 +45,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         generate_unique_id_function=custom_generate_unique_id,
     )
 
-    # Add CORS middleware with expanded settings to work with frontend
+    # Add CORS middleware with expanded settings to work with frontend and API Gateway
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],  # Allow your frontend
+        allow_origins=[
+            "http://localhost:3000",  # Local frontend development
+            "https://localhost:3000",  # HTTPS local development
+            "*"  # Allow all origins for API Gateway (since requests come through AWS)
+        ],
         allow_credentials=True,
         allow_methods=["*"],  # Allow all methods
         allow_headers=["*"],  # Allow all headers

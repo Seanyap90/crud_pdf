@@ -421,8 +421,7 @@ function aws-prod {
         
         # Build and push image
         echo "📦 Building VLM worker image..."
-        cd src/files_api
-        docker build -t "$ECR_URI:latest" -f vlm/Dockerfile ../..
+        docker build -t "$ECR_URI:latest" -f deployment/docker/vlm-worker/Dockerfile .
         
         # Push to ECR (requires AWS credentials)
         echo "📤 Pushing to ECR..."
@@ -430,7 +429,6 @@ function aws-prod {
             echo "⚠️ ECR push failed - image will be built during deployment"
             echo "💡 Deployment will fail if ECR image doesn't exist. Please fix AWS credentials and try again."
         }
-        cd ../..
     fi
     
     # Phase 4: Deploy ECS services
