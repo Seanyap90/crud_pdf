@@ -372,9 +372,9 @@ function aws-prod {
     # Set deployment mode
     export DEPLOYMENT_MODE="aws-prod"
     
-    # Phase 1: Deploy infrastructure only and export configuration
-    echo "🏗️ Phase 1: Deploying ECS infrastructure and exporting configuration..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --infrastructure-only --export-config .env.aws-prod
+    # Phase 1: Deploy infrastructure with GPU capacity provider and export configuration
+    echo "🏗️ Phase 1: Deploying ECS infrastructure with GPU capacity provider and exporting configuration..."
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --export-config .env.aws-prod
     
     if [ $? -ne 0 ]; then
         echo "❌ Error: Infrastructure deployment failed"
@@ -431,7 +431,7 @@ function aws-prod {
         }
     fi
     
-    # Phase 4: Deploy ECS services
+    # Phase 4: Deploy ECS services (idempotent - preserves existing infrastructure)
     echo "🚀 Phase 4: Deploying ECS services (MongoDB + VLM workers)..."
     python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --deploy-services
     

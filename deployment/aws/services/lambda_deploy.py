@@ -33,8 +33,8 @@ settings = get_settings()
 # Constants
 DEFAULT_REGION = settings.aws_region
 LAMBDA_RUNTIME = "python3.11"
-LAMBDA_TIMEOUT = 30
-LAMBDA_MEMORY = 512
+LAMBDA_TIMEOUT = 120  # Increased to 2 minutes for cold start
+LAMBDA_MEMORY = 1024  # Increased to 1GB for FastAPI with dependencies
 
 
 def log_operation(description: str):
@@ -120,38 +120,148 @@ class LambdaLayerManager:
             raise
     
     def _create_fastapi_layer_zip(self) -> str:
-        """Create ZIP file with lightweight FastAPI dependencies."""
-        # Create temporary directory for layer
+        """Create FastAPI layer ZIP using Docker for Lambda compatibility."""
+        # Try Docker approach first, fallback to pip if Docker unavailable
+        try:
+            return self._create_layer_with_docker()
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            logger.warning(f"Docker approach failed: {e}")
+            logger.info("Falling back to pip installation...")
+            return self._create_layer_with_pip()
+    
+    def _create_layer_with_docker(self) -> str:
+        """Create layer using Docker for perfect Lambda compatibility."""
+        # Get user/group IDs for permission handling
+        user_id = os.getuid() if hasattr(os, 'getuid') else 1000
+        group_id = os.getgid() if hasattr(os, 'getgid') else 1000
+        
+        # Requirements for Lambda layer (matching local versions)
+        requirements = [
+            "fastapi==0.115.0",        # Local: 0.115.0
+            "uvicorn==0.34.0",         # Local: 0.34.0
+            "pydantic==2.10.6",        # Local: 2.10.6 (fixes decimal_places error)
+            "pydantic_core==2.27.2",   # Local: 2.27.2 (required for Pydantic 2.10.6)
+            "pydantic-settings==2.7.1", # Local: 2.7.1 (CRITICAL - used in settings.py)
+            "python-dotenv==1.0.1",    # Local: 1.0.1 (required by pydantic-settings)
+            "starlette==0.38.6",       # Local: 0.38.6 (required by FastAPI)
+            "typing-extensions==4.12.2", # Local: 4.12.2 (required by Pydantic)
+            "annotated-types==0.7.0",  # Local: 0.7.0 (required by Pydantic)
+            "jsonschema==4.23.0",      # Local: 4.23.0
+            "python-multipart==0.0.20", # Local: 0.0.20
+            "click==8.1.8",            # Local: 8.1.8 (used by uvicorn CLI)
+            "requests==2.32.3",        # Local: 2.32.3 (used in storage.py)
+            "urllib3==1.26.20",        # Local: 1.26.20 (MUST be <2.0.0 for boto3)
+            "boto3==1.36.12",          # Local: 1.36.12 (used in adapters)
+            "botocore==1.36.12",       # Local: 1.36.12 (required by boto3)
+            "mangum==0.17.0",          # Not local - keep existing version
+            "pymongo>=4.0.0",          # Not local - keep existing version
+        ]
+        
+        # Create build directory structure
+        project_root = Path.cwd()
+        build_dir = project_root / "build"
+        lambda_env_dir = build_dir / "lambda-env"
+        lambda_python_dir = lambda_env_dir / "python"
+        
+        # Clean up existing build artifacts
+        if lambda_env_dir.exists():
+            shutil.rmtree(lambda_env_dir)
+        lambda_env_dir.mkdir(parents=True, exist_ok=True)
+        
+        logger.info("Installing dependencies using Lambda Docker runtime...")
+        
+        # Use Docker approach matching your working pattern
+        requirements_str = ' '.join(requirements)
+        docker_cmd = [
+            "docker", "run", "--rm",
+            # Run as root in container, fix permissions after
+            "--volume", f"{project_root}:/out",
+            "--entrypoint", "/bin/bash",
+            "public.ecr.aws/lambda/python:3.11",
+            "-c",
+            f"pip install --upgrade pip && "
+            f"pip install {requirements_str} --target /out/build/lambda-env/python && "
+            # Keep boto3/botocore since we're explicitly including them now
+            f"echo 'Layer packages installed successfully' && "
+            f"chown -R {user_id}:{group_id} /out/build || true"  # Fix ownership, ignore if fails
+        ]
+        
+        subprocess.run(docker_cmd, check=True, capture_output=True, text=True)
+        
+        # Fix permissions if needed (like your working example)
+        try:
+            subprocess.run(["sudo", "chown", "-R", f"{os.getlogin()}:{os.getlogin()}", str(build_dir)], 
+                         check=False, capture_output=True)
+            subprocess.run(["chmod", "-R", "777", str(build_dir)], check=False)
+        except:
+            pass  # Continue if permission fixes fail
+        
+        # Create layer ZIP
+        layer_zip_path = build_dir / "lambda-layer.zip"
+        
+        # Change to lambda-env directory and create ZIP
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(lambda_env_dir)
+            with zipfile.ZipFile(layer_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in Path('.').rglob('*'):
+                    if file_path.is_file():
+                        zipf.write(file_path, file_path)
+        finally:
+            os.chdir(original_cwd)
+        
+        # Copy to permanent location
+        final_zip_path = f"/tmp/fastapi-layer-docker-{int(time.time())}.zip"
+        shutil.copy2(layer_zip_path, final_zip_path)
+        
+        logger.info(f"Created Lambda layer with Docker: {final_zip_path}")
+        return final_zip_path
+    
+    def _create_layer_with_pip(self) -> str:
+        """Fallback: Create layer using pip (less reliable for compiled packages)."""
         with tempfile.TemporaryDirectory() as temp_dir:
             python_dir = Path(temp_dir) / "python"
             python_dir.mkdir()
             
-            # Install lightweight dependencies
             requirements = [
-                "fastapi==0.104.1",
-                "uvicorn==0.24.0", 
-                "pydantic==2.4.2",
-                "pydantic_core",  # Required for Pydantic v2
-                "mangum==0.17.0",
-                "pymongo>=4.0.0",
-                "python-multipart==0.0.6"  # For form uploads
+                "fastapi==0.115.0",        # Local: 0.115.0
+                "uvicorn==0.34.0",         # Local: 0.34.0
+                "pydantic==2.10.6",        # Local: 2.10.6 (fixes decimal_places error)
+                "pydantic_core==2.27.2",   # Local: 2.27.2 (required for Pydantic 2.10.6)
+                "pydantic-settings==2.7.1", # Local: 2.7.1 (CRITICAL - used in settings.py)
+                "python-dotenv==1.0.1",    # Local: 1.0.1 (required by pydantic-settings)
+                "starlette==0.38.6",       # Local: 0.38.6 (required by FastAPI)
+                "typing-extensions==4.12.2", # Local: 4.12.2 (required by Pydantic)
+                "annotated-types==0.7.0",  # Local: 0.7.0 (required by Pydantic)
+                "jsonschema==4.23.0",      # Local: 4.23.0
+                "python-multipart==0.0.20", # Local: 0.0.20
+                "click==8.1.8",            # Local: 8.1.8 (used by uvicorn CLI)
+                "requests==2.32.3",        # Local: 2.32.3 (used in storage.py)
+                "urllib3==1.26.20",        # Local: 1.26.20 (MUST be <2.0.0 for boto3)
+                "boto3==1.36.12",          # Local: 1.36.12 (used in adapters)
+                "botocore==1.36.12",       # Local: 1.36.12 (required by boto3)
+                "mangum==0.17.0",          # Not local - keep existing version
+                "pymongo>=4.0.0",          # Not local - keep existing version
             ]
             
-            # Install packages to target directory only
+            logger.warning("Using pip fallback - may have compatibility issues")
             subprocess.run([
                 "pip", "install", "--target", str(python_dir), "--no-cache-dir", "--upgrade"
             ] + requirements, check=True)
+            
+            # Keep boto3/botocore since we're explicitly including them now
+            logger.info("Layer packages installed successfully")
             
             # Create layer ZIP
             layer_zip_path = Path(temp_dir) / "fastapi-layer.zip"
             with zipfile.ZipFile(layer_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for file_path in python_dir.rglob('*'):
                     if file_path.is_file():
-                        arcname = file_path.relative_to(temp_dir)
+                        arcname = Path("python") / file_path.relative_to(python_dir)
                         zipf.write(file_path, arcname)
             
-            # Copy to permanent location
-            final_zip_path = f"/tmp/fastapi-layer-{int(time.time())}.zip"
+            # Copy to permanent location  
+            final_zip_path = f"/tmp/fastapi-layer-pip-{int(time.time())}.zip"
             shutil.copy2(layer_zip_path, final_zip_path)
             
             return final_zip_path
@@ -249,7 +359,7 @@ class LambdaDeployer:
                             'DEPLOYMENT_MODE': 'aws-prod',
                             'S3_BUCKET_NAME': settings.s3_bucket_name,
                             'SQS_QUEUE_URL': settings.sqs_queue_url or '',
-                            'MONGODB_URI': f"mongodb://{settings.app_name}-mongodb.{settings.app_name}.local:27017/crud_pdf"
+                            'MONGODB_URI': "mongodb://3.82.148.237:27017/crud_pdf"
                         }
                     },
                     Tags={

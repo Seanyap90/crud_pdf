@@ -478,7 +478,7 @@ systemctl restart ecs
             return None
     
     def _find_existing_capacity_provider(self, name: str) -> Optional[Dict[str, Any]]:
-        """Find existing capacity provider and verify its ASG still exists."""
+        """Find existing capacity provider and verify its ASG and AMI are current."""
         try:
             response = self.ecs_client.describe_capacity_providers(
                 capacityProviders=[name]
@@ -492,7 +492,8 @@ systemctl restart ecs
                     if asg_arn:
                         # Extract ASG name from ARN and check if it exists
                         asg_name = asg_arn.split('/')[-1]
-                        if not self._get_asg_details(asg_name):
+                        asg_details = self._get_asg_details(asg_name)
+                        if not asg_details:
                             logger.warning(f"Capacity provider {name} references deleted ASG {asg_name}. Will recreate.")
                             # Delete the orphaned capacity provider so it can be recreated
                             try:
@@ -501,6 +502,20 @@ systemctl restart ecs
                             except ClientError as e:
                                 logger.warning(f"Failed to delete orphaned capacity provider {name}: {e}")
                             return None
+                        
+                        # Verify the ASG's launch template uses the latest ECS GPU AMI
+                        launch_template_info = asg_details.get('LaunchTemplate', {})
+                        if launch_template_info:
+                            launch_template_id = launch_template_info.get('LaunchTemplateId')
+                            if launch_template_id and not self._validate_launch_template_ami(launch_template_id):
+                                logger.warning(f"Capacity provider {name} uses outdated AMI. Will recreate.")
+                                # Delete the orphaned capacity provider so it can be recreated
+                                try:
+                                    self.ecs_client.delete_capacity_provider(capacityProvider=name)
+                                    logger.info(f"Deleted capacity provider with outdated AMI: {name}")
+                                except ClientError as e:
+                                    logger.warning(f"Failed to delete outdated capacity provider {name}: {e}")
+                                return None
                 
                 return {
                     'name': providers[0]['name'],
@@ -565,6 +580,38 @@ systemctl restart ecs
             
         except ClientError as e:
             logger.warning(f"Failed to validate launch template {launch_template_id}: {e}")
+            return False
+    
+    def _validate_launch_template_ami(self, launch_template_id: str) -> bool:
+        """Validate that launch template uses the latest ECS GPU AMI."""
+        try:
+            # Get launch template's current AMI
+            response = self.ec2_client.describe_launch_template_versions(
+                LaunchTemplateId=launch_template_id,
+                Versions=['$Latest']
+            )
+            
+            if not response.get('LaunchTemplateVersions'):
+                return False
+            
+            template_data = response['LaunchTemplateVersions'][0]['LaunchTemplateData']
+            current_ami = template_data.get('ImageId')
+            
+            if not current_ami:
+                return False
+            
+            # Get the latest ECS GPU AMI
+            latest_ami = self._get_ecs_gpu_ami()
+            
+            if current_ami == latest_ami:
+                logger.info(f"Launch template {launch_template_id} uses current AMI: {current_ami}")
+                return True
+            else:
+                logger.warning(f"Launch template {launch_template_id} uses outdated AMI {current_ami}, latest is {latest_ami}")
+                return False
+            
+        except ClientError as e:
+            logger.warning(f"Failed to validate launch template AMI {launch_template_id}: {e}")
             return False
     
     def _find_existing_asg(self, name: str) -> Optional[Dict[str, Any]]:
