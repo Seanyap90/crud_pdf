@@ -23,6 +23,7 @@ from deployment.aws.infrastructure.vpc import VPCNetworkBuilder
 from deployment.aws.infrastructure.efs import EFSManager
 from deployment.aws.infrastructure.ecs import ECSClusterManager
 from deployment.aws.infrastructure.ecs_services import ECSServiceManager
+from deployment.aws.infrastructure.ec2_database import EC2DatabaseManager
 
 # Configure logging
 logging.basicConfig(
@@ -193,6 +194,7 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         self.efs_manager = EFSManager(self.settings.aws_region)
         self.cluster_manager = ECSClusterManager(self.settings.aws_region)
         self.service_manager = ECSServiceManager(self.settings.aws_region)
+        self.database_manager = EC2DatabaseManager(self.settings.aws_region)
         
         logger.info("Initialized ECS infrastructure managers")
     
@@ -228,16 +230,20 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             vpc_config = self._setup_vpc_infrastructure()
             efs_config = self._setup_efs_storage(vpc_config)
             
-            # Phase 2: ECS Infrastructure
-            logger.info("Phase 2: Setting up ECS infrastructure")
+            # Phase 2: Database Infrastructure
+            logger.info("Phase 2: Setting up database infrastructure")
+            database_config = self._setup_database_infrastructure(vpc_config)
+            
+            # Phase 3: ECS Infrastructure
+            logger.info("Phase 3: Setting up ECS infrastructure")
             cluster_config = self._setup_ecs_cluster(vpc_config)
             
-            # Phase 3: Services (with API Gateway URL)
-            logger.info("Phase 3: Deploying services")
+            # Phase 4: Services (with API Gateway URL)
+            logger.info("Phase 4: Deploying services")
             services_config = self._deploy_services_with_api_gateway(vpc_config, efs_config, api_gateway_url)
             
-            # Phase 4: Auto-scaling
-            logger.info("Phase 4: Configuring auto-scaling")
+            # Phase 5: Auto-scaling
+            logger.info("Phase 5: Configuring auto-scaling")
             scaling_config = self._setup_auto_scaling(services_config)
             
             # Compile deployment summary
@@ -248,6 +254,7 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
                 "cluster_name": ECS_CLUSTER_NAME,
                 "vpc": vpc_config,
                 "efs": efs_config,
+                "database": database_config,
                 "cluster": cluster_config,
                 "services": services_config,
                 "scaling": scaling_config,
@@ -277,16 +284,20 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             vpc_config = self._setup_vpc_infrastructure()
             efs_config = self._setup_efs_storage(vpc_config)
             
-            # Phase 2: ECS Infrastructure
-            logger.info("Phase 2: Setting up ECS infrastructure")
+            # Phase 2: Database Infrastructure
+            logger.info("Phase 2: Setting up database infrastructure")
+            database_config = self._setup_database_infrastructure(vpc_config)
+            
+            # Phase 3: ECS Infrastructure
+            logger.info("Phase 3: Setting up ECS infrastructure")
             cluster_config = self._setup_ecs_cluster(vpc_config)
             
-            # Phase 3: Services
-            logger.info("Phase 3: Deploying services")
+            # Phase 4: Services
+            logger.info("Phase 4: Deploying services")
             services_config = self._deploy_services(vpc_config, efs_config)
             
-            # Phase 4: Auto-scaling (placeholder for ecs_scaling.py)
-            logger.info("Phase 4: Configuring auto-scaling")
+            # Phase 5: Auto-scaling (placeholder for ecs_scaling.py)
+            logger.info("Phase 5: Configuring auto-scaling")
             scaling_config = self._setup_auto_scaling(services_config)
             
             # Compile deployment summary
@@ -297,6 +308,7 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
                 "cluster_name": ECS_CLUSTER_NAME,
                 "vpc": vpc_config,
                 "efs": efs_config,
+                "database": database_config,
                 "cluster": cluster_config,
                 "services": services_config,
                 "scaling": scaling_config,
@@ -320,7 +332,11 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             vpc_config = self._setup_vpc_infrastructure()
             efs_config = self._setup_efs_storage(vpc_config)
             
-            # Phase 2: ECS Infrastructure
+            # Phase 2: Database Infrastructure
+            logger.info("Infrastructure-only mode: Setting up database infrastructure")
+            database_config = self._setup_database_infrastructure(vpc_config)
+            
+            # Phase 3: ECS Infrastructure
             logger.info("Infrastructure-only mode: Setting up ECS infrastructure")
             cluster_config = self._setup_ecs_cluster(vpc_config)
             
@@ -335,6 +351,7 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
                 "cluster_name": ECS_CLUSTER_NAME,
                 "vpc": vpc_config,
                 "efs": efs_config,
+                "database": database_config,
                 "cluster": cluster_config,
                 "s3_bucket": S3_BUCKET_NAME,
                 "sqs_queue": SQS_QUEUE_NAME
@@ -369,11 +386,18 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
     
     @log_operation("EFS storage setup")
     def _setup_efs_storage(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Set up EFS file systems for MongoDB and models."""
-        # Create MongoDB EFS
-        mongodb_efs = self.efs_manager.create_mongodb_efs(
+        """Set up EFS file systems for database, scripts, and models."""
+        # Create database EFS (for SQLite database files)
+        database_efs = self.efs_manager.create_database_efs(
             vpc_config['vpc_id'],
-            vpc_config['public_subnet_id'],
+            vpc_config['private_subnet_id'],
+            vpc_config['efs_security_group_id']
+        )
+        
+        # Create scripts EFS (for deployment scripts)
+        scripts_efs = self.efs_manager.create_scripts_efs(
+            vpc_config['vpc_id'],
+            vpc_config['private_subnet_id'],
             vpc_config['efs_security_group_id']
         )
         
@@ -388,12 +412,21 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         self.efs_manager.wait_for_mount_targets_available()
         
         efs_config = {
-            "mongodb": mongodb_efs,
+            "database": database_efs,
+            "scripts": scripts_efs,
             "models": models_efs
         }
         
-        logger.info(f"EFS systems created: MongoDB={mongodb_efs['file_system_id']}, Models={models_efs['file_system_id']}")
+        logger.info(f"EFS systems created: Database={database_efs['file_system_id']}, Scripts={scripts_efs['file_system_id']}, Models={models_efs['file_system_id']}")
         return efs_config
+    
+    @log_operation("EC2 database server setup")
+    def _setup_database_infrastructure(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Set up EC2 SQLite HTTP database server."""
+        database_config = self.database_manager.create_database_instance(vpc_config)
+        
+        logger.info(f"Database server created: {database_config['instance_id']} at {database_config['private_ip']}")
+        return database_config
     
     @log_operation("ECS cluster setup")
     def _setup_ecs_cluster(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -776,9 +809,11 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
             f"PRIVATE_SUBNET_ID={result['vpc']['private_subnet_id']}",
             "",
             f"# EFS Configuration",
-            f"EFS_MONGODB_ID={result['efs']['mongodb']['file_system_id']}",
+            f"EFS_DATABASE_ID={result['efs']['database']['file_system_id']}",
+            f"EFS_SCRIPTS_ID={result['efs']['scripts']['file_system_id']}",
             f"EFS_MODELS_ID={result['efs']['models']['file_system_id']}",
-            f"EFS_MONGODB_MOUNT_PATH=/mnt/efs/mongodb",
+            f"EFS_DATABASE_MOUNT_PATH=/mnt/efs/database",
+            f"EFS_SCRIPTS_MOUNT_PATH=/mnt/efs/scripts",
             f"EFS_MODELS_MOUNT_PATH=/mnt/efs/models",
             "",
             f"# S3 and SQS Configuration", 
@@ -786,10 +821,10 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
             f"SQS_QUEUE_NAME={result['sqs_queue']}",
             f"SQS_QUEUE_URL=https://sqs.{result['region']}.amazonaws.com/{settings.account_id}/{result['sqs_queue']}",
             "",
-            f"# MongoDB Configuration",
-            f"MONGO_USERNAME=admin",
-            f"MONGO_PASSWORD=password",
-            f"MONGO_DATABASE=crud_pdf",
+            f"# Database Configuration",
+            f"DATABASE_HOST={result['database']['private_ip']}",
+            f"DATABASE_PORT=8080",
+            f"DATABASE_INSTANCE_ID={result['database']['instance_id']}",
             "",
             f"# Docker Compose Configuration",
             f"COMPOSE_NETWORK_SUBNET=172.20.0.0/16",
@@ -803,10 +838,12 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
             "",
             f"# Usage:",
             f"# 1. Mount EFS file systems:",
-            f"#    sudo mkdir -p /mnt/efs/mongodb /mnt/efs/models",
-            f"#    sudo mount -t efs {result['efs']['mongodb']['file_system_id']}:/ /mnt/efs/mongodb",
+            f"#    sudo mkdir -p /mnt/efs/database /mnt/efs/scripts /mnt/efs/models",
+            f"#    sudo mount -t efs {result['efs']['database']['file_system_id']}:/ /mnt/efs/database",
+            f"#    sudo mount -t efs {result['efs']['scripts']['file_system_id']}:/ /mnt/efs/scripts",
             f"#    sudo mount -t efs {result['efs']['models']['file_system_id']}:/ /mnt/efs/models",
-            f"# 2. Run: docker-compose -f docker-compose.aws-prod.yml up"
+            f"# 2. Database server is running at: http://{result['database']['private_ip']}:8080",
+            f"# 3. Run: docker-compose -f docker-compose.aws-prod.yml up"
         ]
         
         with open(export_file, 'w') as f:
@@ -859,6 +896,7 @@ def cleanup_deployment(mode: str = None) -> None:
             # Initialize managers
             service_manager = ECSServiceManager(settings.aws_region)
             cluster_manager = ECSClusterManager(settings.aws_region)
+            database_manager = EC2DatabaseManager(settings.aws_region)
             efs_manager = EFSManager(settings.aws_region)
             vpc_builder = VPCNetworkBuilder(settings.aws_region)
             
@@ -869,10 +907,13 @@ def cleanup_deployment(mode: str = None) -> None:
             logger.info("Phase 3: Cleaning up ECS cluster")
             cluster_manager.cleanup_cluster_resources()
             
-            logger.info("Phase 4: Cleaning up EFS resources")
+            logger.info("Phase 4: Cleaning up database infrastructure")
+            database_manager.cleanup_database_instance()
+            
+            logger.info("Phase 5: Cleaning up EFS resources")
             efs_manager.cleanup_efs_resources()
             
-            logger.info("Phase 5: Cleaning up VPC resources")
+            logger.info("Phase 6: Cleaning up VPC resources")
             vpc_builder.cleanup_vpc_resources()
             
             logger.info("✅ Production deployment cleaned up successfully")
@@ -938,7 +979,9 @@ def main():
             
             if args.mode == "aws-prod":
                 print(f"VPC ID: {result['vpc']['vpc_id']}")
-                print(f"MongoDB EFS: {result['efs']['mongodb']['file_system_id']}")
+                print(f"Database Server: {result['database']['instance_id']} at {result['database']['private_ip']}:8080")
+                print(f"Database EFS: {result['efs']['database']['file_system_id']}")
+                print(f"Scripts EFS: {result['efs']['scripts']['file_system_id']}")
                 print(f"Models EFS: {result['efs']['models']['file_system_id']}")
                 
                 # Export configuration for infrastructure-only mode

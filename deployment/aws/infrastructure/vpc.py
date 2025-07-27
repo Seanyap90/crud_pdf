@@ -356,14 +356,40 @@ class VPCNetworkBuilder:
             )
             self.security_groups['efs'] = efs_sg
             
+            # Database security group (HTTP 8080 from Lambda and ECS)
+            database_sg = self._create_security_group(
+                'database',
+                f"{settings.app_name}-database-sg",
+                "SQLite HTTP database server access",
+                [{'IpProtocol': 'tcp', 'FromPort': 8080, 'ToPort': 8080, 'IpRanges': [{'CidrIp': '10.0.0.0/16'}]}]
+            )
+            self.security_groups['database'] = database_sg
             
-            # VLM workers security group (outbound only)
+            # Lambda security group (outbound to database and EFS)
+            lambda_sg = self._create_security_group(
+                'lambda',
+                f"{settings.app_name}-lambda-sg",
+                "Lambda function access to database and EFS",
+                [],  # No inbound rules
+                [
+                    {'IpProtocol': 'tcp', 'FromPort': 8080, 'ToPort': 8080, 'IpRanges': [{'CidrIp': '10.0.0.0/16'}]},  # Database access
+                    {'IpProtocol': 'tcp', 'FromPort': 2049, 'ToPort': 2049, 'IpRanges': [{'CidrIp': '10.0.0.0/16'}]},  # EFS access
+                    {'IpProtocol': 'tcp', 'FromPort': 443, 'ToPort': 443, 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]},      # HTTPS outbound
+                    {'IpProtocol': 'tcp', 'FromPort': 80, 'ToPort': 80, 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}        # HTTP outbound
+                ]
+            )
+            self.security_groups['lambda'] = lambda_sg
+            
+            # VLM workers security group (outbound + database access)
             vlm_workers_sg = self._create_security_group(
                 'vlm_workers',
                 f"{settings.app_name}-ecs-vlm-workers-sg",
-                "VLM workers outbound access",
+                "VLM workers outbound access and database",
                 [],  # No inbound rules - outbound only
-                [{'IpProtocol': '-1', 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}]  # Allow all outbound
+                [
+                    {'IpProtocol': 'tcp', 'FromPort': 8080, 'ToPort': 8080, 'IpRanges': [{'CidrIp': '10.0.0.0/16'}]},  # Database access
+                    {'IpProtocol': '-1', 'IpRanges': [{'CidrIp': '0.0.0.0/0'}]}  # Allow all other outbound
+                ]
             )
             self.security_groups['vlm_workers'] = vlm_workers_sg
             
@@ -387,6 +413,8 @@ class VPCNetworkBuilder:
             'security_groups': self.security_groups,
             # Add individual security group IDs for easy access
             'efs_security_group_id': self.security_groups.get('efs'),
+            'database_security_group_id': self.security_groups.get('database'),
+            'lambda_security_group_id': self.security_groups.get('lambda'),
             'vlm_workers_security_group_id': self.security_groups.get('vlm_workers')
         }
     

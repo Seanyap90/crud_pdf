@@ -22,6 +22,114 @@ class EFSManager:
         self.access_points = {}
     
     
+    def create_database_efs(self, vpc_id: str, subnet_id: str, security_group_id: str) -> Dict[str, Any]:
+        """Create EFS file system for SQLite database storage."""
+        fs_name = f"{settings.app_name}-database-storage"
+        
+        try:
+            # Check for existing file system
+            existing_fs = self._find_existing_file_system(fs_name)
+            if existing_fs:
+                fs_id = existing_fs['FileSystemId']
+                logger.info(f"Using existing database EFS: {fs_id}")
+                self.file_systems['database'] = existing_fs
+            else:
+                # Create new file system
+                fs_response = self.efs_client.create_file_system(
+                    CreationToken=f"{settings.app_name}-database-{hash(fs_name) % 10000}",
+                    PerformanceMode='generalPurpose',
+                    ThroughputMode='bursting',
+                    Tags=[
+                        {'Key': 'Name', 'Value': fs_name},
+                        {'Key': 'Project', 'Value': settings.app_name},
+                        {'Key': 'Purpose', 'Value': 'database-storage'}
+                    ]
+                )
+                fs_id = fs_response['FileSystemId']
+                self.file_systems['database'] = fs_response
+                logger.info(f"Created database EFS: {fs_id}")
+                
+                # Wait for file system to become available
+                logger.info("Waiting for database EFS to become available...")
+                self._wait_for_file_system_available(fs_id)
+                logger.info(f"Database EFS is now available: {fs_id}")
+            
+            # Create mount target in private subnet (for EC2 database server)
+            mount_target = self._create_mount_target(
+                fs_id, subnet_id, security_group_id, 'database'
+            )
+            
+            # Create access point for database files
+            access_point = self._create_access_point(
+                fs_id, 'database-files', '/database', 1000, 1000
+            )
+            
+            return {
+                'file_system_id': fs_id,
+                'mount_target_id': mount_target['MountTargetId'],
+                'access_point_id': access_point['AccessPointId'],
+                'mount_target_ip': mount_target.get('IpAddress'),
+                'dns_name': f"{fs_id}.efs.{self.region}.amazonaws.com"
+            }
+            
+        except ClientError as e:
+            logger.error(f"Failed to create database EFS: {e}")
+            raise
+
+    def create_scripts_efs(self, vpc_id: str, subnet_id: str, security_group_id: str) -> Dict[str, Any]:
+        """Create EFS file system for deployment scripts storage."""
+        fs_name = f"{settings.app_name}-scripts-storage"
+        
+        try:
+            # Check for existing file system
+            existing_fs = self._find_existing_file_system(fs_name)
+            if existing_fs:
+                fs_id = existing_fs['FileSystemId']
+                logger.info(f"Using existing scripts EFS: {fs_id}")
+                self.file_systems['scripts'] = existing_fs
+            else:
+                # Create new file system
+                fs_response = self.efs_client.create_file_system(
+                    CreationToken=f"{settings.app_name}-scripts-{hash(fs_name) % 10000}",
+                    PerformanceMode='generalPurpose',
+                    ThroughputMode='bursting',
+                    Tags=[
+                        {'Key': 'Name', 'Value': fs_name},
+                        {'Key': 'Project', 'Value': settings.app_name},
+                        {'Key': 'Purpose', 'Value': 'scripts-storage'}
+                    ]
+                )
+                fs_id = fs_response['FileSystemId']
+                self.file_systems['scripts'] = fs_response
+                logger.info(f"Created scripts EFS: {fs_id}")
+                
+                # Wait for file system to become available
+                logger.info("Waiting for scripts EFS to become available...")
+                self._wait_for_file_system_available(fs_id)
+                logger.info(f"Scripts EFS is now available: {fs_id}")
+            
+            # Create mount target in private subnet
+            mount_target = self._create_mount_target(
+                fs_id, subnet_id, security_group_id, 'scripts'
+            )
+            
+            # Create access point for scripts
+            access_point = self._create_access_point(
+                fs_id, 'deployment-scripts', '/scripts', 1000, 1000
+            )
+            
+            return {
+                'file_system_id': fs_id,
+                'mount_target_id': mount_target['MountTargetId'],
+                'access_point_id': access_point['AccessPointId'],
+                'mount_target_ip': mount_target.get('IpAddress'),
+                'dns_name': f"{fs_id}.efs.{self.region}.amazonaws.com"
+            }
+            
+        except ClientError as e:
+            logger.error(f"Failed to create scripts EFS: {e}")
+            raise
+
     def create_models_efs(self, vpc_id: str, subnet_id: str, security_group_id: str) -> Dict[str, Any]:
         """Create EFS file system for VLM model storage."""
         fs_name = f"{settings.app_name}-vlm-models"
