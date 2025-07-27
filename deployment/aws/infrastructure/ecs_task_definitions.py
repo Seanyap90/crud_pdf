@@ -114,88 +114,6 @@ class TaskDefinitionBuilder:
         self.execution_role_arn = f"arn:aws:iam::{settings.account_id}:role/{settings.app_name}-ecs-execution-role"
         self.task_role_arn = f"arn:aws:iam::{settings.account_id}:role/{settings.app_name}-ecs-task-role"
         
-    def build_mongodb_task_definition(self, efs_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Build MongoDB task definition with EFS persistence. Returns task definition dict."""
-        family = f"{settings.app_name}-mongodb"
-        
-        try:
-            # Create CloudWatch log group
-            log_group = self._create_log_group(f"/ecs/{family}")
-            
-            # Build MongoDB task definition configuration
-            config = TaskDefinitionConfig(
-                family=family,
-                execution_role_arn=self.execution_role_arn,
-                task_role_arn=self.task_role_arn,
-                volumes=[
-                    {
-                        'name': 'mongodb-data',
-                        'efsVolumeConfiguration': {
-                            'fileSystemId': efs_config['mongodb']['file_system_id'],
-                            'transitEncryption': 'ENABLED',
-                            'authorizationConfig': {
-                                'accessPointId': efs_config['mongodb']['access_point_id']
-                            }
-                        }
-                    }
-                ],
-                container_definitions=[
-                    {
-                        'name': 'mongodb',
-                        'image': 'mongo:7.0',
-                        'essential': True,
-                        'portMappings': [
-                            {
-                                'containerPort': 27017,
-                                'protocol': 'tcp'
-                            }
-                        ],
-                        'environment': [
-                            # Reduce MongoDB log verbosity
-                            {'name': 'MONGO_LOG_QUIET', 'value': 'true'}
-                        ],
-                        'command': [
-                            'mongod',
-                            '--quiet',  # Reduce log noise
-                            '--logpath', '/var/log/mongodb/mongod.log',
-                            '--logappend'
-                        ],
-                        'mountPoints': [
-                            {
-                                'sourceVolume': 'mongodb-data',
-                                'containerPath': '/data/db',
-                                'readOnly': False
-                            }
-                        ],
-                        'logConfiguration': {
-                            'logDriver': 'awslogs',
-                            'options': {
-                                'awslogs-group': log_group,
-                                'awslogs-region': self.region,
-                                'awslogs-stream-prefix': 'mongodb'
-                            }
-                        },
-                        'healthCheck': {
-                            'command': [
-                                'CMD-SHELL',
-                                'mongosh --eval "db.adminCommand(\'ping\')" --quiet'
-                            ],
-                            'interval': 30,
-                            'timeout': 5,
-                            'retries': 3,
-                            'startPeriod': 60
-                        }
-                    }
-                ]
-            )
-            
-            task_def_dict = config.to_dict()
-            logger.info(f"Built MongoDB task definition: {family}")
-            return task_def_dict
-            
-        except Exception as e:
-            logger.error(f"Failed to build MongoDB task definition: {e}")
-            raise
     
     def add_api_gateway_environment(self, container_def: dict, api_gateway_url: str) -> dict:
         """Add API Gateway URL to container environment variables."""
@@ -251,7 +169,6 @@ class TaskDefinitionBuilder:
                             {'name': 'AWS_REGION', 'value': self.region},
                             {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
                             {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},
-                            {'name': 'MONGODB_URI', 'value': f"mongodb://{settings.app_name}-mongodb.{settings.app_name}.local:27017/crud_pdf"},
                             {'name': 'MODEL_CACHE_DIR', 'value': '/app/cache'},
                             {'name': 'CUDA_VISIBLE_DEVICES', 'value': '0'},
                             {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:256'},
@@ -359,10 +276,6 @@ class TaskDefinitionBuilder:
             logger.error(f"Failed to build model downloader task definition: {e}")
             raise
     
-    def create_mongodb_task_definition(self, efs_config: Dict[str, Any]) -> str:
-        """Create and register MongoDB task definition. Returns task definition ARN."""
-        task_def_dict = self.build_mongodb_task_definition(efs_config)
-        return self._register_task_definition(task_def_dict)
     
     def create_vlm_worker_task_definition(self, efs_config: Dict[str, Any]) -> str:
         """Create and register VLM worker task definition. Returns task definition ARN."""
@@ -458,10 +371,6 @@ def create_model_downloader_task_definition(efs_config: Dict[str, Any]) -> str:
     return builder.create_model_downloader_task_definition(efs_config)
 
 
-def create_mongodb_task_definition(efs_config: Dict[str, Any]) -> str:
-    """Create MongoDB task definition (convenience function). Returns ARN."""
-    builder = TaskDefinitionBuilder()
-    return builder.create_mongodb_task_definition(efs_config)
 
 
 def create_vlm_worker_task_definition(efs_config: Dict[str, Any]) -> str:

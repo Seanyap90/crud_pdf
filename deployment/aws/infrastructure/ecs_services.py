@@ -22,65 +22,6 @@ class ECSServiceManager:
         self.services = {}
         self.task_definitions = {}
         
-    def create_mongodb_service(self, vpc_config: Dict[str, Any], 
-                              efs_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Create MongoDB service with Fargate."""
-        service_name = f"{settings.app_name}-mongodb"
-        
-        try:
-            # Create task definition
-            task_def_arn = self._create_mongodb_task_definition(efs_config)
-            
-            # Create service discovery for MongoDB
-            service_discovery = self._create_service_discovery(
-                service_name, vpc_config['vpc_id']
-            )
-            
-            # Check for existing service
-            existing_service = self._find_existing_service(service_name)
-            if existing_service:
-                logger.info(f"Using existing MongoDB service: {service_name}")
-                self.services['mongodb'] = existing_service
-                return existing_service
-            
-            # Create MongoDB service
-            service_response = self.ecs_client.create_service(
-                cluster=self.cluster_name,
-                serviceName=service_name,
-                taskDefinition=task_def_arn,
-                desiredCount=1,
-                launchType='FARGATE',
-                networkConfiguration={
-                    'awsvpcConfiguration': {
-                        'subnets': [vpc_config['public_subnet_id']],
-                        'securityGroups': [vpc_config['mongodb_security_group_id']],
-                        'assignPublicIp': 'ENABLED'
-                    }
-                },
-                serviceRegistries=[
-                    {
-                        'registryArn': service_discovery['Arn'],
-                        'containerName': 'mongodb'
-                        # containerPort not needed for DNS-only service discovery
-                    }
-                ],
-                enableExecuteCommand=True,
-                tags=[
-                    {'key': 'Name', 'value': service_name},
-                    {'key': 'Project', 'value': settings.app_name},
-                    {'key': 'Purpose', 'value': 'MongoDB-Database'}
-                ]
-            )
-            
-            mongodb_service = service_response['service']
-            self.services['mongodb'] = mongodb_service
-            
-            logger.info(f"Created MongoDB service: {service_name}")
-            return mongodb_service
-            
-        except ClientError as e:
-            logger.error(f"Failed to create MongoDB service: {e}")
-            raise
     
     def run_model_downloader_task(self, vpc_config: Dict[str, Any], 
                                  efs_config: Dict[str, Any]) -> str:
@@ -297,93 +238,6 @@ class ECSServiceManager:
         logger.error(f"❌ Service Discovery operation did not complete within {timeout_minutes} minutes")
         return False
     
-    def _create_mongodb_task_definition(self, efs_config: Dict[str, Any]) -> str:
-        """Create task definition for MongoDB."""
-        family = f"{settings.app_name}-mongodb"
-        
-        try:
-            # Create CloudWatch log group
-            log_group = self._create_log_group(f"/ecs/{family}")
-            
-            # MongoDB task definition
-            task_definition = {
-                'family': family,
-                'networkMode': 'awsvpc',
-                'requiresCompatibilities': ['FARGATE'],
-                'cpu': '512',
-                'memory': '1024',
-                'executionRoleArn': self._get_ecs_execution_role_arn(),
-                'taskRoleArn': self._get_ecs_task_role_arn(),
-                'volumes': [
-                    {
-                        'name': 'mongodb-data',
-                        'efsVolumeConfiguration': {
-                            'fileSystemId': efs_config['mongodb']['file_system_id'],
-                            'transitEncryption': 'ENABLED',
-                            'authorizationConfig': {
-                                'accessPointId': efs_config['mongodb']['access_point_id']
-                            }
-                        }
-                    }
-                ],
-                'containerDefinitions': [
-                    {
-                        'name': 'mongodb',
-                        'image': 'mongo:7.0',
-                        'essential': True,
-                        'portMappings': [
-                            {
-                                'containerPort': 27017,
-                                'protocol': 'tcp'
-                            }
-                        ],
-                        # No authentication needed - MongoDB runs without auth by default
-                        'environment': [],
-                        'mountPoints': [
-                            {
-                                'sourceVolume': 'mongodb-data',
-                                'containerPath': '/data/db',
-                                'readOnly': False
-                            }
-                        ],
-                        'logConfiguration': {
-                            'logDriver': 'awslogs',
-                            'options': {
-                                'awslogs-group': log_group,
-                                'awslogs-region': self.region,
-                                'awslogs-stream-prefix': 'mongodb'
-                            }
-                        },
-                        'healthCheck': {
-                            'command': [
-                                'CMD-SHELL',
-                                'mongosh --eval "db.adminCommand(\'ping\')" --quiet'
-                            ],
-                            'interval': 30,
-                            'timeout': 5,
-                            'retries': 3,
-                            'startPeriod': 60
-                        }
-                    }
-                ],
-                'tags': [
-                    {'key': 'Name', 'value': family},
-                    {'key': 'Project', 'value': settings.app_name}
-                ]
-            }
-            
-            # Register task definition
-            response = self.ecs_client.register_task_definition(**task_definition)
-            task_def_arn = response['taskDefinition']['taskDefinitionArn']
-            
-            self.task_definitions['mongodb'] = task_def_arn
-            logger.info(f"Created MongoDB task definition: {family}")
-            
-            return task_def_arn
-            
-        except ClientError as e:
-            logger.error(f"Failed to create MongoDB task definition: {e}")
-            raise
     
     def _create_vlm_worker_task_definition(self, efs_config: Dict[str, Any]) -> str:
         """Create task definition for VLM workers."""
@@ -430,7 +284,6 @@ class ECSServiceManager:
                             {'name': 'AWS_REGION', 'value': self.region},
                             {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
                             {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},
-                            {'name': 'MONGODB_URI', 'value': f"mongodb://{settings.app_name}-mongodb.{settings.app_name}.local:27017/crud_pdf"},
                             {'name': 'MODEL_CACHE_DIR', 'value': '/models'},
                             {'name': 'CUDA_VISIBLE_DEVICES', 'value': '0'},
                             {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:256'}
@@ -745,15 +598,11 @@ class ECSServiceManager:
     
     def deploy_all_services(self, vpc_config: Dict[str, Any], 
                            efs_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Deploy all ECS services (MongoDB and VLM workers)."""
+        """Deploy all ECS services (VLM workers only - MongoDB removed)."""
         logger.info("Starting deployment of all ECS services...")
         
         try:
-            # Deploy MongoDB service
-            logger.info("Deploying MongoDB service...")
-            mongodb_service = self.create_mongodb_service(vpc_config, efs_config)
-            
-            # Deploy VLM worker service
+            # Deploy VLM worker service only
             logger.info("Deploying VLM worker service...")
             vlm_service = self.create_vlm_worker_service(vpc_config, efs_config)
             
@@ -761,13 +610,6 @@ class ECSServiceManager:
             deployment_summary = {
                 'status': 'success',
                 'services_deployed': {
-                    'mongodb': {
-                        'service_name': mongodb_service['serviceName'],
-                        'service_arn': mongodb_service['serviceArn'],
-                        'status': mongodb_service['status'],
-                        'desired_count': mongodb_service['desiredCount'],
-                        'running_count': mongodb_service['runningCount']
-                    },
                     'vlm_workers': {
                         'service_name': vlm_service['serviceName'],
                         'service_arn': vlm_service['serviceArn'],

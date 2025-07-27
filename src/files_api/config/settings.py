@@ -118,12 +118,7 @@ class Settings(BaseSettings):
         description="Local storage directory"
     )
     
-    # Database Configuration
-    mongodb_uri: Optional[str] = Field(
-        default=None,
-        alias="MONGODB_URI",
-        description="MongoDB connection URI for aws-prod mode"
-    )
+    # Database Configuration - MongoDB removed in Phase 1
     
     # Logging
     log_level: str = Field(

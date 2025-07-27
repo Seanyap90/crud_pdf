@@ -21,59 +21,6 @@ class EFSManager:
         self.mount_targets = {}
         self.access_points = {}
     
-    def create_mongodb_efs(self, vpc_id: str, subnet_id: str, security_group_id: str) -> Dict[str, Any]:
-        """Create EFS file system for MongoDB data storage."""
-        fs_name = f"{settings.app_name}-mongodb-data"
-        
-        try:
-            # Check for existing file system
-            existing_fs = self._find_existing_file_system(fs_name)
-            if existing_fs:
-                fs_id = existing_fs['FileSystemId']
-                logger.info(f"Using existing MongoDB EFS: {fs_id}")
-                self.file_systems['mongodb'] = existing_fs
-            else:
-                # Create new file system
-                fs_response = self.efs_client.create_file_system(
-                    CreationToken=f"{settings.app_name}-mongodb-{hash(fs_name) % 10000}",
-                    PerformanceMode='generalPurpose',
-                    ThroughputMode='bursting',
-                    Tags=[
-                        {'Key': 'Name', 'Value': fs_name},
-                        {'Key': 'Project', 'Value': settings.app_name},
-                        {'Key': 'Purpose', 'Value': 'mongodb-data'}
-                    ]
-                )
-                fs_id = fs_response['FileSystemId']
-                self.file_systems['mongodb'] = fs_response
-                logger.info(f"Created MongoDB EFS: {fs_id}")
-                
-                # Wait for file system to become available
-                logger.info("Waiting for MongoDB EFS to become available...")
-                self._wait_for_file_system_available(fs_id)
-                logger.info(f"MongoDB EFS is now available: {fs_id}")
-            
-            # Create mount target in public subnet (for MongoDB service)
-            mount_target = self._create_mount_target(
-                fs_id, subnet_id, security_group_id, 'mongodb'
-            )
-            
-            # Create access point for MongoDB data
-            access_point = self._create_access_point(
-                fs_id, 'mongodb-data', '/data/db', 999, 999
-            )
-            
-            return {
-                'file_system_id': fs_id,
-                'mount_target_id': mount_target['MountTargetId'],
-                'access_point_id': access_point['AccessPointId'],
-                'mount_target_ip': mount_target.get('IpAddress'),
-                'dns_name': f"{fs_id}.efs.{self.region}.amazonaws.com"
-            }
-            
-        except ClientError as e:
-            logger.error(f"Failed to create MongoDB EFS: {e}")
-            raise
     
     def create_models_efs(self, vpc_id: str, subnet_id: str, security_group_id: str) -> Dict[str, Any]:
         """Create EFS file system for VLM model storage."""

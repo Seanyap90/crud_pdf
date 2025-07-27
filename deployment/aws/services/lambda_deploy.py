@@ -154,7 +154,6 @@ class LambdaLayerManager:
             "boto3==1.36.12",          # Local: 1.36.12 (used in adapters)
             "botocore==1.36.12",       # Local: 1.36.12 (required by boto3)
             "mangum==0.17.0",          # Not local - keep existing version
-            "pymongo>=4.0.0",          # Not local - keep existing version
         ]
         
         # Create build directory structure
@@ -241,7 +240,6 @@ class LambdaLayerManager:
                 "boto3==1.36.12",          # Local: 1.36.12 (used in adapters)
                 "botocore==1.36.12",       # Local: 1.36.12 (required by boto3)
                 "mangum==0.17.0",          # Not local - keep existing version
-                "pymongo>=4.0.0",          # Not local - keep existing version
             ]
             
             logger.warning("Using pip fallback - may have compatibility issues")
@@ -359,7 +357,6 @@ class LambdaDeployer:
                             'DEPLOYMENT_MODE': 'aws-prod',
                             'S3_BUCKET_NAME': settings.s3_bucket_name,
                             'SQS_QUEUE_URL': settings.sqs_queue_url or '',
-                            'MONGODB_URI': "mongodb://3.82.148.237:27017/crud_pdf"
                         }
                     },
                     Tags={

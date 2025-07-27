@@ -356,14 +356,6 @@ class VPCNetworkBuilder:
             )
             self.security_groups['efs'] = efs_sg
             
-            # MongoDB security group (port 27017 within VPC)
-            mongodb_sg = self._create_security_group(
-                'mongodb',
-                f"{settings.app_name}-ecs-mongodb-sg",
-                "MongoDB access within VPC",
-                [{'IpProtocol': 'tcp', 'FromPort': 27017, 'ToPort': 27017, 'IpRanges': [{'CidrIp': '10.0.0.0/16'}]}]
-            )
-            self.security_groups['mongodb'] = mongodb_sg
             
             # VLM workers security group (outbound only)
             vlm_workers_sg = self._create_security_group(
@@ -395,7 +387,6 @@ class VPCNetworkBuilder:
             'security_groups': self.security_groups,
             # Add individual security group IDs for easy access
             'efs_security_group_id': self.security_groups.get('efs'),
-            'mongodb_security_group_id': self.security_groups.get('mongodb'),
             'vlm_workers_security_group_id': self.security_groups.get('vlm_workers')
         }
     

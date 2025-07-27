@@ -10,13 +10,6 @@ import logging
 from typing import List, Dict, Any, Union
 from .nosql_adapter import NoSQLAdapter
 
-# Import MongoDB conditionally for aws-prod mode
-try:
-    import pymongo
-    from pymongo import MongoClient
-    MONGO_AVAILABLE = True
-except ImportError:
-    MONGO_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -29,33 +22,11 @@ class DocumentIndexManager:
         
     def _get_default_connection(self) -> str:
         """Get default connection string based on deployment mode"""
-        try:
-            from files_api.config.settings import get_settings
-            settings = get_settings()
-            
-            if settings.deployment_mode == 'aws-prod':
-                return getattr(settings, 'mongodb_uri', 'sqlite:///tmp/lambda.db')
-            else:
-                return "recycling.db"  # SQLite for local-dev/aws-mock
-        except:
-            # Fallback if settings can't be loaded
-            return "recycling.db"
+        return "recycling.db"  # Always use SQLite
         
-    def _get_connection(self) -> Union[sqlite3.Connection, 'MongoClient']:
-        """Get database connection based on deployment mode"""
-        try:
-            from files_api.config.settings import get_settings
-            settings = get_settings()
-            
-            if settings.deployment_mode == 'aws-prod' and MONGO_AVAILABLE and self.connection_string.startswith('mongodb'):
-                return MongoClient(self.connection_string)
-            else:
-                # Use SQLite for local-dev/aws-mock or if MongoDB unavailable
-                db_path = self.connection_string if not self.connection_string.startswith('mongodb') else "recycling.db"
-                return sqlite3.connect(db_path)
-        except:
-            # Fallback to SQLite if anything fails
-            return sqlite3.connect("recycling.db")
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get database connection - always SQLite"""
+        return sqlite3.connect(self.connection_string)
     
     def create_all_indexes(self) -> None:
         """Create all document indexes for optimal performance"""

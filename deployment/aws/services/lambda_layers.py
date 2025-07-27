@@ -203,7 +203,6 @@ FILES_API_LAYER_CONFIG = LayerConfig(
         "python-multipart==0.0.6",
         "boto3==1.34.0",
         "botocore==1.34.0",
-        "pymongo==4.6.0",  # For MongoDB when in aws-prod mode
         "python-dotenv==1.0.0"
     ]
 )
