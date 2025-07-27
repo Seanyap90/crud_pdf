@@ -7,8 +7,16 @@ query performance across vendor invoices, gateways, devices, and measurements.
 
 import sqlite3
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 from .nosql_adapter import NoSQLAdapter
+
+# Import MongoDB conditionally for aws-prod mode
+try:
+    import pymongo
+    from pymongo import MongoClient
+    MONGO_AVAILABLE = True
+except ImportError:
+    MONGO_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -16,38 +24,113 @@ logger = logging.getLogger(__name__)
 class DocumentIndexManager:
     """Manages document indexes for optimal query performance"""
     
-    def __init__(self, db_path: str = "recycling.db"):
-        self.db_path = db_path
+    def __init__(self, connection_string: str = None):
+        self.connection_string = connection_string or self._get_default_connection()
         
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection"""
-        return sqlite3.connect(self.db_path)
+    def _get_default_connection(self) -> str:
+        """Get default connection string based on deployment mode"""
+        try:
+            from files_api.config.settings import get_settings
+            settings = get_settings()
+            
+            if settings.deployment_mode == 'aws-prod':
+                return getattr(settings, 'mongodb_uri', 'sqlite:///tmp/lambda.db')
+            else:
+                return "recycling.db"  # SQLite for local-dev/aws-mock
+        except:
+            # Fallback if settings can't be loaded
+            return "recycling.db"
+        
+    def _get_connection(self) -> Union[sqlite3.Connection, 'MongoClient']:
+        """Get database connection based on deployment mode"""
+        try:
+            from files_api.config.settings import get_settings
+            settings = get_settings()
+            
+            if settings.deployment_mode == 'aws-prod' and MONGO_AVAILABLE and self.connection_string.startswith('mongodb'):
+                return MongoClient(self.connection_string)
+            else:
+                # Use SQLite for local-dev/aws-mock or if MongoDB unavailable
+                db_path = self.connection_string if not self.connection_string.startswith('mongodb') else "recycling.db"
+                return sqlite3.connect(db_path)
+        except:
+            # Fallback to SQLite if anything fails
+            return sqlite3.connect("recycling.db")
     
     def create_all_indexes(self) -> None:
         """Create all document indexes for optimal performance"""
+        conn = None
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
             
-            # Create vendor invoice indexes
-            self._create_invoice_indexes(cursor)
-            
-            # Create IoT indexes
-            self._create_gateway_indexes(cursor)
-            self._create_device_indexes(cursor)
-            self._create_measurement_indexes(cursor)
-            
-            # Create config indexes
-            self._create_config_indexes(cursor)
-            
-            conn.commit()
-            logger.info("All document indexes created successfully")
-            
+            # Check if we're using MongoDB or SQLite
+            if hasattr(conn, 'list_database_names'):  # MongoDB client
+                self._create_mongodb_indexes(conn)
+                logger.info("MongoDB document indexes created successfully")
+            else:  # SQLite connection
+                self._create_sqlite_indexes(conn)
+                logger.info("SQLite document indexes created successfully")
+                
         except Exception as e:
             logger.error(f"Error creating indexes: {e}")
             raise
         finally:
-            conn.close()
+            if conn:
+                conn.close()
+    
+    def _create_mongodb_indexes(self, client) -> None:
+        """Create MongoDB indexes for aws-prod mode"""
+        try:
+            db = client.crud_pdf
+            
+            # Vendor invoice indexes
+            db.vendor_invoices.create_index([("vendor.vendor_id", 1)])
+            db.vendor_invoices.create_index([("date_created", -1)])
+            db.vendor_invoices.create_index([("total_amount", 1)])
+            db.vendor_invoices.create_index([("vendor.vendor_id", 1), ("date_created", -1)])
+            
+            # IoT gateway indexes
+            db.gateways.create_index([("gateway_id", 1)])
+            db.gateways.create_index([("location", 1)])
+            db.gateways.create_index([("status", 1)])
+            
+            # IoT device indexes  
+            db.devices.create_index([("device_id", 1)])
+            db.devices.create_index([("gateway_id", 1)])
+            db.devices.create_index([("device_type", 1)])
+            
+            # Measurement indexes
+            db.measurements.create_index([("device_id", 1)])
+            db.measurements.create_index([("timestamp", -1)])
+            db.measurements.create_index([("measurement_type", 1)])
+            db.measurements.create_index([("device_id", 1), ("timestamp", -1)])
+            
+            # Config indexes
+            db.config.create_index([("config_key", 1)])
+            
+            logger.info("MongoDB indexes created successfully")
+            
+        except Exception as e:
+            logger.error(f"Error creating MongoDB indexes: {e}")
+            raise
+    
+    def _create_sqlite_indexes(self, conn) -> None:
+        """Create SQLite indexes for local-dev/aws-mock modes"""
+        cursor = conn.cursor()
+        
+        # Create vendor invoice indexes
+        self._create_invoice_indexes(cursor)
+        
+        # Create IoT indexes
+        self._create_gateway_indexes(cursor)
+        self._create_device_indexes(cursor)
+        self._create_measurement_indexes(cursor)
+        
+        # Create config indexes
+        self._create_config_indexes(cursor)
+        
+        conn.commit()
+        logger.info("SQLite indexes created successfully")
     
     def _create_invoice_indexes(self, cursor: sqlite3.Cursor) -> None:
         """Create indexes for vendor invoice documents"""

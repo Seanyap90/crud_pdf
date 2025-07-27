@@ -58,7 +58,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],  # Allow all headers
     )
     app.state.settings = settings
-    logger.info("creating db")
+    logger.info("Initializing database (mode-aware)")
+    # Database initialization is already mode-aware via get_nosql_adapter() in database/local.py
+    # In aws-prod mode, it will use MongoDB if MONGODB_URI is set
+    # In local-dev/aws-mock modes, it will use SQLite
     init_db()
 
     app.include_router(files_router, prefix="/v1", tags=["files"])
