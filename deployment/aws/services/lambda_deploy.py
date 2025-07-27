@@ -33,8 +33,8 @@ settings = get_settings()
 # Constants
 DEFAULT_REGION = settings.aws_region
 LAMBDA_RUNTIME = "python3.11"
-LAMBDA_TIMEOUT = 120  # Increased to 2 minutes for cold start
-LAMBDA_MEMORY = 1024  # Increased to 1GB for FastAPI with dependencies
+LAMBDA_TIMEOUT = 120  # 2 minutes for HTTP calls to EC2 + EFS access
+LAMBDA_MEMORY = 2048  # 2GB for FastAPI + concurrent requests + EC2 database calls
 
 
 def log_operation(description: str):
@@ -315,7 +315,9 @@ class LambdaDeployer:
         self.functions = {}
         
     @log_operation("Deploying Files API Lambda")
-    def deploy_files_api_lambda(self) -> Dict[str, Any]:
+    def deploy_files_api_lambda(self, vpc_config: Dict[str, Any] = None, 
+                                database_host: str = None, 
+                                database_port: int = 8080) -> Dict[str, Any]:
         """Deploy Files API as Lambda function."""
         function_name = f"{settings.app_name}-files-api"
         
@@ -357,8 +359,16 @@ class LambdaDeployer:
                             'DEPLOYMENT_MODE': 'aws-prod',
                             'S3_BUCKET_NAME': settings.s3_bucket_name,
                             'SQS_QUEUE_URL': settings.sqs_queue_url or '',
+                            'DATABASE_HOST': database_host or '',
+                            'DATABASE_PORT': str(database_port),
                         }
                     },
+                    VpcConfig=(
+                        {
+                            'SubnetIds': [vpc_config['private_subnet_id']],
+                            'SecurityGroupIds': [vpc_config['lambda_security_group_id']]
+                        } if vpc_config else {}
+                    ),
                     Tags={
                         'Project': settings.app_name,
                         'Component': 'FilesAPI',
@@ -379,6 +389,11 @@ class LambdaDeployer:
             
             # Cleanup
             os.remove(deployment_zip)
+            
+            # Create Function URL if VPC config is provided (for aws-prod mode)
+            if vpc_config:
+                function_url = self.create_lambda_function_url(function_name)
+                function_info['function_url'] = function_url
             
             return function_info
             
@@ -458,6 +473,44 @@ class LambdaDeployer:
             
         except Exception as e:
             logger.error(f"Failed to deploy IoT Backend Lambda: {e}")
+            raise
+    
+    @log_operation("Creating Lambda Function URL")
+    def create_lambda_function_url(self, function_name: str) -> str:
+        """Create Lambda Function URL for external access."""
+        try:
+            # Check if Function URL already exists
+            try:
+                response = self.lambda_client.get_function_url_config(
+                    FunctionName=function_name
+                )
+                logger.info(f"Function URL already exists: {response['FunctionUrl']}")
+                return response['FunctionUrl']
+            except self.lambda_client.exceptions.ResourceNotFoundException:
+                pass
+            
+            # Create new Function URL
+            response = self.lambda_client.create_function_url_config(
+                FunctionName=function_name,
+                Config={
+                    'AuthType': 'NONE',  # Public access for API Gateway alternative
+                    'Cors': {
+                        'AllowCredentials': False,
+                        'AllowHeaders': ['*'],
+                        'AllowMethods': ['*'],
+                        'AllowOrigins': ['*'],
+                        'ExposeHeaders': ['*'],
+                        'MaxAge': 86400
+                    }
+                }
+            )
+            
+            function_url = response['FunctionUrl']
+            logger.info(f"Created Function URL: {function_url}")
+            return function_url
+            
+        except Exception as e:
+            logger.error(f"Failed to create Function URL for {function_name}: {e}")
             raise
     
     def _create_files_api_package(self) -> str:

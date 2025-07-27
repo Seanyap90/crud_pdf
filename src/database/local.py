@@ -12,10 +12,17 @@ logger = logging.getLogger(__name__)
 _nosql_adapter = None
 
 def get_nosql_adapter(db_path: str = "recycling.db"):
-    """Simplified version - TEMPORARY for Phase 1 testing"""
-    # Always return NoSQLAdapter for testing
-    # TODO: Add SQLiteHTTPAdapter logic in Phase 3
-    return NoSQLAdapter(db_path)
+    """Final version with multi-writer solution"""
+    import os
+    
+    if os.getenv('DEPLOYMENT_MODE') == 'aws-prod':
+        from .sqlite_http_adapter import SQLiteHTTPAdapter
+        return SQLiteHTTPAdapter(
+            host=os.getenv('DATABASE_HOST'),
+            port=int(os.getenv('DATABASE_PORT', '8080'))
+        )
+    else:
+        return NoSQLAdapter(db_path)
 
 def init_db(db_path: str = "recycling.db") -> None:
     """Initialize database with all required tables and NoSQL collections."""

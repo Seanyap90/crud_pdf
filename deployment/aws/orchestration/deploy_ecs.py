@@ -246,6 +246,10 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             logger.info("Phase 5: Configuring auto-scaling")
             scaling_config = self._setup_auto_scaling(services_config)
             
+            # Phase 6: Lambda deployment
+            logger.info("Phase 6: Deploying Lambda functions")
+            lambda_config = self._deploy_lambda_functions(vpc_config, database_config)
+            
             # Compile deployment summary
             self.deployment_config = {
                 "status": "success",
@@ -258,6 +262,7 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
                 "cluster": cluster_config,
                 "services": services_config,
                 "scaling": scaling_config,
+                "lambda": lambda_config,
                 "api_gateway_url": api_gateway_url,
                 "deployment_time": time.time()
             }
@@ -427,6 +432,26 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         
         logger.info(f"Database server created: {database_config['instance_id']} at {database_config['private_ip']}")
         return database_config
+    
+    @log_operation("Lambda functions deployment")
+    def _deploy_lambda_functions(self, vpc_config: Dict[str, Any], database_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy Lambda functions with VPC and database configuration."""
+        from deployment.aws.services.lambda_deploy import LambdaDeployer
+        
+        deployer = LambdaDeployer(region=self.settings.aws_region)
+        
+        # Deploy Files API Lambda with VPC and database configuration
+        lambda_config = deployer.deploy_files_api_lambda(
+            vpc_config=vpc_config,
+            database_host=database_config['private_ip'],
+            database_port=8080
+        )
+        
+        logger.info(f"Lambda deployed: {lambda_config['function_name']}")
+        if 'function_url' in lambda_config:
+            logger.info(f"Function URL: {lambda_config['function_url']}")
+        
+        return lambda_config
     
     @log_operation("ECS cluster setup")
     def _setup_ecs_cluster(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
