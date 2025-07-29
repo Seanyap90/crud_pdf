@@ -344,30 +344,8 @@ function aws-mock-down {
 function aws-prod {
     set +e
     
-    echo "🚀 Deploying 4-phase Docker Compose ECS architecture to AWS..."
-    echo "📦 Architecture: Lambda API + Docker Compose ECS + MongoDB + EFS"
-    
-    # Check for API Gateway configuration before deployment
-    echo "🔗 Checking API Gateway configuration..."
-
-    if [ -n "$API_GATEWAY_ID" ]; then
-        echo "✅ API Gateway ID found: $API_GATEWAY_ID"
-        export API_GATEWAY_ID="$API_GATEWAY_ID"
-    elif [ -n "$API_GATEWAY_URL" ]; then
-        echo "✅ API Gateway URL found: $API_GATEWAY_URL"
-        export API_GATEWAY_URL="$API_GATEWAY_URL"
-    else
-        echo "⚠️ No API Gateway configuration found"
-        echo "💡 Set API_GATEWAY_ID or API_GATEWAY_URL environment variable"
-        echo "💡 Example: export API_GATEWAY_ID=abc123def4"
-        echo ""
-        read -p "🤔 Continue deployment without API Gateway? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "❌ Deployment cancelled"
-            exit 1
-        fi
-    fi
+    echo "🚀 Deploying 4-phase ECS architecture to AWS..."
+    echo "📦 Architecture: Lambda API + EC2 SQLite Database (Manual Setup) + ECS Workers"
     
     # Set deployment mode
     export DEPLOYMENT_MODE="aws-prod"
@@ -453,27 +431,58 @@ function aws-prod {
     
     echo "✅ Lambda functions deployed successfully"
     
+    # Phase 6: Post-deployment configuration
+    echo "🔧 Phase 6: Updating environment variables with actual resource IDs..."
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --update-environment
+    
+    if [ $? -ne 0 ]; then
+        echo "⚠️ Warning: Environment variable update failed, but deployment can continue"
+    else
+        echo "✅ Environment variables updated successfully"
+    fi
+    
     echo ""
-    echo "🎉 4-Phase AWS Production deployment completed successfully!"
+    echo "🎉 6-Phase AWS Production deployment completed successfully!"
     echo "📊 Architecture deployed:"
     echo "   • Phase 1: ✅ ECS Infrastructure (VPC, EFS, Cluster)"
     echo "   • Phase 2: ✅ EFS Mount Points"
     echo "   • Phase 3: ✅ Model Population"
-    echo "   • Phase 4: ✅ Docker Compose Services (MongoDB + VLM Workers)"
+    echo "   • Phase 4: ✅ ECS Services (VLM Workers)"
     echo "   • Phase 5: ✅ Lambda API"
+    echo "   • Phase 6: ✅ Environment Configuration"
     echo ""
     echo "🔗 Services:"
-    echo "   • MongoDB: Running on ECS with EFS persistence"
+    echo "   • EC2 Database: SQLite HTTP server in public subnet (manual setup required)"
     echo "   • VLM Workers: Native ECS services with EFS model cache"
     echo "   • Files API: Lambda with scale-to-zero"
     echo "   • Auto-scaling: Native CloudWatch integration"
     echo ""
     echo "📋 Management commands:"
-    echo "   • View logs: aws ecs describe-services --cluster fastapi-app-ecs-cluster --services fastapi-app-vlm-workers fastapi-app-mongodb"
+    echo "   • View logs: aws ecs describe-services --cluster fastapi-app-ecs-cluster --services fastapi-app-vlm-workers"
     echo "   • Scale workers: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 3"
     echo "   • Stop services: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 0"
     echo ""
-    echo "🔗 Access your deployment via the Lambda function URL"
+    
+    # Get database public IP from configuration file
+    if [ -f ".env.aws-prod" ]; then
+        DATABASE_PUBLIC_IP=$(grep "^DATABASE_PUBLIC_IP=" .env.aws-prod | cut -d= -f2)
+    fi
+    
+    echo "📋 Manual Setup Required:"
+    echo "   1. SSH to EC2 database instance:"
+    if [ -n "$DATABASE_PUBLIC_IP" ]; then
+        echo "      ssh ec2-user@${DATABASE_PUBLIC_IP}"
+    else
+        echo "      ssh ec2-user@<DATABASE_PUBLIC_IP> (check .env.aws-prod for IP)"
+    fi
+    echo "   2. Install dependencies:"
+    echo "      sudo yum update -y"
+    echo "      sudo yum install -y python3 python3-pip"
+    echo "      pip3 install flask"
+    echo "   3. Set up SQLite database and Flask API on port 8080"
+    echo "   4. Configure API Gateway to point to Lambda function"
+    echo ""
+    echo "🔗 Access your deployment via API Gateway (manual setup required)"
 }
 
 # Cleanup AWS production deployment with state tracking
