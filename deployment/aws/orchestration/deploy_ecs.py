@@ -373,10 +373,18 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
     
     @log_operation("EC2 database server setup")
     def _setup_database_infrastructure(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Set up EC2 SQLite HTTP database server."""
-        database_config = self.database_manager.create_database_instance(vpc_config)
+        """Set up EC2 SQLite HTTP database server in public subnet."""
+        # Use public subnet for database deployment
+        database_config = self.database_manager.create_database_instance({
+            **vpc_config,
+            'subnet_id': vpc_config['public_subnet_id']  # Changed from private
+        })
         
-        logger.info(f"Database server created: {database_config['instance_id']} at {database_config['private_ip']}")
+        # Get public IP for configuration
+        database_public_ip = self.database_manager.get_instance_public_ip(database_config['instance_id'])
+        database_config['public_ip'] = database_public_ip
+        
+        logger.info(f"Database server created: {database_config['instance_id']} at public IP {database_public_ip}")
         return database_config
     
     @log_operation("Lambda functions deployment")
@@ -737,6 +745,100 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         ], check=True)
         
         logger.info(f"Pushed image to ECR: {ecr_uri}")
+    
+    def _update_lambda_environment_variables(self, database_public_ip: str) -> None:
+        """Update Lambda environment variables with actual database IP."""
+        try:
+            lambda_client = boto3.client('lambda', region_name=self.settings.aws_region)
+            function_name = f"{self.settings.app_name}-files-api"
+            
+            # Get current environment variables
+            response = lambda_client.get_function_configuration(FunctionName=function_name)
+            
+            # Update with database public IP
+            env_vars = response.get('Environment', {}).get('Variables', {})
+            env_vars.update({
+                'DATABASE_HOST': database_public_ip,
+                'DATABASE_PORT': '8080',
+                'DEPLOYMENT_MODE': 'aws-prod'
+            })
+            
+            # Update Lambda function
+            lambda_client.update_function_configuration(
+                FunctionName=function_name,
+                Environment={'Variables': env_vars}
+            )
+            
+            logger.info(f"Updated Lambda environment variables: DATABASE_HOST={database_public_ip}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update Lambda environment variables: {e}")
+            raise
+    
+    def _configure_post_deployment_environment(self, vpc_config: Dict[str, Any], database_config: Dict[str, Any]) -> None:
+        """Configure environment variables after all resources are created."""
+        try:
+            # Get database public IP
+            database_public_ip = database_config.get('public_ip')
+            if not database_public_ip:
+                database_public_ip = self.database_manager.get_instance_public_ip(
+                    database_config['instance_id']
+                )
+            
+            # Update Lambda environment variables
+            self._update_lambda_environment_variables(database_public_ip)
+            
+            # Update .env.aws-prod file
+            self._export_updated_configuration(database_public_ip, vpc_config, database_config)
+            
+            logger.info("Post-deployment environment configuration completed")
+            
+        except Exception as e:
+            logger.error(f"Failed to configure post-deployment environment: {e}")
+            raise
+    
+    def _export_updated_configuration(self, database_public_ip: str, vpc_config: Dict[str, Any], database_config: Dict[str, Any]) -> None:
+        """Update .env.aws-prod file with database public IP."""
+        try:
+            import os
+            export_file = ".env.aws-prod"
+            
+            # Read existing configuration if it exists
+            config_lines = []
+            if os.path.exists(export_file):
+                with open(export_file, 'r') as f:
+                    config_lines = f.readlines()
+            
+            # Update or add database configuration
+            updated_lines = []
+            database_host_updated = False
+            database_public_ip_updated = False
+            
+            for line in config_lines:
+                if line.startswith('DATABASE_HOST='):
+                    updated_lines.append(f"DATABASE_HOST={database_public_ip}\n")
+                    database_host_updated = True
+                elif line.startswith('DATABASE_PUBLIC_IP='):
+                    updated_lines.append(f"DATABASE_PUBLIC_IP={database_public_ip}\n")
+                    database_public_ip_updated = True
+                else:
+                    updated_lines.append(line)
+            
+            # Add missing configuration
+            if not database_host_updated:
+                updated_lines.append(f"DATABASE_HOST={database_public_ip}\n")
+            if not database_public_ip_updated:
+                updated_lines.append(f"DATABASE_PUBLIC_IP={database_public_ip}\n")
+            
+            # Write updated configuration
+            with open(export_file, 'w') as f:
+                f.writelines(updated_lines)
+            
+            logger.info(f"Updated {export_file} with database public IP: {database_public_ip}")
+            
+        except Exception as e:
+            logger.error(f"Failed to export updated configuration: {e}")
+            raise
 
 
 class ECSDeploymentBuilder:
@@ -1034,8 +1136,9 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
             f"SQS_QUEUE_URL=https://sqs.{result['region']}.amazonaws.com/{settings.account_id}/{result['sqs_queue']}",
             "",
             f"# Database Configuration",
-            f"DATABASE_HOST={result['database']['private_ip']}",
+            f"DATABASE_HOST={result['database'].get('public_ip', result['database']['private_ip'])}",
             f"DATABASE_PORT=8080",
+            f"DATABASE_PUBLIC_IP={result['database'].get('public_ip', 'N/A')}",
             f"DATABASE_INSTANCE_ID={result['database']['instance_id']}",
             "",
             f"# Docker Compose Configuration",
