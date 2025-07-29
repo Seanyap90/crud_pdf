@@ -2,7 +2,6 @@
 import logging
 import json
 import time
-import base64
 from typing import Dict, Any, Optional
 import boto3
 from botocore.exceptions import ClientError
@@ -52,8 +51,12 @@ class EC2DatabaseManager:
                 InstanceType='t3.medium',  # Cost-effective, sufficient for SQLite
                 MinCount=1,
                 MaxCount=1,
-                SecurityGroupIds=[self.security_group_id],
-                SubnetId=vpc_config['private_subnet_id'],  # Private subnet for security
+                NetworkInterfaces=[{
+                    'AssociatePublicIpAddress': True,
+                    'DeviceIndex': 0,
+                    'SubnetId': vpc_config['public_subnet_id'],  # Public subnet for direct access
+                    'Groups': [self.security_group_id]
+                }],
                 UserData=user_data_script,
                 IamInstanceProfile={
                     'Name': self._get_or_create_instance_profile()
@@ -97,77 +100,8 @@ class EC2DatabaseManager:
             raise
     
     def setup_user_data_script(self) -> str:
-        """Generate compact user data script for SQLite HTTP server."""
-        script = """#!/bin/bash
-set -e
-yum update -y
-yum install -y python3 python3-pip
-pip3 install flask gunicorn
-mkdir -p /opt/sqlite-server /var/log/sqlite-server /mnt/efs/database
-
-# Create compact SQLite server
-cat > /opt/sqlite-server/server.py << 'EOF'
-import sqlite3,json,threading,os
-from datetime import datetime
-from flask import Flask,request,jsonify
-app=Flask(__name__)
-DB_PATH='/mnt/efs/database/recycling.db'
-DB_LOCK=threading.RLock()
-os.makedirs(os.path.dirname(DB_PATH),exist_ok=True)
-if not os.path.exists(DB_PATH):
-    with DB_LOCK:
-        conn=sqlite3.connect(DB_PATH)
-        conn.execute('CREATE TABLE IF NOT EXISTS documents(id INTEGER PRIMARY KEY AUTOINCREMENT,collection TEXT NOT NULL,doc_id TEXT NOT NULL,document TEXT NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,UNIQUE(collection,doc_id))')
-        conn.commit()
-        conn.close()
-@app.route('/health')
-def health():return jsonify({'status':'healthy','timestamp':datetime.utcnow().isoformat()})
-@app.route('/query',methods=['POST'])
-def query():
-    data=request.get_json()
-    with DB_LOCK:
-        conn=sqlite3.connect(DB_PATH)
-        conn.row_factory=sqlite3.Row
-        cursor=conn.execute(data['query'],data.get('params',[]))
-        results=[dict(row) for row in cursor.fetchall()]
-        conn.close()
-        return jsonify({'results':results})
-@app.route('/execute',methods=['POST'])
-def execute():
-    data=request.get_json()
-    with DB_LOCK:
-        conn=sqlite3.connect(DB_PATH)
-        cursor=conn.execute(data['command'],data.get('params',[]))
-        conn.commit()
-        result={'rowcount':cursor.rowcount,'lastrowid':cursor.lastrowid}
-        conn.close()
-        return jsonify(result)
-if __name__=='__main__':app.run(host='0.0.0.0',port=8080)
-EOF
-
-# Create systemd service
-cat > /etc/systemd/system/sqlite-server.service << 'EOF'
-[Unit]
-Description=SQLite HTTP Server
-After=network.target
-[Service]
-Type=exec
-User=root
-WorkingDirectory=/opt/sqlite-server
-ExecStart=/usr/bin/python3 server.py
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable sqlite-server
-systemctl start sqlite-server
-sleep 5
-curl -f http://localhost:8080/health
-"""
-        return base64.b64encode(script.encode()).decode()
+        """Return empty user data - manual setup required."""
+        return ""
     
     def _get_amazon_linux_ami(self) -> str:
         """Get the latest Amazon Linux 2 AMI ID."""
@@ -230,7 +164,7 @@ curl -f http://localhost:8080/health
             )
             sg_id = sg_response['GroupId']
             
-            # Add inbound rules: Allow HTTP 8080 from Lambda and ECS workers
+            # Add inbound rules: Allow HTTP 8080 and SSH 22 from internet
             self.ec2_client.authorize_security_group_ingress(
                 GroupId=sg_id,
                 IpPermissions=[
@@ -238,7 +172,13 @@ curl -f http://localhost:8080/health
                         'IpProtocol': 'tcp',
                         'FromPort': 8080,
                         'ToPort': 8080,
-                        'IpRanges': [{'CidrIp': '10.0.0.0/16', 'Description': 'SQLite HTTP API from VPC'}]
+                        'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'SQLite HTTP API'}]
+                    },
+                    {
+                        'IpProtocol': 'tcp',
+                        'FromPort': 22,
+                        'ToPort': 22,
+                        'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'SSH access'}]
                     }
                 ]
             )
@@ -358,6 +298,19 @@ curl -f http://localhost:8080/health
             return instance['PrivateIpAddress']
         except (ClientError, KeyError, IndexError) as e:
             logger.error(f"Failed to get instance private IP: {e}")
+            raise
+    
+    def get_instance_public_ip(self, instance_id: str) -> str:
+        """Get public IP address of the database instance."""
+        try:
+            response = self.ec2_client.describe_instances(InstanceIds=[instance_id])
+            instance = response['Reservations'][0]['Instances'][0]
+            public_ip = instance.get('PublicIpAddress')
+            if not public_ip:
+                raise ValueError(f"Instance {instance_id} does not have a public IP address")
+            return public_ip
+        except (ClientError, KeyError, IndexError) as e:
+            logger.error(f"Failed to get instance public IP: {e}")
             raise
     
     def cleanup_database_instance(self) -> None:
