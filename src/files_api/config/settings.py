@@ -185,10 +185,16 @@ class Settings(BaseSettings):
         # Auto-detect account ID for production modes
         if self.deployment_mode in ["aws-prod"]:
             try:
-                # Use existing client manager that handles SSO
-                from deployment.aws.utils.aws_clients import AWSClientManager
-                sts_client = AWSClientManager().get_client('sts')
-                return sts_client.get_caller_identity()['Account']
+                # Try to use centralized client manager for mock/dev modes
+                try:
+                    from deployment.aws.utils.aws_clients import AWSClientManager
+                    sts_client = AWSClientManager().get_client('sts')
+                    return sts_client.get_caller_identity()['Account']
+                except ImportError:
+                    # Fallback for Lambda environment where deployment module isn't available
+                    import boto3
+                    sts_client = boto3.client('sts')
+                    return sts_client.get_caller_identity()['Account']
             except Exception:
                 # Fallback for local development
                 return "123456789012"

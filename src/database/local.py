@@ -26,12 +26,20 @@ def get_nosql_adapter(db_path: str = "recycling.db"):
 
 def init_db(db_path: str = "recycling.db") -> None:
     """Initialize database with all required tables and NoSQL collections."""
+    import os
+    
+    # Initialize NoSQL collections first
+    adapter = get_nosql_adapter(db_path)
+    adapter.init_collections()
+    
+    # Skip traditional SQL operations in aws-prod mode (uses HTTP adapter)
+    if os.getenv('DEPLOYMENT_MODE') == 'aws-prod':
+        logger.info("aws-prod mode: skipping local SQL operations (using SQLite HTTP adapter)")
+        return
+    
+    # Initialize document indexes and SQL tables for local development
     conn = None
     try:
-        # Initialize NoSQL collections first
-        adapter = get_nosql_adapter(db_path)
-        adapter.init_collections()
-        
         # Initialize document indexes for performance
         from .indexes import DocumentIndexManager
         index_manager = DocumentIndexManager(db_path)

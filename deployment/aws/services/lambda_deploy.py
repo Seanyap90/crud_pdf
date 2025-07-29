@@ -335,11 +335,9 @@ class LambdaDeployer:
             existing_function = self._find_existing_function(function_name)
             
             if existing_function:
-                # Update existing function
-                lambda_response = self._update_lambda_function(
-                    function_name, deployment_zip, [layer_info['layer_version_arn']]
-                )
-                logger.info(f"Updated Files API Lambda: {function_name}")
+                # Use existing function without modification
+                lambda_response = existing_function['Configuration']
+                logger.info(f"Using existing Files API Lambda: {function_name} (no changes)")
             else:
                 # Create new function
                 with open(deployment_zip, 'rb') as f:
@@ -377,12 +375,18 @@ class LambdaDeployer:
                 )
                 logger.info(f"Created Files API Lambda: {function_name}")
             
+            # Handle layers differently for existing vs new functions
+            if existing_function:
+                layers = lambda_response.get('Layers', [])
+            else:
+                layers = [layer_info['layer_version_arn']]
+            
             function_info = {
                 'function_name': function_name,
                 'function_arn': lambda_response['FunctionArn'],
                 'version': lambda_response.get('Version', '$LATEST'),
                 'handler': lambda_response['Handler'],
-                'layers': [layer_info['layer_version_arn']]
+                'layers': layers
             }
             
             self.functions['files_api'] = function_info
@@ -492,16 +496,14 @@ class LambdaDeployer:
             # Create new Function URL
             response = self.lambda_client.create_function_url_config(
                 FunctionName=function_name,
-                Config={
-                    'AuthType': 'NONE',  # Public access for API Gateway alternative
-                    'Cors': {
-                        'AllowCredentials': False,
-                        'AllowHeaders': ['*'],
-                        'AllowMethods': ['*'],
-                        'AllowOrigins': ['*'],
-                        'ExposeHeaders': ['*'],
-                        'MaxAge': 86400
-                    }
+                AuthType='NONE',  # Public access for API Gateway alternative
+                Cors={
+                    'AllowCredentials': False,
+                    'AllowHeaders': ['*'],
+                    'AllowMethods': ['*'],
+                    'AllowOrigins': ['*'],
+                    'ExposeHeaders': ['*'],
+                    'MaxAge': 86400
                 }
             )
             

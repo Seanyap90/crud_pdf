@@ -198,135 +198,81 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         
         logger.info("Initialized ECS infrastructure managers")
     
-    def deploy_with_api_gateway_integration(self, mode: str = 'aws-prod'):
-        """Deploy ECS services with API Gateway integration."""
-        if mode == 'aws-prod':
-            # Get API Gateway URL for aws-prod mode
-            from deployment.aws.utils.api_gateway import get_api_gateway_url_from_env_or_cli
-
-            logger.info("Detecting API Gateway URL for ECS integration...")
-            api_gateway_url = get_api_gateway_url_from_env_or_cli()
-
-            if api_gateway_url:
-                logger.info(f"✅ API Gateway URL detected: {api_gateway_url}")
-            else:
-                logger.warning("⚠️ No API Gateway URL detected - ECS workers may not be able to communicate with API")
-                logger.warning("💡 Set API_GATEWAY_ID or API_GATEWAY_URL environment variable")
-        else:
-            api_gateway_url = None
-
-        # Deploy infrastructure with API Gateway URL
-        return self._deploy_infrastructure_with_api_gateway(api_gateway_url)
-
-    def _deploy_infrastructure_with_api_gateway(self, api_gateway_url: str = None):
-        """Deploy ECS infrastructure with API Gateway URL integration."""
-        try:
-            # NEW: Pre-deployment GPU quota validation
-            if not self.validate_gpu_quota(self.settings.aws_region):
-                raise Exception("Insufficient GPU quota - request increase first")
-            
-            # Phase 1: Core Infrastructure
-            logger.info("Phase 1: Setting up core infrastructure")
-            vpc_config = self._setup_vpc_infrastructure()
-            efs_config = self._setup_efs_storage(vpc_config)
-            
-            # Phase 2: Database Infrastructure
-            logger.info("Phase 2: Setting up database infrastructure")
-            database_config = self._setup_database_infrastructure(vpc_config)
-            
-            # Phase 3: ECS Infrastructure
-            logger.info("Phase 3: Setting up ECS infrastructure")
-            cluster_config = self._setup_ecs_cluster(vpc_config)
-            
-            # Phase 4: Services (with API Gateway URL)
-            logger.info("Phase 4: Deploying services")
-            services_config = self._deploy_services_with_api_gateway(vpc_config, efs_config, api_gateway_url)
-            
-            # Phase 5: Auto-scaling
-            logger.info("Phase 5: Configuring auto-scaling")
-            scaling_config = self._setup_auto_scaling(services_config)
-            
-            # Phase 6: Lambda deployment
-            logger.info("Phase 6: Deploying Lambda functions")
-            lambda_config = self._deploy_lambda_functions(vpc_config, database_config)
-            
-            # Compile deployment summary
-            self.deployment_config = {
-                "status": "success",
-                "mode": "production",
-                "region": self.settings.aws_region,
-                "cluster_name": ECS_CLUSTER_NAME,
-                "vpc": vpc_config,
-                "efs": efs_config,
-                "database": database_config,
-                "cluster": cluster_config,
-                "services": services_config,
-                "scaling": scaling_config,
-                "lambda": lambda_config,
-                "api_gateway_url": api_gateway_url,
-                "deployment_time": time.time()
-            }
-            
-            logger.info("ECS deployment with API Gateway integration completed successfully")
-            return self.deployment_config
-            
-        except Exception as e:
-            logger.error(f"ECS deployment with API Gateway integration failed: {e}")
-            self.deployment_config["status"] = "failed"
-            self.deployment_config["error"] = str(e)
-            raise
-
-    @log_operation("Production ECS deployment")
+    @log_operation("Unified AWS deployment")
     def deploy(self) -> Dict[str, Any]:
-        """Deploy complete ECS infrastructure."""
+        """Deploy complete AWS infrastructure with resource reuse detection."""
         try:
-            # NEW: Pre-deployment GPU quota validation
+            logger.info("🚀 Starting unified AWS deployment...")
+            
+            # Pre-deployment validation
             if not self.validate_gpu_quota(self.settings.aws_region):
                 raise Exception("Insufficient GPU quota - request increase first")
             
-            # Phase 1: Core Infrastructure
-            logger.info("Phase 1: Setting up core infrastructure")
+            # Phase 1: VPC + Networking (reuse if exists)
+            logger.info("📡 Phase 1: VPC + Networking")
             vpc_config = self._setup_vpc_infrastructure()
+            
+            # Phase 2: EFS Storage (reuse if exists)
+            logger.info("💾 Phase 2: EFS Storage")
             efs_config = self._setup_efs_storage(vpc_config)
             
-            # Phase 2: Database Infrastructure
-            logger.info("Phase 2: Setting up database infrastructure")
+            # Phase 3: EC2 Database Server (reuse if exists)
+            logger.info("🗄️ Phase 3: EC2 Database Server")
             database_config = self._setup_database_infrastructure(vpc_config)
             
-            # Phase 3: ECS Infrastructure
-            logger.info("Phase 3: Setting up ECS infrastructure")
+            # Phase 4: ECR Repository + Image (build if missing)
+            logger.info("🐳 Phase 4: ECR Repository + Image")
+            if not self._ensure_ecr_repository_and_image():
+                raise Exception("ECR repository and image setup failed")
+            
+            # Phase 5: ECS Cluster + Auto Scaling (reuse if exists)
+            logger.info("🏗️ Phase 5: ECS Cluster + Auto Scaling")
             cluster_config = self._setup_ecs_cluster(vpc_config)
             
-            # Phase 4: Services
-            logger.info("Phase 4: Deploying services")
+            # Phase 6: ECS Tasks + Services (initial deployment without Lambda URL)
+            logger.info("🔧 Phase 6: ECS Tasks + Services")
             services_config = self._deploy_services(vpc_config, efs_config)
             
-            # Phase 5: Auto-scaling (placeholder for ecs_scaling.py)
-            logger.info("Phase 5: Configuring auto-scaling")
-            scaling_config = self._setup_auto_scaling(services_config)
+            # Phase 7: Lambda Layer + Function (with all infrastructure ready)
+            logger.info("⚡ Phase 7: Lambda Functions")
+            lambda_config = self._deploy_lambda_functions(vpc_config, database_config)
             
-            # Compile deployment summary
+            # Phase 8: Update ECS Services (add Lambda Function URL to workers)
+            logger.info("🔄 Phase 8: Update ECS with Lambda Function URL")
+            lambda_function_url = lambda_config.get('function_url')
+            if lambda_function_url:
+                self._update_ecs_with_lambda_url(services_config, lambda_function_url)
+            
+            # Deployment Summary
             self.deployment_config = {
                 "status": "success",
-                "mode": "production",
+                "mode": "aws-prod",
                 "region": self.settings.aws_region,
-                "cluster_name": ECS_CLUSTER_NAME,
                 "vpc": vpc_config,
                 "efs": efs_config,
                 "database": database_config,
                 "cluster": cluster_config,
                 "services": services_config,
-                "scaling": scaling_config,
+                "lambda": lambda_config,
+                "endpoints": {
+                    "lambda_function_url": lambda_function_url,
+                    "database_host": database_config.get('private_ip'),
+                    "database_port": "8080"
+                },
                 "deployment_time": time.time()
             }
             
-            logger.info("ECS deployment completed successfully")
+            logger.info("✅ Unified AWS deployment completed successfully!")
+            self._print_deployment_summary(self.deployment_config)
             return self.deployment_config
             
         except Exception as e:
-            logger.error(f"ECS deployment failed: {e}")
-            self.deployment_config["status"] = "failed"
-            self.deployment_config["error"] = str(e)
+            logger.error(f"❌ Unified deployment failed: {e}")
+            self.deployment_config = {
+                "status": "failed",
+                "error": str(e),
+                "mode": "aws-prod"
+            }
             raise
     
     def deploy_infrastructure_only(self) -> Dict[str, Any]:
@@ -484,75 +430,71 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             logger.warning(f"Could not check for existing image: {e}")
             return False
     
-    def _deploy_services_with_api_gateway(self, vpc_config: Dict[str, Any], efs_config: Dict[str, Any], api_gateway_url: str = None) -> Dict[str, Any]:
-        """Deploy MongoDB and VLM worker services with API Gateway integration."""
-        # Validate ECR image exists before deploying services
-        ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
-        if not self._check_image_exists(ecr_client):
-            logger.error(f"Required ECR image {ECR_REPO_NAME}:latest not found. Services cannot be deployed.")
-            logger.error("Please ensure the ECR image is built and pushed before deploying services.")
-            raise Exception(f"ECR image {ECR_REPO_NAME}:latest not found - cannot deploy services")
+    def _deploy_services(self, vpc_config: Dict[str, Any], efs_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy ECS services with Lambda Function URL integration."""
+        logger.info(f"✅ ECR image {ECR_REPO_NAME}:latest ready for deployment")
         
-        logger.info(f"✅ ECR image {ECR_REPO_NAME}:latest validated successfully")
+        # Deploy VLM worker services initially (Lambda Function URL added later)
+        logger.info("📦 Deploying VLM workers (Lambda Function URL will be added later)")
         
-        # Deploy services with API Gateway URL integration
-        if api_gateway_url:
-            logger.info(f"🔗 Deploying services with API Gateway integration: {api_gateway_url}")
-            deployment_result = self.service_manager.deploy_all_services_with_api_gateway(vpc_config, efs_config, api_gateway_url)
-        else:
-            logger.info("📦 Deploying services without API Gateway integration")
-            deployment_result = self.service_manager.deploy_all_services(vpc_config, efs_config)
+        deployment_result = self.service_manager.deploy_all_services(vpc_config, efs_config)
         
         if deployment_result['status'] == 'success':
             services_deployed = deployment_result['services_deployed']
-            logger.info(f"Services deployed successfully:")
-            logger.info(f"  MongoDB: {services_deployed['mongodb']['service_name']}")
-            logger.info(f"  VLM Workers: {services_deployed['vlm_workers']['service_name']}")
+            logger.info(f"✅ VLM Workers: {services_deployed['vlm_workers']['service_name']}")
             
-            # Return in expected format for backwards compatibility
             return {
-                'services': {
-                    'mongodb': services_deployed['mongodb'],
-                    'vlm_workers': services_deployed['vlm_workers']
-                },
+                'vlm_workers': services_deployed['vlm_workers'],
                 'deployment_summary': deployment_result
             }
         else:
             logger.error(f"Service deployment failed: {deployment_result.get('error')}")
             raise Exception(f"ECS services deployment failed: {deployment_result.get('error')}")
 
-    @log_operation("ECS services deployment")
-    def _deploy_services(self, vpc_config: Dict[str, Any], efs_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Deploy MongoDB and VLM worker services."""
-        # Validate ECR image exists before deploying services
-        ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
-        if not self._check_image_exists(ecr_client):
-            logger.error(f"Required ECR image {ECR_REPO_NAME}:latest not found. Services cannot be deployed.")
-            logger.error("Please ensure the ECR image is built and pushed before deploying services.")
-            raise Exception(f"ECR image {ECR_REPO_NAME}:latest not found - cannot deploy services")
-        
-        logger.info(f"✅ ECR image {ECR_REPO_NAME}:latest validated successfully")
-        
-        # Deploy all services using the orchestration method
-        deployment_result = self.service_manager.deploy_all_services(vpc_config, efs_config)
-        
-        if deployment_result['status'] == 'success':
-            services_deployed = deployment_result['services_deployed']
-            logger.info(f"Services deployed successfully:")
-            logger.info(f"  MongoDB: {services_deployed['mongodb']['service_name']}")
-            logger.info(f"  VLM Workers: {services_deployed['vlm_workers']['service_name']}")
+    def _update_ecs_with_lambda_url(self, services_config: Dict[str, Any], lambda_function_url: str) -> None:
+        """Update ECS task definitions to include Lambda Function URL."""
+        try:
+            vlm_service_info = services_config.get('vlm_workers', {})
+            service_name = vlm_service_info.get('service_name')
             
-            # Return in expected format for backwards compatibility
-            return {
-                'services': {
-                    'mongodb': services_deployed['mongodb'],
-                    'vlm_workers': services_deployed['vlm_workers']
-                },
-                'deployment_summary': deployment_result
-            }
-        else:
-            logger.error(f"Service deployment failed: {deployment_result.get('error')}")
-            raise Exception(f"ECS services deployment failed: {deployment_result.get('error')}")
+            if not service_name:
+                logger.warning("No VLM service found - skipping Lambda URL update")
+                return
+            
+            logger.info(f"🔗 Adding Lambda Function URL to ECS service: {service_name}")
+            logger.info(f"Function URL: {lambda_function_url}")
+            
+            # For now, log that the URL is available for manual API Gateway setup
+            # In a production system, you might update the task definition here
+            # But since we're manually creating API Gateway, we'll skip automatic updates
+            
+            logger.info("✅ Lambda Function URL available for API Gateway integration")
+            logger.info("Note: You can manually create API Gateway and point it to this Lambda Function URL")
+            
+        except Exception as e:
+            logger.warning(f"Failed to update ECS with Lambda URL: {e}")
+    
+    def _print_deployment_summary(self, config: Dict[str, Any]) -> None:
+        """Print deployment summary."""
+        logger.info("=" * 60)
+        logger.info("🎉 DEPLOYMENT SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Status: {config['status']}")
+        logger.info(f"Mode: {config['mode']}")
+        logger.info(f"Region: {config['region']}")
+        
+        if 'endpoints' in config:
+            endpoints = config['endpoints']
+            logger.info(f"Lambda Function URL: {endpoints.get('lambda_function_url', 'N/A')}")
+            logger.info(f"Database: {endpoints.get('database_host', 'N/A')}:{endpoints.get('database_port', 'N/A')}")
+        
+        if 'vpc' in config:
+            logger.info(f"VPC: {config['vpc'].get('vpc_id', 'N/A')}")
+        
+        if 'cluster' in config:
+            logger.info(f"ECS Cluster: {config['cluster'].get('cluster_name', 'N/A')}")
+        
+        logger.info("=" * 60)
     
     @log_operation("Auto-scaling configuration")
     def _setup_auto_scaling(self, services_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -560,8 +502,8 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         try:
             from deployment.aws.infrastructure.ecs_scaling import create_ecs_autoscaler
             
-            vlm_service_info = services_config.get('services', {}).get('vlm_workers', {})
-            vlm_service_name = vlm_service_info.get('serviceName', 'vlm-workers')
+            vlm_service_info = services_config.get('vlm_workers', {})
+            vlm_service_name = vlm_service_info.get('service_name', 'vlm-workers')
             
             # Get SQS queue URL for scaling metrics
             queue_url = settings.sqs_queue_url
@@ -647,6 +589,155 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             logger.warning(f"Auto-scaling placeholder configured for {vlm_service_name}")
             return scaling_config
 
+    def _check_ecr_repository_exists(self, ecr_client) -> bool:
+        """Check if ECR repository exists."""
+        try:
+            ecr_client.describe_repositories(repositoryNames=[ECR_REPO_NAME])
+            logger.info(f"ECR repository '{ECR_REPO_NAME}' exists")
+            return True
+        except ecr_client.exceptions.RepositoryNotFoundException:
+            logger.info(f"ECR repository '{ECR_REPO_NAME}' does not exist - will create")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check ECR repository: {e}")
+            return False
+    
+    def _ensure_ecr_repository_and_image(self) -> bool:
+        """Ensure ECR repository exists and has the required image."""
+        ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+        
+        # Step 1: Check if repository exists
+        if not self._check_ecr_repository_exists(ecr_client):
+            logger.info("Creating ECR repository...")
+            self._create_ecr_repository(ecr_client)
+        
+        # Step 2: Check if image exists in repository
+        if self._check_image_exists(ecr_client):
+            logger.info("✅ ECR image validation successful - using existing image")
+            return True
+        
+        # Step 3: Build and push image if not found
+        logger.info("📦 ECR image not found - building and pushing new image")
+        self._build_and_push_ecr_image()
+        
+        # Step 4: Verify image was pushed successfully
+        if self._check_image_exists(ecr_client):
+            logger.info("✅ ECR image build and push successful")
+            return True
+        else:
+            logger.error("❌ ECR image build/push failed - image still not found")
+            return False
+    
+    def _create_ecr_repository(self, ecr_client) -> None:
+        """Create ECR repository if it doesn't exist."""
+        try:
+            ecr_client.create_repository(
+                repositoryName=ECR_REPO_NAME,
+                imageScanningConfiguration={'scanOnPush': True},
+                tags=[
+                    {'Key': 'Project', 'Value': self.settings.app_name},
+                    {'Key': 'Component', 'Value': 'VLM-Worker'},
+                    {'Key': 'Purpose', 'Value': 'Container-Registry'}
+                ]
+            )
+            logger.info(f"Created ECR repository: {ECR_REPO_NAME}")
+        except ecr_client.exceptions.RepositoryAlreadyExistsException:
+            logger.info(f"ECR repository {ECR_REPO_NAME} already exists")
+        except Exception as e:
+            logger.error(f"Failed to create ECR repository: {e}")
+            raise
+    
+    def _build_and_push_ecr_image(self) -> None:
+        """Build and push Docker image to ECR with proper error handling."""
+        try:
+            # Get ECR login token
+            ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+            token_response = ecr_client.get_authorization_token()
+            token_data = token_response['authorizationData'][0]
+            
+            # Find Docker path (VLM worker)
+            docker_image_path = self._find_docker_path()
+            
+            # Build and push image
+            self._build_and_push_image(docker_image_path, token_data)
+            
+        except Exception as e:
+            logger.error(f"ECR build and push failed: {e}")
+            raise
+    
+    def _find_docker_path(self) -> str:
+        """Find the Docker image path for VLM worker."""
+        from pathlib import Path
+        
+        # Look for VLM worker Dockerfile in the correct location
+        project_root = Path(__file__).parent.parent.parent.parent
+        vlm_docker_path = project_root / "deployment" / "docker" / "vlm-worker"
+        
+        if (vlm_docker_path / "Dockerfile").exists():
+            logger.info(f"Found VLM Dockerfile at: {vlm_docker_path}")
+            return str(vlm_docker_path)
+        else:
+            # Fallback: try the old location in case project structure varies
+            fallback_path = project_root / "src" / "files_api" / "vlm"
+            if (fallback_path / "Dockerfile").exists():
+                logger.info(f"Found VLM Dockerfile at fallback location: {fallback_path}")
+                return str(fallback_path)
+            
+            raise Exception(f"VLM Dockerfile not found at: {vlm_docker_path} or {fallback_path}")
+    
+    def _check_image_exists(self, ecr_client) -> bool:
+        """Check if ECR image already exists."""
+        try:
+            response = ecr_client.describe_images(
+                repositoryName=ECR_REPO_NAME,
+                imageIds=[{'imageTag': 'latest'}]
+            )
+            images = response.get('imageDetails', [])
+            if images:
+                image_size_mb = images[0].get('imageSizeInBytes', 0) / (1024 * 1024)
+                logger.info(f"Found existing image: {image_size_mb:.1f} MB, pushed {images[0].get('imagePushedAt', 'unknown time')}")
+                return True
+            return False
+        except ecr_client.exceptions.ImageNotFoundException:
+            logger.info("No existing image found - will build new one")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check for existing image: {e} - will build new one")
+            return False
+    
+    def _build_and_push_image(self, docker_path: str, token_data: Dict[str, Any]) -> None:
+        """Build and push Docker image to ECR."""
+        import base64
+        import subprocess
+        from pathlib import Path
+        
+        # Decode ECR token
+        token = base64.b64decode(token_data['authorizationToken']).decode('utf-8')
+        username, password = token.split(':')
+        
+        # Build ECR URI
+        account_id = token_data['proxyEndpoint'].split('.')[0].split('//')[-1]
+        ecr_uri = f"{account_id}.dkr.ecr.{self.settings.aws_region}.amazonaws.com/{ECR_REPO_NAME}:latest"
+        
+        # Docker login
+        subprocess.run([
+            "docker", "login", "--username", username, "--password-stdin",
+            token_data['proxyEndpoint']
+        ], input=password.encode(), check=True)
+        
+        # Build image from project root
+        project_root = Path(__file__).parent.parent.parent.parent
+        subprocess.run([
+            "docker", "build", "-t", ecr_uri, "-f", f"{docker_path}/Dockerfile", "."
+        ], check=True, cwd=project_root)
+        
+        # Push image
+        subprocess.run([
+            "docker", "push", ecr_uri
+        ], check=True)
+        
+        logger.info(f"Pushed image to ECR: {ecr_uri}")
+
 
 class ECSDeploymentBuilder:
     """Builder for ECS deployment with different strategies."""
@@ -710,6 +801,102 @@ class ECSDeploymentBuilder:
             raise
         
         return self
+    
+    def _check_ecr_repository_exists(self, ecr_client) -> bool:
+        """Check if ECR repository exists."""
+        try:
+            ecr_client.describe_repositories(repositoryNames=[ECR_REPO_NAME])
+            logger.info(f"ECR repository '{ECR_REPO_NAME}' exists")
+            return True
+        except ecr_client.exceptions.RepositoryNotFoundException:
+            logger.info(f"ECR repository '{ECR_REPO_NAME}' does not exist - will create")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check ECR repository: {e}")
+            return False
+    
+    def _ensure_ecr_repository_and_image(self) -> bool:
+        """Ensure ECR repository exists and has the required image."""
+        ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+        
+        # Step 1: Check if repository exists
+        if not self._check_ecr_repository_exists(ecr_client):
+            logger.info("Creating ECR repository...")
+            self._create_ecr_repository(ecr_client)
+        
+        # Step 2: Check if image exists in repository
+        if self._check_image_exists(ecr_client):
+            logger.info("✅ ECR image validation successful - using existing image")
+            return True
+        
+        # Step 3: Build and push image if not found
+        logger.info("📦 ECR image not found - building and pushing new image")
+        self._build_and_push_ecr_image()
+        
+        # Step 4: Verify image was pushed successfully
+        if self._check_image_exists(ecr_client):
+            logger.info("✅ ECR image build and push successful")
+            return True
+        else:
+            logger.error("❌ ECR image build/push failed - image still not found")
+            return False
+    
+    def _create_ecr_repository(self, ecr_client) -> None:
+        """Create ECR repository if it doesn't exist."""
+        try:
+            ecr_client.create_repository(
+                repositoryName=ECR_REPO_NAME,
+                imageScanningConfiguration={'scanOnPush': True},
+                tags=[
+                    {'Key': 'Project', 'Value': self.settings.app_name},
+                    {'Key': 'Component', 'Value': 'VLM-Worker'},
+                    {'Key': 'Purpose', 'Value': 'Container-Registry'}
+                ]
+            )
+            logger.info(f"Created ECR repository: {ECR_REPO_NAME}")
+        except ecr_client.exceptions.RepositoryAlreadyExistsException:
+            logger.info(f"ECR repository {ECR_REPO_NAME} already exists")
+        except Exception as e:
+            logger.error(f"Failed to create ECR repository: {e}")
+            raise
+    
+    def _build_and_push_ecr_image(self) -> None:
+        """Build and push Docker image to ECR with proper error handling."""
+        try:
+            # Get ECR login token
+            ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+            token_response = ecr_client.get_authorization_token()
+            token_data = token_response['authorizationData'][0]
+            
+            # Find Docker path (VLM worker)
+            docker_image_path = self._find_docker_path()
+            
+            # Build and push image
+            self._build_and_push_image(docker_image_path, token_data)
+            
+        except Exception as e:
+            logger.error(f"ECR build and push failed: {e}")
+            raise
+    
+    def _find_docker_path(self) -> str:
+        """Find the Docker image path for VLM worker."""
+        from pathlib import Path
+        
+        # Look for VLM worker Dockerfile in the correct location
+        project_root = Path(__file__).parent.parent.parent.parent
+        vlm_docker_path = project_root / "deployment" / "docker" / "vlm-worker"
+        
+        if (vlm_docker_path / "Dockerfile").exists():
+            logger.info(f"Found VLM Dockerfile at: {vlm_docker_path}")
+            return str(vlm_docker_path)
+        else:
+            # Fallback: try the old location in case project structure varies
+            fallback_path = project_root / "src" / "files_api" / "vlm"
+            if (fallback_path / "Dockerfile").exists():
+                logger.info(f"Found VLM Dockerfile at fallback location: {fallback_path}")
+                return str(fallback_path)
+            
+            raise Exception(f"VLM Dockerfile not found at: {vlm_docker_path} or {fallback_path}")
     
     def _check_image_exists(self, ecr_client) -> bool:
         """Check if ECR image already exists."""

@@ -52,7 +52,6 @@ class EC2DatabaseManager:
                 InstanceType='t3.medium',  # Cost-effective, sufficient for SQLite
                 MinCount=1,
                 MaxCount=1,
-                KeyName=None,  # No SSH key needed for automated setup
                 SecurityGroupIds=[self.security_group_id],
                 SubnetId=vpc_config['private_subnet_id'],  # Private subnet for security
                 UserData=user_data_script,
@@ -82,9 +81,9 @@ class EC2DatabaseManager:
             waiter = self.ec2_client.get_waiter('instance_running')
             waiter.wait(InstanceIds=[self.instance_id])
             
-            # Wait additional time for user data script to complete
-            logger.info("Waiting for SQLite HTTP server to initialize...")
-            time.sleep(120)  # Give time for user data script to install and start server
+            # SQLite HTTP server will start automatically via systemd
+            logger.info("✅ EC2 instance running - SQLite HTTP server starting via systemd")
+            logger.info("Note: Server readiness can be verified manually if needed")
             
             return {
                 'instance_id': self.instance_id,
@@ -98,24 +97,77 @@ class EC2DatabaseManager:
             raise
     
     def setup_user_data_script(self) -> str:
-        """Generate user data script for SQLite HTTP server installation."""
-        from pathlib import Path
-        
-        # Read the Python server script
-        server_script_path = Path(__file__).parent.parent / "services" / "sqlite_server.py"
-        with open(server_script_path, 'r') as f:
-            server_script_content = f.read()
-        
-        # Read the installation script template
-        install_script_path = Path(__file__).parent.parent / "services" / "install_sqlite_server.sh"
-        with open(install_script_path, 'r') as f:
-            install_script = f.read()
-        
-        # Replace the placeholder with actual Python script content
-        final_script = install_script.replace('PYTHON_SCRIPT_CONTENT', server_script_content)
-        
-        # Encode the script as base64 for user data
-        return base64.b64encode(final_script.encode()).decode()
+        """Generate compact user data script for SQLite HTTP server."""
+        script = """#!/bin/bash
+set -e
+yum update -y
+yum install -y python3 python3-pip
+pip3 install flask gunicorn
+mkdir -p /opt/sqlite-server /var/log/sqlite-server /mnt/efs/database
+
+# Create compact SQLite server
+cat > /opt/sqlite-server/server.py << 'EOF'
+import sqlite3,json,threading,os
+from datetime import datetime
+from flask import Flask,request,jsonify
+app=Flask(__name__)
+DB_PATH='/mnt/efs/database/recycling.db'
+DB_LOCK=threading.RLock()
+os.makedirs(os.path.dirname(DB_PATH),exist_ok=True)
+if not os.path.exists(DB_PATH):
+    with DB_LOCK:
+        conn=sqlite3.connect(DB_PATH)
+        conn.execute('CREATE TABLE IF NOT EXISTS documents(id INTEGER PRIMARY KEY AUTOINCREMENT,collection TEXT NOT NULL,doc_id TEXT NOT NULL,document TEXT NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,UNIQUE(collection,doc_id))')
+        conn.commit()
+        conn.close()
+@app.route('/health')
+def health():return jsonify({'status':'healthy','timestamp':datetime.utcnow().isoformat()})
+@app.route('/query',methods=['POST'])
+def query():
+    data=request.get_json()
+    with DB_LOCK:
+        conn=sqlite3.connect(DB_PATH)
+        conn.row_factory=sqlite3.Row
+        cursor=conn.execute(data['query'],data.get('params',[]))
+        results=[dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return jsonify({'results':results})
+@app.route('/execute',methods=['POST'])
+def execute():
+    data=request.get_json()
+    with DB_LOCK:
+        conn=sqlite3.connect(DB_PATH)
+        cursor=conn.execute(data['command'],data.get('params',[]))
+        conn.commit()
+        result={'rowcount':cursor.rowcount,'lastrowid':cursor.lastrowid}
+        conn.close()
+        return jsonify(result)
+if __name__=='__main__':app.run(host='0.0.0.0',port=8080)
+EOF
+
+# Create systemd service
+cat > /etc/systemd/system/sqlite-server.service << 'EOF'
+[Unit]
+Description=SQLite HTTP Server
+After=network.target
+[Service]
+Type=exec
+User=root
+WorkingDirectory=/opt/sqlite-server
+ExecStart=/usr/bin/python3 server.py
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable sqlite-server
+systemctl start sqlite-server
+sleep 5
+curl -f http://localhost:8080/health
+"""
+        return base64.b64encode(script.encode()).decode()
     
     def _get_amazon_linux_ami(self) -> str:
         """Get the latest Amazon Linux 2 AMI ID."""

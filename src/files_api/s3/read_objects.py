@@ -29,9 +29,14 @@ def object_exists_in_s3(bucket_name: str, object_key: str, s3_client: Optional["
     """
     #s3_client = s3_client or boto3.client("s3")
     if s3_client is None:
-        # Use the centralized client that respects mock settings
-        from deployment.aws.utils.aws_clients import get_s3_client
-        s3_client = get_s3_client()
+        # Try to use centralized client manager for mock/dev modes
+        try:
+            from deployment.aws.utils.aws_clients import get_s3_client
+            s3_client = get_s3_client()
+        except ImportError:
+            # Fallback for Lambda environment where deployment module isn't available
+            import boto3
+            s3_client = boto3.client("s3")
     
     try:
         s3_client.head_object(Bucket=bucket_name, Key=object_key)
@@ -59,9 +64,14 @@ def fetch_s3_object(
     """
     #s3_client = s3_client or boto3.client("s3")
     if s3_client is None:
-        # Use the centralized client that respects mock settings
-        from deployment.aws.utils.aws_clients import get_s3_client
-        s3_client = get_s3_client()
+        # Try to use centralized client manager for mock/dev modes
+        try:
+            from deployment.aws.utils.aws_clients import get_s3_client
+            s3_client = get_s3_client()
+        except ImportError:
+            # Fallback for Lambda environment where deployment module isn't available
+            import boto3
+            s3_client = boto3.client("s3")
     response = s3_client.get_object(Bucket=bucket_name, Key=object_key)
     return response
 
@@ -86,9 +96,14 @@ def fetch_s3_objects_using_page_token(
     """
     #s3_client = s3_client or boto3.client("s3")
     if s3_client is None:
-        # Use the centralized client that respects mock settings
-        from deployment.aws.utils.aws_clients import get_s3_client
-        s3_client = get_s3_client()
+        # Try to use centralized client manager for mock/dev modes
+        try:
+            from deployment.aws.utils.aws_clients import get_s3_client
+            s3_client = get_s3_client()
+        except ImportError:
+            # Fallback for Lambda environment where deployment module isn't available
+            import boto3
+            s3_client = boto3.client("s3")
 
     response: "ListObjectsV2OutputTypeDef" = s3_client.list_objects_v2(
         Bucket=bucket_name,
@@ -121,9 +136,14 @@ def fetch_s3_objects_metadata(
     """
     #s3_client = s3_client or boto3.client("s3")
     if s3_client is None:
-        # Use the centralized client that respects mock settings
-        from deployment.aws.utils.aws_clients import get_s3_client
-        s3_client = get_s3_client()
+        # Try to use centralized client manager for mock/dev modes
+        try:
+            from deployment.aws.utils.aws_clients import get_s3_client
+            s3_client = get_s3_client()
+        except ImportError:
+            # Fallback for Lambda environment where deployment module isn't available
+            import boto3
+            s3_client = boto3.client("s3")
     response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix or "", MaxKeys=max_keys)
     files: list["ObjectTypeDef"] = response.get("Contents", [])
     next_page_token: str | None = response.get("NextContinuationToken")
