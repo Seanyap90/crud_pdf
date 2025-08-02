@@ -111,11 +111,7 @@ class ECSClusterManager:
                 autoScalingGroupProvider={
                     'autoScalingGroupArn': asg['AutoScalingGroupARN'],
                     'managedScaling': {
-                        'status': 'ENABLED',
-                        'targetCapacity': 100,
-                        'minimumScalingStepSize': 1,
-                        'maximumScalingStepSize': 2,
-                        'instanceWarmupPeriod': 180  # 3 minutes for GPU instance warmup
+                        'status': 'DISABLED'  # Disable ECS managed scaling to prevent dynamic policies
                     },
                     'managedTerminationProtection': 'DISABLED'
                 },
@@ -286,7 +282,7 @@ systemctl restart ecs
                 },
                 MinSize=0,          # Scale to zero when idle
                 MaxSize=2,          # HARD LIMIT: 2 instances max (adjusted for current quota)
-                DesiredCapacity=0,  # Start with zero instances
+                DesiredCapacity=1,  # Start with one instance ready
                 VPCZoneIdentifier=','.join(subnet_ids),
                 DefaultCooldown=300,  # 5 minutes cooldown
                 Tags=[

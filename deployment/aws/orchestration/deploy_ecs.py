@@ -384,7 +384,17 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         database_public_ip = self.database_manager.get_instance_public_ip(database_config['instance_id'])
         database_config['public_ip'] = database_public_ip
         
+        # Update SSH command with public IP for external access
+        if 'ssh_private_key_path' in database_config:
+            database_config['ssh_command'] = f'ssh -i {database_config["ssh_private_key_path"]} ec2-user@{database_public_ip}'
+        
         logger.info(f"Database server created: {database_config['instance_id']} at public IP {database_public_ip}")
+        
+        # Display SSH connection information
+        if 'ssh_command' in database_config:
+            logger.info(f"SSH Access: {database_config['ssh_command']}")
+            logger.info(f"Private key saved to: {database_config['ssh_private_key_path']}")
+        
         return database_config
     
     @log_operation("Lambda functions deployment")
@@ -504,97 +514,59 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         
         logger.info("=" * 60)
     
-    @log_operation("Auto-scaling configuration")
+    @log_operation("Auto-scaling simulator setup")
     def _setup_auto_scaling(self, services_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Set up native AWS auto-scaling for VLM workers."""
+        """Set up SQS-based scaling simulator (proven main branch approach)."""
         try:
-            from deployment.aws.infrastructure.ecs_scaling import create_ecs_autoscaler
-            
             vlm_service_info = services_config.get('vlm_workers', {})
             vlm_service_name = vlm_service_info.get('service_name', 'vlm-workers')
             
-            # Get SQS queue URL for scaling metrics
+            # Get SQS queue URL
             queue_url = settings.sqs_queue_url
             if not queue_url:
-                logger.warning("SQS queue URL not available - auto-scaling may not work properly")
+                logger.warning("SQS queue URL not available - will use fallback URL")
                 queue_url = f"https://sqs.{settings.aws_region}.amazonaws.com/{settings.account_id}/{settings.sqs_queue_name}"
             
-            logger.info(f"Setting up native AWS auto-scaling for {vlm_service_name}")
+            logger.info(f"Setting up SQS-based scaling simulator for {vlm_service_name}")
             logger.info(f"Queue URL: {queue_url}")
             
-            # Create and configure auto-scaler
-            autoscaler = create_ecs_autoscaler(
-                cluster_name=ECS_CLUSTER_NAME,
-                service_name=vlm_service_name,
-                queue_url=queue_url
-            )
-            
-            # Register with scaling manager for lifecycle management
-            from deployment.aws.infrastructure.ecs_scaling_manager import get_scaling_manager
-            scaling_manager = get_scaling_manager()
-            
-            # Get scaling status
-            scaling_status = autoscaler.get_scaling_status()
-            
-            # Register autoscaler with manager
-            scaling_manager.register_autoscaler(
-                service_name=vlm_service_name,
-                autoscaler=autoscaler,
-                config={
-                    "cluster_name": ECS_CLUSTER_NAME,
-                    "queue_url": queue_url,
-                    "scaling_status": scaling_status
-                }
-            )
-            
+            # Create scaling configuration (using proven main branch approach)
             scaling_config = {
                 "vlm_workers": {
                     "service_name": vlm_service_name,
                     "cluster_name": ECS_CLUSTER_NAME,
-                    "min_capacity": scaling_status.get('min_capacity', 0),
-                    "max_capacity": scaling_status.get('max_capacity', 3),
-                    "current_capacity": scaling_status.get('current_capacity', 0),
-                    "desired_capacity": scaling_status.get('desired_capacity', 0),
-                    "resource_id": scaling_status.get('resource_id'),
                     "queue_url": queue_url,
-                    "scaling_policies": {
-                        "scale_out_cooldown": 300,
-                        "scale_in_cooldown": 600,
-                        "evaluation_periods": 2,
-                        "metric_name": "BacklogPerTask"
-                    },
-                    "status": scaling_status.get('status', 'unknown'),
-                    "autoscaler_instance": autoscaler  # Store for cleanup
+                    "min_capacity": 0,  # Scale to zero
+                    "max_capacity": 2,  # Adjusted for GPU quota
+                    "scale_up_threshold": 1,  # 1 message = scale up
+                    "scale_down_threshold": 0,  # 0 messages = scale to zero
+                    "cooldown_period": 300,  # 5 minutes
+                    "evaluation_interval": 15,  # Check every 15 seconds
+                    "scaling_method": "sqs_based_simulation",  # Use proven approach
+                    "status": "configured"
                 }
             }
             
-            logger.info(f"✅ Native AWS auto-scaling configured for {vlm_service_name}")
-            logger.info(f"   Min/Max capacity: {scaling_status.get('min_capacity', 0)}/{scaling_status.get('max_capacity', 3)}")
-            logger.info(f"   Current/Desired: {scaling_status.get('current_capacity', 0)}/{scaling_status.get('desired_capacity', 0)}")
+            logger.info(f"✅ SQS-based scaling configured for {vlm_service_name}")
+            logger.info(f"   Instance range: 0-2 (scale-to-zero enabled)")
+            logger.info(f"   Thresholds: scale_up=1 msg, scale_down=0 msg")
+            logger.info(f"   Evaluation: every 15s, cooldown=300s")
             
             return scaling_config
             
         except Exception as e:
-            logger.error(f"Failed to setup native AWS auto-scaling: {e}")
-            logger.warning("Falling back to placeholder configuration")
+            logger.error(f"Failed to setup SQS-based scaling: {e}")
             
-            # Fallback to placeholder configuration
-            vlm_service_name = services_config.get('services', {}).get('vlm_workers', {}).get('serviceName', 'vlm-workers')
-            
+            # Minimal fallback configuration
             scaling_config = {
                 "vlm_workers": {
                     "service_name": vlm_service_name,
-                    "min_capacity": 0,
-                    "max_capacity": 3,
-                    "target_metric": "SQS_ApproximateNumberOfMessages",
-                    "scale_out_cooldown": 300,
-                    "scale_in_cooldown": 600,
-                    "status": "fallback_placeholder",
+                    "status": "fallback_configuration",
                     "error": str(e)
                 }
             }
             
-            logger.warning(f"Auto-scaling placeholder configured for {vlm_service_name}")
+            logger.warning(f"Using fallback scaling configuration for {vlm_service_name}")
             return scaling_config
 
     def _check_ecr_repository_exists(self, ecr_client) -> bool:
@@ -1192,22 +1164,6 @@ def cleanup_deployment(mode: str = None) -> None:
     elif mode == "aws-prod":
         logger.info("Cleaning up production deployment")
         try:
-            # Clean up auto-scaling first
-            logger.info("Phase 1: Cleaning up auto-scaling resources")
-            try:
-                from deployment.aws.infrastructure.ecs_scaling_manager import cleanup_all_scaling
-                scaling_cleanup_results = cleanup_all_scaling()
-                
-                success_count = sum(1 for success in scaling_cleanup_results.values() if success)
-                total_count = len(scaling_cleanup_results)
-                logger.info(f"Auto-scaling cleanup: {success_count}/{total_count} services cleaned up successfully")
-                
-                if success_count < total_count:
-                    logger.warning("Some auto-scaling resources may not have been cleaned up properly")
-                    
-            except Exception as e:
-                logger.error(f"Auto-scaling cleanup failed: {e}")
-            
             # Initialize managers
             service_manager = ECSServiceManager(settings.aws_region)
             cluster_manager = ECSClusterManager(settings.aws_region)
@@ -1215,20 +1171,20 @@ def cleanup_deployment(mode: str = None) -> None:
             efs_manager = EFSManager(settings.aws_region)
             vpc_builder = VPCNetworkBuilder(settings.aws_region)
             
-            # Clean up in reverse order
-            logger.info("Phase 2: Cleaning up ECS services")
+            # Clean up in reverse order (ECS + ASG scaling cleanup is handled automatically by AWS)
+            logger.info("Phase 1: Cleaning up ECS services")
             service_manager.cleanup_services_resources()
             
-            logger.info("Phase 3: Cleaning up ECS cluster")
+            logger.info("Phase 2: Cleaning up ECS cluster")
             cluster_manager.cleanup_cluster_resources()
             
-            logger.info("Phase 4: Cleaning up database infrastructure")
+            logger.info("Phase 3: Cleaning up database infrastructure")
             database_manager.cleanup_database_instance()
             
-            logger.info("Phase 5: Cleaning up EFS resources")
+            logger.info("Phase 4: Cleaning up EFS resources")
             efs_manager.cleanup_efs_resources()
             
-            logger.info("Phase 6: Cleaning up VPC resources")
+            logger.info("Phase 5: Cleaning up VPC resources")
             vpc_builder.cleanup_vpc_resources()
             
             logger.info("✅ Production deployment cleaned up successfully")

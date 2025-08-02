@@ -8,7 +8,6 @@ import json
 import logging
 import threading
 import os
-import sys
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Union
 from flask import Flask, request, jsonify
@@ -41,27 +40,66 @@ class SQLiteHTTPServer:
         """Ensure database file and directory exist."""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         
-        # Initialize database with basic structure if it doesn't exist
-        if not os.path.exists(self.db_path):
-            with DB_LOCK:
-                conn = sqlite3.connect(self.db_path)
-                try:
-                    # Create basic tables (matching NoSQLAdapter structure)
-                    conn.execute('''
-                        CREATE TABLE IF NOT EXISTS documents (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            collection TEXT NOT NULL,
-                            doc_id TEXT NOT NULL,
-                            document TEXT NOT NULL,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            UNIQUE(collection, doc_id)
-                        )
-                    ''')
-                    conn.commit()
-                    logger.info(f"Initialized database: {self.db_path}")
-                finally:
-                    conn.close()
+        # Always ensure collection-specific tables exist (matching NoSQLAdapter structure)
+        with DB_LOCK:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                cursor = conn.cursor()
+                
+                # Create vendor_invoices collection table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS vendor_invoices_docs (
+                        invoice_id INTEGER PRIMARY KEY,
+                        document TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # Create gateways collection table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS gateways_docs (
+                        gateway_id TEXT PRIMARY KEY,
+                        document TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # Create devices collection table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS devices_docs (
+                        device_id TEXT PRIMARY KEY,
+                        document TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # Create measurements collection table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS measurements_docs (
+                        measurement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        document TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # Create config_updates collection table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS config_updates_docs (
+                        update_id TEXT PRIMARY KEY,
+                        document TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                conn.commit()
+                logger.info(f"Database initialized with collection-specific tables: {self.db_path}")
+            finally:
+                conn.close()
     
     def execute_query(self, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
         """Execute SELECT query and return results."""
@@ -206,9 +244,5 @@ if __name__ == '__main__':
     # Update global DB_PATH
     DB_PATH = args.db_path
     
-    # Run with Gunicorn in production, Flask in development
-    if len(sys.argv) > 1 and '--gunicorn' in sys.argv:
-        # This will be called by gunicorn
-        pass
-    else:
-        app.run(host=args.host, port=args.port, debug=False)
+    # Run Flask development server (sufficient for our single-writer use case)
+    app.run(host=args.host, port=args.port, debug=False)

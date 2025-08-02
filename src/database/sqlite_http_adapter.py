@@ -89,20 +89,55 @@ class SQLiteHTTPAdapter:
     # NoSQLAdapter interface implementation
     
     def create_document(self, collection: str, document: Dict[str, Any]) -> Union[str, int]:
-        """Create a new document in the collection."""
+        """Create a new document in the collection (matching NoSQLAdapter structure)."""
         try:
-            # Generate document ID if not provided
-            doc_id = document.get('id') or document.get('_id') or self._generate_doc_id()
-            
             # Serialize document to JSON
             doc_json = json.dumps(document, default=str)
             
-            # Insert document
-            result = self._execute_command(
-                """INSERT INTO documents (collection, doc_id, document, created_at, updated_at) 
-                   VALUES (?, ?, ?, ?, ?)""",
-                (collection, str(doc_id), doc_json, datetime.utcnow(), datetime.utcnow())
-            )
+            # Handle different collections with specific ID patterns (same as NoSQLAdapter)
+            if collection == 'vendor_invoices':
+                doc_id = document['invoice_id']
+                self._execute_command(
+                    "INSERT INTO vendor_invoices_docs (invoice_id, document) VALUES (?, ?)",
+                    (doc_id, doc_json)
+                )
+                
+            elif collection == 'gateways':
+                doc_id = document['gateway_id']
+                self._execute_command(
+                    "INSERT INTO gateways_docs (gateway_id, document) VALUES (?, ?)",
+                    (doc_id, doc_json)
+                )
+                
+            elif collection == 'devices':
+                doc_id = document['device_id']
+                self._execute_command(
+                    "INSERT INTO devices_docs (device_id, document) VALUES (?, ?)",
+                    (doc_id, doc_json)
+                )
+                
+            elif collection == 'measurements':
+                # Auto-increment ID for measurements
+                result = self._execute_command(
+                    "INSERT INTO measurements_docs (document) VALUES (?)",
+                    (doc_json,)
+                )
+                doc_id = result['lastrowid']
+                
+            elif collection == 'config_updates':
+                doc_id = document['update_id']
+                self._execute_command(
+                    "INSERT INTO config_updates_docs (update_id, document) VALUES (?, ?)",
+                    (doc_id, doc_json)
+                )
+                
+            else:
+                # Fallback for unknown collections
+                doc_id = document.get('_id') or self._generate_doc_id()
+                self._execute_command(
+                    f"INSERT INTO {collection}_docs (document) VALUES (?)",
+                    (doc_json,)
+                )
             
             logger.debug(f"Created document in {collection}: {doc_id}")
             return doc_id
@@ -112,11 +147,27 @@ class SQLiteHTTPAdapter:
             raise
     
     def get_document(self, collection: str, doc_id: Union[str, int]) -> Optional[Dict[str, Any]]:
-        """Get a document by ID from the collection."""
+        """Get a document by ID from the collection (matching NoSQLAdapter structure)."""
         try:
+            # Use collection-specific table and ID column
+            table_name = f"{collection}_docs"
+            
+            if collection == 'vendor_invoices':
+                id_column = 'invoice_id'
+            elif collection == 'gateways':
+                id_column = 'gateway_id'
+            elif collection == 'devices':
+                id_column = 'device_id'
+            elif collection == 'measurements':
+                id_column = 'measurement_id'
+            elif collection == 'config_updates':
+                id_column = 'update_id'
+            else:
+                id_column = 'id'  # fallback
+            
             results = self._execute_query(
-                "SELECT document FROM documents WHERE collection = ? AND doc_id = ?",
-                (collection, str(doc_id))
+                f"SELECT document FROM {table_name} WHERE {id_column} = ?",
+                (doc_id,)
             )
             
             if not results:
@@ -180,27 +231,42 @@ class SQLiteHTTPAdapter:
     
     def query_documents(self, collection: str, query: Dict[str, Any], 
                        limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-        """Query documents from the collection with filters."""
+        """Query documents from the collection with filters (matching NoSQLAdapter structure)."""
         try:
-            # Build SQL query based on document query
-            sql_query = "SELECT document FROM documents WHERE collection = ?"
-            params = [collection]
+            # Build SQL query using collection-specific table (same as NoSQLAdapter)
+            table_name = f"{collection}_docs"
+            base_query = f"SELECT document FROM {table_name}"
+            where_clauses = []
+            params = []
             
-            # Add query filters (simplified implementation)
+            # Build WHERE clauses based on query filters (same logic as NoSQLAdapter)
             for key, value in query.items():
-                if key.startswith('$'):
-                    # Skip MongoDB-style operators for now
-                    continue
-                
-                # Simple JSON field matching
-                sql_query += " AND JSON_EXTRACT(document, ?) = ?"
-                params.extend([f"$.{key}", value])
+                if key == '_id':
+                    # Special case for document ID (same as NoSQLAdapter)
+                    if collection == 'vendor_invoices':
+                        where_clauses.append("invoice_id = ?")
+                    elif collection == 'gateways':
+                        where_clauses.append("gateway_id = ?")
+                    elif collection == 'devices':
+                        where_clauses.append("device_id = ?")
+                    elif collection == 'measurements':
+                        where_clauses.append("measurement_id = ?")
+                    elif collection == 'config_updates':
+                        where_clauses.append("update_id = ?")
+                    params.append(value)
+                else:
+                    # JSON path query (same as NoSQLAdapter)
+                    json_path = f"$.{key}"
+                    where_clauses.append(f"json_extract(document, ?) = ?")
+                    params.extend([json_path, value])
             
-            # Add ordering and pagination
-            sql_query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            if where_clauses:
+                base_query += " WHERE " + " AND ".join(where_clauses)
+            
+            base_query += f" LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             
-            results = self._execute_query(sql_query, tuple(params))
+            results = self._execute_query(base_query, tuple(params))
             
             # Parse JSON documents
             documents = []
@@ -217,27 +283,39 @@ class SQLiteHTTPAdapter:
             raise
     
     def count_documents(self, collection: str, query: Dict[str, Any] = None) -> int:
-        """Count documents in the collection matching the query."""
+        """Count documents in the collection matching the query (matching NoSQLAdapter structure)."""
         try:
-            if not query:
-                # Simple count all
-                results = self._execute_query(
-                    "SELECT COUNT(*) as count FROM documents WHERE collection = ?",
-                    (collection,)
-                )
-            else:
-                # Build SQL query with filters
-                sql_query = "SELECT COUNT(*) as count FROM documents WHERE collection = ?"
-                params = [collection]
-                
-                for key, value in query.items():
-                    if key.startswith('$'):
-                        continue
-                    sql_query += " AND JSON_EXTRACT(document, ?) = ?"
-                    params.extend([f"$.{key}", value])
-                
-                results = self._execute_query(sql_query, tuple(params))
+            # Use collection-specific table
+            table_name = f"{collection}_docs"
+            base_query = f"SELECT COUNT(*) as count FROM {table_name}"
+            params = []
             
+            if query:
+                where_clauses = []
+                for key, value in query.items():
+                    if key == '_id':
+                        # Special case for document ID (same as NoSQLAdapter)
+                        if collection == 'vendor_invoices':
+                            where_clauses.append("invoice_id = ?")
+                        elif collection == 'gateways':
+                            where_clauses.append("gateway_id = ?")
+                        elif collection == 'devices':
+                            where_clauses.append("device_id = ?")
+                        elif collection == 'measurements':
+                            where_clauses.append("measurement_id = ?")
+                        elif collection == 'config_updates':
+                            where_clauses.append("update_id = ?")
+                        params.append(value)
+                    else:
+                        # JSON path query (same as NoSQLAdapter)
+                        json_path = f"$.{key}"
+                        where_clauses.append(f"json_extract(document, ?) = ?")
+                        params.extend([json_path, value])
+                
+                if where_clauses:
+                    base_query += " WHERE " + " AND ".join(where_clauses)
+            
+            results = self._execute_query(base_query, tuple(params))
             count = results[0]['count'] if results else 0
             logger.debug(f"Counted {count} documents in {collection}")
             return count

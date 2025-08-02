@@ -97,8 +97,8 @@ class Settings(BaseSettings):
     
     # GPU Instance Configuration
     primary_instance_type: str = Field(
-        default="g4dn.xlarge",
-        description="Primary GPU instance type for cost optimization"
+        default="g5.xlarge",
+        description="Primary GPU instance type - A10G with better availability than g4dn"
     )
     
     # Model Configuration
@@ -213,7 +213,7 @@ class Settings(BaseSettings):
         return {
             'us-east-1': {
                 'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge', 'g4dn.large'],
-                'spot_max_price': 0.28,  # Increased for current spot prices (was 0.20, need 0.2074+)
+                'spot_max_price': 0.42,  # Increased for better availability across AZs
                 'gpu_memory_limit': '12GiB'  # Safe for 16GB T4
             },
             'us-west-2': {
