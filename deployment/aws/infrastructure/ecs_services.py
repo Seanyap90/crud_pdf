@@ -48,7 +48,7 @@ class ECSServiceManager:
                 networkConfiguration={
                     'awsvpcConfiguration': {
                         'subnets': [vpc_config['public_subnet_id']],  # Need internet for downloads
-                        'securityGroups': [vpc_config['efs_security_group_id']],
+                        'securityGroups': [vpc_config['ecs_workers_security_group_id']],
                         'assignPublicIp': 'ENABLED'  # Need internet access
                     }
                 },
@@ -109,9 +109,9 @@ class ECSServiceManager:
                 ],
                 networkConfiguration={
                     'awsvpcConfiguration': {
-                        'subnets': [vpc_config['private_subnet_id']],
-                        'securityGroups': [vpc_config['vlm_workers_security_group_id']],
-                        'assignPublicIp': 'DISABLED'
+                        'subnets': [vpc_config['public_subnet_id']],  # Use public subnet for optimized architecture
+                        'securityGroups': [vpc_config['ecs_workers_security_group_id']],
+                        # EC2 launch type gets internet access via EC2 instance public IP, not task-level assignPublicIp
                     }
                 },
                 enableExecuteCommand=True,
@@ -260,10 +260,10 @@ class ECSServiceManager:
                     {
                         'name': 'model-storage',
                         'efsVolumeConfiguration': {
-                            'fileSystemId': efs_config['models']['file_system_id'],
+                            'fileSystemId': efs_config['shared_models']['file_system_id'],
                             'transitEncryption': 'ENABLED',
                             'authorizationConfig': {
-                                'accessPointId': efs_config['models']['access_point_id']
+                                'accessPointId': efs_config['shared_models']['access_point_id']
                             }
                         }
                     }

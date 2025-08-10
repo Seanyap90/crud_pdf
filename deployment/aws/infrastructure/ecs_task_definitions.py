@@ -145,10 +145,10 @@ class TaskDefinitionBuilder:
                     {
                         'name': 'model-storage',
                         'efsVolumeConfiguration': {
-                            'fileSystemId': efs_config['models']['file_system_id'],
+                            'fileSystemId': efs_config['shared_models']['file_system_id'],
                             'transitEncryption': 'ENABLED',
                             'authorizationConfig': {
-                                'accessPointId': efs_config['models']['access_point_id']
+                                'accessPointId': efs_config['shared_models']['access_point_id']
                             }
                         }
                     }
@@ -158,6 +158,7 @@ class TaskDefinitionBuilder:
                         'name': 'vlm-worker',
                         'image': f"{settings.ecr_registry}/{settings.ecr_repo_name}:latest",
                         'essential': True,
+                        'user': '0:0',  # Run as root
                         'resourceRequirements': [
                             {
                                 'type': 'GPU',
@@ -227,10 +228,10 @@ class TaskDefinitionBuilder:
                     {
                         'name': 'model-storage',
                         'efsVolumeConfiguration': {
-                            'fileSystemId': efs_config['models']['file_system_id'],
+                            'fileSystemId': efs_config['shared_models']['file_system_id'],
                             'transitEncryption': 'ENABLED',
                             'authorizationConfig': {
-                                'accessPointId': efs_config['models']['access_point_id']
+                                'accessPointId': efs_config['shared_models']['access_point_id']
                             }
                         }
                     }
@@ -240,6 +241,7 @@ class TaskDefinitionBuilder:
                         'name': 'model-downloader',
                         'image': f"{settings.ecr_registry}/{settings.ecr_repo_name}:latest",
                         'essential': True,
+                        'user': '0:0',  # Run as root
                         'environment': [
                             {'name': 'DEPLOYMENT_MODE', 'value': 'aws-prod'},
                             {'name': 'AWS_REGION', 'value': self.region},
@@ -369,9 +371,6 @@ def create_model_downloader_task_definition(efs_config: Dict[str, Any]) -> str:
     """Create model downloader task definition (convenience function). Returns ARN."""
     builder = TaskDefinitionBuilder()
     return builder.create_model_downloader_task_definition(efs_config)
-
-
-
 
 def create_vlm_worker_task_definition(efs_config: Dict[str, Any]) -> str:
     """Create VLM worker task definition (convenience function). Returns ARN."""

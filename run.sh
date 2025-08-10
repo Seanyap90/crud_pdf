@@ -340,26 +340,73 @@ function aws-mock-down {
     echo "💡 All containers, volumes, and networks removed"
 }
 
-# Deploy to AWS using 4-phase Docker Compose ECS architecture
+# Deploy to AWS using optimized hybrid console+code architecture
 function aws-prod {
     set +e
     
-    echo "🚀 Deploying 4-phase ECS architecture to AWS..."
-    echo "📦 Architecture: Lambda API + EC2 SQLite Database (Manual Setup) + ECS Workers"
+    echo "🚀 AWS Production Deployment - Choose Architecture"
+    echo "================================================"
+    echo "Available deployment modes:"
+    echo "  1. Traditional Full Code Deployment (creates all infrastructure)"
+    echo "  2. Hybrid Console+Code Deployment (validates console resources, deploys services)"
+    echo "  3. Infrastructure-Only (creates infrastructure, exports config)"
+    echo ""
     
-    # Set deployment mode
+    # Check if environment variables for console deployment are set
+    if [ -n "$VPC_ID" ] && [ -n "$PUBLIC_SUBNET_ID" ] && [ -n "$EFS_FILE_SYSTEM_ID" ]; then
+        echo "🔍 Detected console resource environment variables - suggesting hybrid deployment"
+        DEFAULT_MODE="hybrid"
+    else
+        echo "📋 No console resources detected - suggesting traditional deployment"
+        DEFAULT_MODE="traditional"
+    fi
+    
+    echo ""
+    read -p "Choose deployment mode (1=traditional, 2=hybrid, 3=infrastructure-only) [default: auto]: " DEPLOYMENT_CHOICE
+    
+    # Set deployment mode based on user choice
+    case $DEPLOYMENT_CHOICE in
+        1)
+            DEPLOY_MODE="traditional"
+            ;;
+        2)
+            DEPLOY_MODE="hybrid"
+            ;;
+        3)
+            DEPLOY_MODE="infrastructure-only"
+            ;;
+        *)
+            DEPLOY_MODE=$DEFAULT_MODE
+            echo "Using auto-detected mode: $DEPLOY_MODE"
+            ;;
+    esac
+    
     export DEPLOYMENT_MODE="aws-prod"
     
-    # Phase 1: Deploy infrastructure with GPU capacity provider and export configuration
-    echo "🏗️ Phase 1: Deploying ECS infrastructure with GPU capacity provider and exporting configuration..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --export-config .env.aws-prod
+    # Execute deployment based on chosen mode
+    if [ "$DEPLOY_MODE" = "hybrid" ]; then
+        aws_prod_hybrid
+    elif [ "$DEPLOY_MODE" = "infrastructure-only" ]; then
+        aws_prod_infrastructure_only
+    else
+        aws_prod_traditional
+    fi
+}
+
+# Traditional full code deployment (original approach)
+function aws_prod_traditional {
+    echo "🚀 Traditional AWS Production Deployment"
+    echo "========================================"
+    echo "📦 Architecture: Full code-based infrastructure + services"
+    
+    # Phase 1: Deploy infrastructure with optimized architecture
+    echo "🏗️ Phase 1: Deploying optimized ECS infrastructure..."
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --infrastructure-only --export-config .env.aws-prod
     
     if [ $? -ne 0 ]; then
         echo "❌ Error: Infrastructure deployment failed"
         exit 1
     fi
-    
-    echo "✅ Infrastructure deployed and configuration exported to .env.aws-prod"
     
     # Source the exported configuration
     if [ -f ".env.aws-prod" ]; then
@@ -371,46 +418,8 @@ function aws-prod {
         exit 1
     fi
     
-    # Phase 2: Skip local EFS mounting (EFS will be mounted by ECS tasks on AWS)
-    echo "💾 Phase 2: Skipping local EFS mounting (ECS tasks will mount EFS on AWS)..."
-    echo "✅ EFS configuration ready for ECS services"
-    
-    # Phase 3: Skip model population (models will be downloaded by ECS tasks on first run)
-    echo "🤖 Phase 3: Skipping model population (ECS tasks will download models on first run)..."
-    echo "✅ Model downloading will be handled by ECS workers"
-    
-    # Phase 4: Deploy services using Docker Compose
-    echo "🐳 Phase 4: Deploying services with Docker Compose..."
-    
-    # Build ECR image if needed
-    echo "🔨 Checking ECR image availability..."
-    # Load ECR repository name from settings
-    ECR_REPO_NAME=$(python3 -c "from files_api.config.settings import get_settings; print(get_settings().ecr_repo_name)")
-    
-    # Get ECR repository URI
-    ECR_URI="${AWS_ACCOUNT_ID:-123456789012}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}"
-    
-    # Check if ECR image already exists
-    echo "🔍 Checking if ECR image exists: ${ECR_REPO_NAME}:latest"
-    if aws ecr describe-images --repository-name "$ECR_REPO_NAME" --image-ids imageTag=latest --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1; then
-        echo "✅ ECR image ${ECR_REPO_NAME}:latest already exists, skipping build"
-    else
-        echo "❌ ECR image not found, building and pushing..."
-        
-        # Build and push image
-        echo "📦 Building VLM worker image..."
-        docker build -t "$ECR_URI:latest" -f deployment/docker/vlm-worker/Dockerfile .
-        
-        # Push to ECR (requires AWS credentials)
-        echo "📤 Pushing to ECR..."
-        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_URI" 2>/dev/null || {
-            echo "⚠️ ECR push failed - image will be built during deployment"
-            echo "💡 Deployment will fail if ECR image doesn't exist. Please fix AWS credentials and try again."
-        }
-    fi
-    
-    # Phase 4: Deploy ECS services (idempotent - preserves existing infrastructure)
-    echo "🚀 Phase 4: Deploying ECS services (MongoDB + VLM workers)..."
+    # Phase 2: Deploy services
+    echo "🚀 Phase 2: Deploying ECS services..."
     python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --deploy-services
     
     if [ $? -ne 0 ]; then
@@ -418,71 +427,128 @@ function aws-prod {
         exit 1
     fi
     
-    echo "✅ ECS services deployed successfully"
-    
-    # Phase 5: Deploy Lambda functions (Files API)
-    echo "📋 Phase 5: Deploying Lambda functions..."
-    python -m deployment.aws.services.lambda_deploy
+    # Phase 3: Deploy Lambda functions (optimized - no VPC)
+    echo "⚡ Phase 3: Deploying Lambda functions (no VPC)..."
+    python -m deployment.aws.services.lambda_deploy --files-api-no-vpc
     
     if [ $? -ne 0 ]; then
         echo "❌ Error: Lambda deployment failed"
         exit 1
     fi
     
-    echo "✅ Lambda functions deployed successfully"
+    echo ""
+    echo "🎉 Traditional AWS Production deployment completed!"
+    _show_deployment_summary
+}
+
+# Hybrid console+code deployment (optimized approach)
+function aws_prod_hybrid {
+    echo "🔍 Hybrid Console+Code AWS Production Deployment"
+    echo "==============================================="
+    echo "📦 Architecture: Console infrastructure + code services"
     
-    # Phase 6: Post-deployment configuration
-    echo "🔧 Phase 6: Updating environment variables with actual resource IDs..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --update-environment
+    # Validate console prerequisites
+    echo "📋 Validating console-created resources..."
+    
+    # Check required environment variables
+    REQUIRED_VARS=("VPC_ID" "PUBLIC_SUBNET_ID" "EFS_FILE_SYSTEM_ID" "EFS_ACCESS_POINT_ID" "S3_BUCKET_NAME" "SQS_QUEUE_URL" "DATABASE_SG_ID" "EFS_SG_ID" "ECS_WORKERS_SG_ID")
+    
+    for var in "${REQUIRED_VARS[@]}"; do
+        if [ -z "${!var}" ]; then
+            echo "❌ Error: Required environment variable $var is not set"
+            echo "💡 Set console resource environment variables before running hybrid deployment"
+            echo "   Example: export VPC_ID=vpc-12345678"
+            exit 1
+        fi
+    done
+    
+    echo "✅ Console resource environment variables detected"
+    
+    # Deploy using hybrid approach
+    echo "🚀 Deploying services using console infrastructure..."
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console
     
     if [ $? -ne 0 ]; then
-        echo "⚠️ Warning: Environment variable update failed, but deployment can continue"
-    else
-        echo "✅ Environment variables updated successfully"
+        echo "❌ Error: Hybrid deployment failed"
+        exit 1
     fi
     
     echo ""
-    echo "🎉 6-Phase AWS Production deployment completed successfully!"
-    echo "📊 Architecture deployed:"
-    echo "   • Phase 1: ✅ ECS Infrastructure (VPC, EFS, Cluster)"
-    echo "   • Phase 2: ✅ EFS Mount Points"
-    echo "   • Phase 3: ✅ Model Population"
-    echo "   • Phase 4: ✅ ECS Services (VLM Workers)"
-    echo "   • Phase 5: ✅ Lambda API"
-    echo "   • Phase 6: ✅ Environment Configuration"
-    echo ""
-    echo "🔗 Services:"
-    echo "   • EC2 Database: SQLite HTTP server in public subnet (manual setup required)"
-    echo "   • VLM Workers: Native ECS services with EFS model cache"
-    echo "   • Files API: Lambda with scale-to-zero"
-    echo "   • Auto-scaling: Native CloudWatch integration"
-    echo ""
-    echo "📋 Management commands:"
-    echo "   • View logs: aws ecs describe-services --cluster fastapi-app-ecs-cluster --services fastapi-app-vlm-workers"
-    echo "   • Scale workers: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 3"
-    echo "   • Stop services: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 0"
-    echo ""
+    echo "🎉 Hybrid Console+Code deployment completed!"
+    echo "💰 Cost Optimization: NAT Gateway eliminated (saves $32.40/month)"
+    _show_deployment_summary
+}
+
+# Infrastructure-only deployment
+function aws_prod_infrastructure_only {
+    echo "🏗️ Infrastructure-Only AWS Production Deployment"
+    echo "==============================================="
+    echo "📦 Architecture: Infrastructure setup + configuration export"
     
+    # Phase 1: Deploy optimized infrastructure only
+    echo "🏗️ Deploying optimized infrastructure (single EFS, public subnets)..."
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --infrastructure-only --export-config .env.aws-prod
+    
+    if [ $? -ne 0 ]; then
+        echo "❌ Error: Infrastructure deployment failed"
+        exit 1
+    fi
+    
+    echo ""
+    echo "🎉 Infrastructure-only deployment completed!"
+    echo "📋 Configuration exported to .env.aws-prod"
+    echo "💡 Next steps:"
+    echo "   1. Review .env.aws-prod configuration"
+    echo "   2. Complete manual database setup (see deployment/aws/services/README.md)"
+    echo "   3. Run services deployment: make aws-prod (choose option 1 or 2)"
+}
+
+# Shared deployment summary function
+function _show_deployment_summary {
     # Get database public IP from configuration file
     if [ -f ".env.aws-prod" ]; then
-        DATABASE_PUBLIC_IP=$(grep "^DATABASE_PUBLIC_IP=" .env.aws-prod | cut -d= -f2)
+        DATABASE_PUBLIC_IP=$(grep "^DATABASE_PUBLIC_IP=" .env.aws-prod | cut -d= -f2 2>/dev/null)
+        DATABASE_HOST=$(grep "^DATABASE_HOST=" .env.aws-prod | cut -d= -f2 2>/dev/null)
+        EFS_SHARED_MODELS_ID=$(grep "^EFS_SHARED_MODELS_ID=" .env.aws-prod | cut -d= -f2 2>/dev/null)
+        VPC_ID=$(grep "^VPC_ID=" .env.aws-prod | cut -d= -f2 2>/dev/null)
     fi
     
-    echo "📋 Manual Setup Required:"
-    echo "   1. SSH to EC2 database instance:"
-    if [ -n "$DATABASE_PUBLIC_IP" ]; then
-        echo "      ssh ec2-user@${DATABASE_PUBLIC_IP}"
-    else
-        echo "      ssh ec2-user@<DATABASE_PUBLIC_IP> (check .env.aws-prod for IP)"
+    echo "📊 Deployment Summary:"
+    echo "====================="
+    if [ -n "$VPC_ID" ]; then
+        echo "   • VPC: $VPC_ID"
     fi
-    echo "   2. Install dependencies:"
-    echo "      sudo yum update -y"
-    echo "      sudo yum install -y python3 python3-pip"
-    echo "      pip3 install flask"
-    echo "   3. Set up SQLite database and Flask API on port 8080"
-    echo "   4. Configure API Gateway to point to Lambda function"
+    if [ -n "$EFS_SHARED_MODELS_ID" ]; then
+        echo "   • Shared Models EFS: $EFS_SHARED_MODELS_ID"
+    fi
+    if [ -n "$DATABASE_HOST" ]; then
+        echo "   • Database: $DATABASE_HOST:8080"
+    fi
+    echo "   • Lambda: Deployed without VPC (faster cold starts)"
+    echo "   • ECS Workers: Auto-scaling enabled"
     echo ""
-    echo "🔗 Access your deployment via API Gateway (manual setup required)"
+    echo "💰 Cost Optimizations Applied:"
+    echo "   • Single EFS instead of 3 (simplified storage)"
+    echo "   • Database on EC2 boot volume (no database EFS)"
+    echo "   • Lambda without VPC (no NAT Gateway needed for Lambda)"
+    echo "   • Public subnet architecture (reduced networking costs)"
+    echo ""
+    
+    if [ -n "$DATABASE_PUBLIC_IP" ]; then
+        echo "📋 Manual Database Setup:"
+        echo "   1. SSH to database instance:"
+        echo "      ssh -i ~/.ssh/*database-key*.pem ubuntu@${DATABASE_PUBLIC_IP}"
+        echo "   2. Follow setup guide: deployment/aws/services/README.md"
+        echo "   3. Test database: curl http://${DATABASE_HOST:-$DATABASE_PUBLIC_IP}:8080/health"
+    else
+        echo "⚠️ Database IP not found - check .env.aws-prod for connection details"
+    fi
+    
+    echo ""
+    echo "🔗 Management Commands:"
+    echo "   • View ECS services: aws ecs list-services --cluster *-ecs-cluster"
+    echo "   • Scale workers: aws ecs update-service --cluster *-ecs-cluster --service *-vlm-workers --desired-count 2"
+    echo "   • View logs: aws logs tail /ecs/*"
 }
 
 # Cleanup AWS production deployment with state tracking
@@ -539,14 +605,13 @@ function aws-prod-cleanup {
         echo "⚠️ ECS_CLUSTER_NAME not found - cannot stop services"
     fi
     
-    # Phase 2: Unmount EFS file systems
+    # Phase 2: Unmount EFS file systems (optimized architecture - single EFS)
     echo "💾 Phase 2: Unmounting EFS file systems..."
-    sudo umount /mnt/efs/mongodb 2>/dev/null || echo "⚠️ MongoDB EFS not mounted or unmount failed"
-    sudo umount /mnt/efs/models 2>/dev/null || echo "⚠️ Models EFS not mounted or unmount failed"
+    sudo umount /mnt/efs/models 2>/dev/null || echo "⚠️ Shared models EFS not mounted or unmount failed"
     
     # Cleanup local mount directories
-    sudo rmdir /mnt/efs/mongodb /mnt/efs/models /mnt/efs 2>/dev/null || true
-    rm -rf /tmp/efs-mongodb /tmp/efs-models 2>/dev/null || true
+    sudo rmdir /mnt/efs/models /mnt/efs 2>/dev/null || true
+    rm -rf /tmp/efs-models 2>/dev/null || true
     echo "✅ EFS mount points cleaned up"
     
     # Phase 3: Cleanup AWS ECS infrastructure

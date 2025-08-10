@@ -7,9 +7,11 @@ to catch issues early and provide helpful error messages.
 
 import boto3
 import json
+import os
 from typing import Dict, List, Optional, Any, Tuple
 from botocore.exceptions import ClientError, NoCredentialsError
 from src.files_api.config.settings import get_settings
+from deployment.aws.infrastructure.console_validator import ConsoleResourceDetector
 
 
 class ResourceValidator:
@@ -389,8 +391,84 @@ class ResourceValidator:
         
         return existing_resources
     
-    def validate_deployment_prerequisites(self) -> bool:
-        """Run all validation checks for deployment prerequisites."""
+    def validate_console_resources(self) -> bool:
+        """Validate console-created resources for hybrid deployment."""
+        console_detector = ConsoleResourceDetector(region=self.settings.aws_region)
+        
+        # Check if we're in hybrid deployment mode (console resources present)
+        console_config = self._get_console_resource_config()
+        if not console_config:
+            # No console resources configured - skip validation
+            self.validation_results['checks']['console_resources'] = {
+                'status': 'skipped',
+                'message': 'No console resources detected - traditional deployment mode'
+            }
+            return True
+        
+        print("🔍 Validating console-created resources...")
+        
+        # Validate console prerequisites
+        console_valid = console_detector.validate_all_prerequisites(console_config)
+        
+        # Merge console validation results
+        self.validation_results['checks']['console_resources'] = {
+            'status': 'valid' if console_valid else 'error',
+            'config': console_config,
+            'details': console_detector.validation_results
+        }
+        
+        # Add console warnings/errors to main validation
+        self.validation_results['warnings'].extend(console_detector.validation_results.get('warnings', []))
+        self.validation_results['errors'].extend(console_detector.validation_results.get('errors', []))
+        
+        if not console_valid:
+            self.validation_results['valid'] = False
+        
+        return console_valid
+    
+    def _get_console_resource_config(self) -> Optional[Dict[str, str]]:
+        """Extract console resource configuration from environment variables."""
+        required_env_vars = {
+            'VPC_ID': 'vpc_id',
+            'PUBLIC_SUBNET_ID': 'public_subnet_id', 
+            'EFS_FILE_SYSTEM_ID': 'efs_file_system_id',
+            'EFS_ACCESS_POINT_ID': 'efs_access_point_id',
+            'S3_BUCKET_NAME': 's3_bucket_name',
+            'SQS_QUEUE_URL': 'sqs_queue_url',
+            'DATABASE_SG_ID': 'database_sg_id',
+            'EFS_SG_ID': 'efs_sg_id',
+            'ECS_WORKERS_SG_ID': 'ecs_workers_sg_id'
+        }
+        
+        config = {}
+        missing_vars = []
+        
+        for env_var, config_key in required_env_vars.items():
+            value = os.getenv(env_var)
+            if value:
+                config[config_key] = value
+            else:
+                missing_vars.append(env_var)
+        
+        # If we have some but not all variables, that's a configuration error
+        if config and missing_vars:
+            self.validation_results['errors'].append(
+                f"Partial console configuration detected. Missing: {', '.join(missing_vars)}"
+            )
+            return None
+        
+        # If we have no variables, we're in traditional mode
+        if not config:
+            return None
+        
+        return config
+    
+    def validate_deployment_prerequisites(self, deployment_mode: str = 'auto') -> bool:
+        """Run all validation checks for deployment prerequisites.
+        
+        Args:
+            deployment_mode: 'traditional', 'hybrid', or 'auto' (detect from env vars)
+        """
         print("🔍 Validating deployment prerequisites...")
         
         # Check credentials first
@@ -410,6 +488,14 @@ class ResourceValidator:
         # Check existing resources
         self.check_existing_resources()
         print("✅ Existing resources checked")
+        
+        # Validate console resources if in hybrid mode
+        if deployment_mode in ['hybrid', 'auto']:
+            console_valid = self.validate_console_resources()
+            if deployment_mode == 'hybrid' and not console_valid:
+                return False
+            elif console_valid:
+                print("✅ Console resources validated")
         
         return self.validation_results['valid']
     
@@ -458,6 +544,16 @@ class ResourceValidator:
                 if existing['conflicts']:
                     report.append(f"⚠️ Resource Conflicts: {len(existing['conflicts'])} found")
             
+            # Console Resources
+            if 'console_resources' in self.validation_results['checks']:
+                console = self.validation_results['checks']['console_resources']
+                if console['status'] == 'valid':
+                    report.append("✅ Console Resources: Validated for hybrid deployment")
+                elif console['status'] == 'error':
+                    report.append("❌ Console Resources: Validation failed")
+                elif console['status'] == 'skipped':
+                    report.append("⏭️ Console Resources: Skipped (traditional deployment)")
+            
             report.append("")
             
             # Warnings
@@ -487,8 +583,10 @@ def main():
     parser = argparse.ArgumentParser(description='Validate AWS deployment prerequisites')
     parser.add_argument('--format', choices=['json', 'text'], default='text',
                        help='Output format')
-    parser.add_argument('--check', choices=['credentials', 'limits', 'permissions', 'existing'],
+    parser.add_argument('--check', choices=['credentials', 'limits', 'permissions', 'existing', 'console'],
                        help='Run specific validation check')
+    parser.add_argument('--deployment-mode', choices=['traditional', 'hybrid', 'auto'], default='auto',
+                       help='Deployment mode for validation')
     
     args = parser.parse_args()
     
@@ -505,11 +603,13 @@ def main():
                 result = validator.verify_permissions()
             elif args.check == 'existing':
                 result = validator.check_existing_resources()
+            elif args.check == 'console':
+                result = validator.validate_console_resources()
             
             print(f"Check result: {'✅ PASS' if result else '❌ FAIL'}")
         else:
             # Run all validations
-            result = validator.validate_deployment_prerequisites()
+            result = validator.validate_deployment_prerequisites(args.deployment_mode)
         
         # Print report
         report = validator.get_validation_report(args.format)

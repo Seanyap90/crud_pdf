@@ -24,6 +24,7 @@ from deployment.aws.infrastructure.efs import EFSManager
 from deployment.aws.infrastructure.ecs import ECSClusterManager
 from deployment.aws.infrastructure.ecs_services import ECSServiceManager
 from deployment.aws.infrastructure.ec2_database import EC2DatabaseManager
+from deployment.aws.infrastructure.console_validator import ConsoleResourceDetector
 
 # Configure logging
 logging.basicConfig(
@@ -160,6 +161,8 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         self.efs_manager = None
         self.cluster_manager = None
         self.service_manager = None
+        self.database_manager = None
+        self.console_validator = None
         self.deployment_config = {}
     
     def validate_gpu_quota(self, region: str) -> bool:
@@ -195,6 +198,7 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         self.cluster_manager = ECSClusterManager(self.settings.aws_region)
         self.service_manager = ECSServiceManager(self.settings.aws_region)
         self.database_manager = EC2DatabaseManager(self.settings.aws_region)
+        self.console_validator = ConsoleResourceDetector(self.settings.aws_region)
         
         logger.info("Initialized ECS infrastructure managers")
     
@@ -319,6 +323,168 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
                 "error": str(e)
             }
     
+    def deploy_hybrid_console_code(self) -> Dict[str, Any]:
+        """Deploy using hybrid console+code approach with console validation."""
+        try:
+            logger.info("🔍 Starting hybrid console+code deployment...")
+            
+            # Phase 1: Validate console-created resources
+            logger.info("📋 Phase 1: Console Resource Validation")
+            console_config = self._validate_console_prerequisites()
+            
+            # Phase 2: Create ECS cluster and ensure ECR image
+            logger.info("🏗️ Phase 2: ECS Cluster Setup")
+            validated_resources = console_config['validated_resources']
+            ecs_vpc_config = {
+                'vpc_id': validated_resources['vpc']['vpc_id'],
+                'public_subnet_id': validated_resources['vpc']['public_subnet_id'],
+                'database_security_group_id': console_config['config']['DATABASE_SG_ID'],
+                'ecs_workers_security_group_id': console_config['config']['ECS_WORKERS_SG_ID'],
+                'efs_security_group_id': console_config['config']['EFS_SG_ID']
+            }
+            cluster_config = self._setup_ecs_cluster(ecs_vpc_config)
+            
+            # Phase 3: Ensure ECR image exists
+            logger.info("🐳 Phase 3: ECR Image Preparation")
+            if not self._ensure_ecr_repository_and_image():
+                raise Exception("ECR repository and image setup failed")
+            
+            # Phase 4: EC2 Database Instance (automated creation)
+            logger.info("🗄️ Phase 4: EC2 Database Instance Creation")
+            database_config = self._setup_database_infrastructure(ecs_vpc_config)
+            
+            # Phase 5: Code-based service deployment
+            logger.info("🚀 Phase 5: Code-based Services Deployment")  
+            services_config = self._deploy_services_only(console_config)
+            
+            # Phase 6: Lambda deployment (no VPC attachment)
+            logger.info("⚡ Phase 6: Lambda Functions (no VPC)")
+            lambda_config = self._deploy_lambda_no_vpc(console_config)
+            
+            # Deployment Summary
+            hybrid_config = {
+                "status": "success",
+                "mode": "hybrid-console-code", 
+                "region": self.settings.aws_region,
+                "console_resources": console_config,
+                "database": database_config,
+                "services": services_config,
+                "lambda": lambda_config,
+                "deployment_time": time.time()
+            }
+            
+            logger.info("✅ Hybrid console+code deployment completed successfully!")
+            self._print_hybrid_deployment_summary(hybrid_config)
+            return hybrid_config
+            
+        except Exception as e:
+            logger.error(f"❌ Hybrid deployment failed: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "mode": "hybrid-console-code"
+            }
+    
+    def _validate_console_prerequisites(self) -> Dict[str, Any]:
+        """Validate that console-created resources exist and are properly configured."""
+        import os
+        
+        # Get environment variables for console resources
+        console_config = {
+            'VPC_ID': os.getenv('VPC_ID'),
+            'PUBLIC_SUBNET_ID': os.getenv('PUBLIC_SUBNET_ID'),
+            'EFS_FILE_SYSTEM_ID': os.getenv('EFS_FILE_SYSTEM_ID'),
+            'EFS_ACCESS_POINT_ID': os.getenv('EFS_ACCESS_POINT_ID'),
+            'S3_BUCKET_NAME': os.getenv('S3_BUCKET_NAME'),
+            'SQS_QUEUE_URL': os.getenv('SQS_QUEUE_URL'),
+            'DATABASE_SG_ID': os.getenv('DATABASE_SG_ID'),
+            'EFS_SG_ID': os.getenv('EFS_SG_ID'),
+            'ECS_WORKERS_SG_ID': os.getenv('ECS_WORKERS_SG_ID')
+        }
+        
+        # Validate all prerequisites exist
+        if not self.console_validator.validate_all_prerequisites(console_config):
+            raise Exception("Console prerequisites validation failed - check environment variables and AWS resources")
+        
+        # Get validation results with resource details
+        validation_results = self.console_validator.get_validation_results()
+        
+        logger.info("✅ Console prerequisites validated successfully")
+        return {
+            'config': console_config,
+            'validated_resources': validation_results['resources']
+        }
+    
+    def _deploy_services_only(self, console_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy ECS services using console-created infrastructure."""
+        # Extract validated resources from console config
+        validated_resources = console_config['validated_resources']
+        
+        # Create simplified config for ECS deployment
+        ecs_vpc_config = {
+            'vpc_id': validated_resources['vpc']['vpc_id'],
+            'public_subnet_id': validated_resources['vpc']['public_subnet_id'],
+            'ecs_workers_security_group_id': console_config['config']['ECS_WORKERS_SG_ID'],
+            'efs_security_group_id': console_config['config']['EFS_SG_ID']
+        }
+        
+        ecs_efs_config = {
+            'shared_models': {
+                'file_system_id': validated_resources['efs']['file_system_id'],
+                'access_point_id': validated_resources['efs']['access_point_id']
+            }
+        }
+        
+        # Deploy ECS services
+        deployment_result = self.service_manager.deploy_all_services(ecs_vpc_config, ecs_efs_config)
+        
+        if deployment_result['status'] == 'success':
+            logger.info("✅ ECS services deployed successfully using console infrastructure")
+            return deployment_result
+        else:
+            raise Exception(f"ECS services deployment failed: {deployment_result.get('error')}")
+    
+    def _deploy_lambda_no_vpc(self, console_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy Lambda functions without VPC attachment (optimized architecture)."""
+        from deployment.aws.services.lambda_deploy import LambdaDeployer
+        
+        deployer = LambdaDeployer(region=self.settings.aws_region)
+        
+        # Deploy Files API Lambda without VPC (direct internet access to database)
+        lambda_config = deployer.deploy_files_api_lambda_no_vpc(
+            database_host=console_config['config'].get('DATABASE_HOST', 'localhost'),
+            database_port=8080
+        )
+        
+        logger.info(f"Lambda deployed without VPC: {lambda_config['function_name']}")
+        if 'function_url' in lambda_config:
+            logger.info(f"Function URL: {lambda_config['function_url']}")
+        
+        return lambda_config
+    
+    def _print_hybrid_deployment_summary(self, config: Dict[str, Any]) -> None:
+        """Print hybrid deployment summary."""
+        logger.info("=" * 60)
+        logger.info("🎉 HYBRID DEPLOYMENT SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Status: {config['status']}")
+        logger.info(f"Mode: {config['mode']}")
+        logger.info(f"Region: {config['region']}")
+        
+        if 'console_resources' in config:
+            console_resources = config['console_resources']['validated_resources']
+            logger.info(f"Console VPC: {console_resources['vpc']['vpc_id']}")
+            logger.info(f"Console EFS: {console_resources['efs']['file_system_id']}")
+            logger.info(f"Console Storage: S3={console_resources['storage']['s3_bucket']}")
+        
+        if 'lambda' in config:
+            lambda_info = config['lambda']
+            logger.info(f"Lambda Function: {lambda_info['function_name']}")
+            if 'function_url' in lambda_info:
+                logger.info(f"Function URL: {lambda_info['function_url']}")
+        
+        logger.info("=" * 60)
+    
     @log_operation("VPC and networking setup")
     def _setup_vpc_infrastructure(self) -> Dict[str, Any]:
         """Set up VPC infrastructure."""
@@ -337,25 +503,11 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
     
     @log_operation("EFS storage setup")
     def _setup_efs_storage(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Set up EFS file systems for database, scripts, and models."""
-        # Create database EFS (for SQLite database files)
-        database_efs = self.efs_manager.create_database_efs(
+        """Set up EFS file system for shared model storage only (optimized architecture)."""
+        # Create single shared models EFS (for both model-downloader and vlm-worker)
+        shared_models_efs = self.efs_manager.create_shared_models_efs(
             vpc_config['vpc_id'],
-            vpc_config['private_subnet_id'],
-            vpc_config['efs_security_group_id']
-        )
-        
-        # Create scripts EFS (for deployment scripts)
-        scripts_efs = self.efs_manager.create_scripts_efs(
-            vpc_config['vpc_id'],
-            vpc_config['private_subnet_id'],
-            vpc_config['efs_security_group_id']
-        )
-        
-        # Create models EFS
-        models_efs = self.efs_manager.create_models_efs(
-            vpc_config['vpc_id'],
-            vpc_config['private_subnet_id'],
+            vpc_config['public_subnet_id'],  # Use public subnet in optimized architecture
             vpc_config['efs_security_group_id']
         )
         
@@ -363,37 +515,33 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         self.efs_manager.wait_for_mount_targets_available()
         
         efs_config = {
-            "database": database_efs,
-            "scripts": scripts_efs,
-            "models": models_efs
+            "shared_models": shared_models_efs
         }
         
-        logger.info(f"EFS systems created: Database={database_efs['file_system_id']}, Scripts={scripts_efs['file_system_id']}, Models={models_efs['file_system_id']}")
+        logger.info(f"EFS shared models storage created: {shared_models_efs['file_system_id']}")
         return efs_config
     
     @log_operation("EC2 database server setup")
     def _setup_database_infrastructure(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Set up EC2 SQLite HTTP database server in public subnet."""
-        # Use public subnet for database deployment
-        database_config = self.database_manager.create_database_instance({
-            **vpc_config,
-            'subnet_id': vpc_config['public_subnet_id']  # Changed from private
-        })
+        """Set up EC2 SQLite HTTP database server in public subnet (using EC2 boot volume)."""
+        # Use public subnet for database deployment with console-created security group
+        database_config = self.database_manager.create_database_instance(vpc_config)
         
-        # Get public IP for configuration
-        database_public_ip = self.database_manager.get_instance_public_ip(database_config['instance_id'])
-        database_config['public_ip'] = database_public_ip
+        # Wait for manual setup completion if this is a new instance
+        if database_config.get('manual_setup_required'):
+            logger.info("📋 Manual SQLite setup required - see deployment/aws/services/README.md")
+            logger.info(f"🔗 SSH command: {database_config.get('ssh_command', 'N/A')}")
+            
+            # Optionally wait for manual setup completion
+            setup_complete = self.database_manager.wait_for_manual_setup_completion(
+                database_config['private_ip'], timeout_minutes=5  # Short timeout for automated deployment
+            )
+            
+            if not setup_complete:
+                logger.warning("⚠️ Manual setup not completed - continuing deployment")
+                logger.info("You can complete setup later using the SSH command above")
         
-        # Update SSH command with public IP for external access
-        if 'ssh_private_key_path' in database_config:
-            database_config['ssh_command'] = f'ssh -i {database_config["ssh_private_key_path"]} ec2-user@{database_public_ip}'
-        
-        logger.info(f"Database server created: {database_config['instance_id']} at public IP {database_public_ip}")
-        
-        # Display SSH connection information
-        if 'ssh_command' in database_config:
-            logger.info(f"SSH Access: {database_config['ssh_command']}")
-            logger.info(f"Private key saved to: {database_config['ssh_private_key_path']}")
+        logger.info(f"Database server ready: {database_config['instance_id']} at {database_config.get('public_ip', database_config['private_ip'])}")
         
         return database_config
     
@@ -422,7 +570,7 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         """Set up ECS cluster with GPU capacity provider."""
         cluster_config = self.cluster_manager.create_cluster(
             vpc_config['vpc_id'],
-            [vpc_config['private_subnet_id']]
+            [vpc_config['public_subnet_id']]
         )
         
         logger.info(f"ECS cluster created: {cluster_config['clusterName']}")
@@ -816,9 +964,10 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
 class ECSDeploymentBuilder:
     """Builder for ECS deployment with different strategies."""
     
-    def __init__(self, mode: str = None, infrastructure_only: bool = False):
+    def __init__(self, mode: str = None, infrastructure_only: bool = False, hybrid_console: bool = False):
         self.mode = mode or settings.deployment_mode
         self.infrastructure_only = infrastructure_only
+        self.hybrid_console = hybrid_console
         self.strategy = self._create_strategy()
         self.ecr_uri = None
         
@@ -1057,7 +1206,9 @@ class ECSDeploymentBuilder:
         """Execute the deployment strategy."""
         self.strategy.setup_clients()
         
-        if self.infrastructure_only and hasattr(self.strategy, 'deploy_infrastructure_only'):
+        if self.hybrid_console and hasattr(self.strategy, 'deploy_hybrid_console_code'):
+            return self.strategy.deploy_hybrid_console_code()
+        elif self.infrastructure_only and hasattr(self.strategy, 'deploy_infrastructure_only'):
             return self.strategy.deploy_infrastructure_only()
         else:
             return self.strategy.deploy()
@@ -1089,18 +1240,14 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
             f"ECS_CLUSTER_NAME={result['cluster_name']}",
             f"ECS_SERVICE_NAME=vlm-worker",
             "",
-            f"# VPC Configuration",
+            f"# VPC Configuration (Public Subnet Only Architecture)",
             f"VPC_ID={result['vpc']['vpc_id']}",
             f"PUBLIC_SUBNET_ID={result['vpc']['public_subnet_id']}",
-            f"PRIVATE_SUBNET_ID={result['vpc']['private_subnet_id']}",
             "",
-            f"# EFS Configuration",
-            f"EFS_DATABASE_ID={result['efs']['database']['file_system_id']}",
-            f"EFS_SCRIPTS_ID={result['efs']['scripts']['file_system_id']}",
-            f"EFS_MODELS_ID={result['efs']['models']['file_system_id']}",
-            f"EFS_DATABASE_MOUNT_PATH=/mnt/efs/database",
-            f"EFS_SCRIPTS_MOUNT_PATH=/mnt/efs/scripts",
-            f"EFS_MODELS_MOUNT_PATH=/mnt/efs/models",
+            f"# EFS Configuration (Optimized Architecture)",
+            f"EFS_SHARED_MODELS_ID={result['efs']['shared_models']['file_system_id']}",
+            f"EFS_SHARED_MODELS_ACCESS_POINT_ID={result['efs']['shared_models']['access_point_id']}",
+            f"EFS_SHARED_MODELS_MOUNT_PATH=/app/cache",
             "",
             f"# S3 and SQS Configuration", 
             f"S3_BUCKET_NAME={result['s3_bucket']}",
@@ -1124,13 +1271,13 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
             f"CLOUDWATCH_LOG_GROUP=\"/ecs/{settings.app_name}\"",
             "",
             f"# Usage:",
-            f"# 1. Mount EFS file systems:",
-            f"#    sudo mkdir -p /mnt/efs/database /mnt/efs/scripts /mnt/efs/models",
-            f"#    sudo mount -t efs {result['efs']['database']['file_system_id']}:/ /mnt/efs/database",
-            f"#    sudo mount -t efs {result['efs']['scripts']['file_system_id']}:/ /mnt/efs/scripts",
-            f"#    sudo mount -t efs {result['efs']['models']['file_system_id']}:/ /mnt/efs/models",
+            f"# 1. ECS tasks automatically mount EFS to /app/cache inside containers",
+            f"# 2. For manual testing/debugging, mount EFS access point:",
+            f"#    sudo mkdir -p /mnt/efs/cache",
+            f"#    sudo mount -t efs -o tls,accesspoint={result['efs']['shared_models']['access_point_id']} {result['efs']['shared_models']['file_system_id']}:/ /mnt/efs/cache",
             f"# 2. Database server is running at: http://{result['database']['private_ip']}:8080",
-            f"# 3. Run: docker-compose -f docker-compose.aws-prod.yml up"
+            f"# 3. Database files stored on EC2 boot volume (no EFS needed)",
+            f"# 4. Run: docker-compose -f docker-compose.aws-prod.yml up"
         ]
         
         with open(export_file, 'w') as f:
@@ -1140,7 +1287,7 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
         print(f"\nInfrastructure configuration exported to: {export_file}")
         print(f"Next steps:")
         print(f"1. Source the config: source {export_file}")
-        print(f"2. Mount EFS file systems (see comments in {export_file})")
+        print(f"2. Mount shared models EFS (see comments in {export_file})")
         print(f"3. Run: docker-compose -f src/files_api/docker-compose.aws-prod.yml up")
         
     except Exception as e:
@@ -1207,6 +1354,8 @@ def main():
                        help="Deploy only infrastructure and export config for docker-compose")
     parser.add_argument("--deploy-services", action="store_true",
                        help="Deploy ECS services (full deployment with containers)")
+    parser.add_argument("--hybrid-console", action="store_true",
+                       help="Deploy using hybrid console+code approach")
     parser.add_argument("--export-config", default=".env.aws-prod",
                        help="File to export infrastructure configuration")
     
@@ -1218,10 +1367,14 @@ def main():
             return
         
         # Execute deployment
-        builder = ECSDeploymentBuilder(args.mode, args.infrastructure_only)
+        builder = ECSDeploymentBuilder(args.mode, args.infrastructure_only, args.hybrid_console)
         
         # Choose deployment type based on flags
-        if args.infrastructure_only:
+        if args.hybrid_console:
+            # Hybrid console+code deployment
+            logger.info("Using hybrid console+code deployment approach")
+            result = builder.deploy()
+        elif args.infrastructure_only:
             # Infrastructure only - no ECR or services
             result = (builder
                      .setup_supporting_services()
@@ -1249,15 +1402,20 @@ def main():
             print(f"Cluster: {result.get('cluster_name')}")
             
             if args.mode == "aws-prod":
-                print(f"VPC ID: {result['vpc']['vpc_id']}")
-                print(f"Database Server: {result['database']['instance_id']} at {result['database']['private_ip']}:8080")
-                print(f"Database EFS: {result['efs']['database']['file_system_id']}")
-                print(f"Scripts EFS: {result['efs']['scripts']['file_system_id']}")
-                print(f"Models EFS: {result['efs']['models']['file_system_id']}")
-                
-                # Export configuration for infrastructure-only mode
-                if args.infrastructure_only:
-                    export_infrastructure_config(result, args.export_config)
+                if result.get('mode') == 'hybrid-console-code':
+                    print(f"Console VPC: {result['console_resources']['validated_resources']['vpc']['vpc_id']}")
+                    print(f"Console EFS: {result['console_resources']['validated_resources']['efs']['file_system_id']}")
+                    print(f"Lambda Function: {result['lambda']['function_name']}")
+                    if 'function_url' in result['lambda']:
+                        print(f"Function URL: {result['lambda']['function_url']}")
+                else:
+                    print(f"VPC ID: {result['vpc']['vpc_id']}")
+                    print(f"Database Server: {result['database']['instance_id']} at {result['database']['private_ip']}:8080")
+                    print(f"Shared Models EFS: {result['efs']['shared_models']['file_system_id']}")
+                    
+                    # Export configuration for infrastructure-only mode
+                    if args.infrastructure_only:
+                        export_infrastructure_config(result, args.export_config)
         else:
             logger.error("ECS deployment failed!")
             return 1

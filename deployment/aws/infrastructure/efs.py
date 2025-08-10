@@ -1,4 +1,4 @@
-"""EFS file system management for MongoDB data and model storage."""
+"""EFS file system management for shared model storage (optimized architecture)."""
 import logging
 from typing import Dict, Any, Optional, List
 import boto3
@@ -11,7 +11,12 @@ settings = get_settings()
 
 
 class EFSManager:
-    """Manager for EFS file systems with in-VPC placement."""
+    """Manager for EFS file systems - optimized architecture with single shared models EFS.
+    
+    Creates only one EFS file system for shared model storage, eliminating the need for
+    separate database and scripts EFS volumes. The database now uses EC2 boot volume,
+    and deployment scripts are stored in the code repository.
+    """
     
     def __init__(self, region: str = None):
         self.region = region or settings.aws_region
@@ -21,168 +26,92 @@ class EFSManager:
         self.mount_targets = {}
         self.access_points = {}
     
+    def validate_vpc_subnet_exist(self, vpc_id: str, subnet_id: str) -> bool:
+        """Validate VPC and subnet exist before creating EFS resources."""
+        try:
+            # Validate VPC exists
+            vpc_response = self.ec2_client.describe_vpcs(VpcIds=[vpc_id])
+            if not vpc_response['Vpcs']:
+                logger.error(f"❌ VPC not found: {vpc_id}")
+                return False
+            
+            # Validate subnet exists and is in the VPC
+            subnet_response = self.ec2_client.describe_subnets(SubnetIds=[subnet_id])
+            if not subnet_response['Subnets']:
+                logger.error(f"❌ Subnet not found: {subnet_id}")
+                return False
+            
+            subnet = subnet_response['Subnets'][0]
+            if subnet['VpcId'] != vpc_id:
+                logger.error(f"❌ Subnet {subnet_id} not in VPC {vpc_id}")
+                return False
+            
+            logger.info(f"✅ VPC and subnet validated: {vpc_id}, {subnet_id}")
+            return True
+            
+        except ClientError as e:
+            logger.error(f"❌ VPC/Subnet validation error: {e}")
+            return False
     
-    def create_database_efs(self, vpc_id: str, subnet_id: str, security_group_id: str) -> Dict[str, Any]:
-        """Create EFS file system for SQLite database storage."""
-        fs_name = f"{settings.app_name}-database-storage"
+    def create_shared_models_efs(self, vpc_id: str, subnet_id: str, security_group_id: str) -> Dict[str, Any]:
+        """Create EFS file system for shared VLM model storage (model-downloader and vlm-worker)."""
+        fs_name = f"{settings.app_name}-shared-models"
         
         try:
+            # Validate VPC and subnet exist before proceeding
+            if not self.validate_vpc_subnet_exist(vpc_id, subnet_id):
+                raise ValueError(f"VPC/Subnet validation failed: {vpc_id}/{subnet_id}")
+            
             # Check for existing file system
             existing_fs = self._find_existing_file_system(fs_name)
             if existing_fs:
                 fs_id = existing_fs['FileSystemId']
-                logger.info(f"Using existing database EFS: {fs_id}")
-                self.file_systems['database'] = existing_fs
+                logger.info(f"Using existing shared models EFS: {fs_id}")
+                self.file_systems['shared_models'] = existing_fs
             else:
-                # Create new file system
+                # Create new file system optimized for model storage
                 fs_response = self.efs_client.create_file_system(
-                    CreationToken=f"{settings.app_name}-database-{hash(fs_name) % 10000}",
+                    CreationToken=f"{settings.app_name}-shared-models-{hash(fs_name) % 10000}",
                     PerformanceMode='generalPurpose',
                     ThroughputMode='bursting',
                     Tags=[
                         {'Key': 'Name', 'Value': fs_name},
                         {'Key': 'Project', 'Value': settings.app_name},
-                        {'Key': 'Purpose', 'Value': 'database-storage'}
+                        {'Key': 'Purpose', 'Value': 'shared-model-storage'}
                     ]
                 )
                 fs_id = fs_response['FileSystemId']
-                self.file_systems['database'] = fs_response
-                logger.info(f"Created database EFS: {fs_id}")
+                self.file_systems['shared_models'] = fs_response
+                logger.info(f"Created shared models EFS: {fs_id}")
                 
                 # Wait for file system to become available
-                logger.info("Waiting for database EFS to become available...")
+                logger.info("Waiting for shared models EFS to become available...")
                 self._wait_for_file_system_available(fs_id)
-                logger.info(f"Database EFS is now available: {fs_id}")
+                logger.info(f"Shared models EFS is now available: {fs_id}")
             
-            # Create mount target in private subnet (for EC2 database server)
+            # Create mount target in public subnet (optimized architecture)
             mount_target = self._create_mount_target(
-                fs_id, subnet_id, security_group_id, 'database'
+                fs_id, subnet_id, security_group_id, 'shared_models'
             )
             
-            # Create access point for database files
+            # Create access point for model cache (shared by both model-downloader and vlm-worker)
             access_point = self._create_access_point(
-                fs_id, 'database-files', '/database', 1000, 1000
-            )
-            
-            return {
-                'file_system_id': fs_id,
-                'mount_target_id': mount_target['MountTargetId'],
-                'access_point_id': access_point['AccessPointId'],
-                'mount_target_ip': mount_target.get('IpAddress'),
-                'dns_name': f"{fs_id}.efs.{self.region}.amazonaws.com"
-            }
-            
-        except ClientError as e:
-            logger.error(f"Failed to create database EFS: {e}")
-            raise
-
-    def create_scripts_efs(self, vpc_id: str, subnet_id: str, security_group_id: str) -> Dict[str, Any]:
-        """Create EFS file system for deployment scripts storage."""
-        fs_name = f"{settings.app_name}-scripts-storage"
-        
-        try:
-            # Check for existing file system
-            existing_fs = self._find_existing_file_system(fs_name)
-            if existing_fs:
-                fs_id = existing_fs['FileSystemId']
-                logger.info(f"Using existing scripts EFS: {fs_id}")
-                self.file_systems['scripts'] = existing_fs
-            else:
-                # Create new file system
-                fs_response = self.efs_client.create_file_system(
-                    CreationToken=f"{settings.app_name}-scripts-{hash(fs_name) % 10000}",
-                    PerformanceMode='generalPurpose',
-                    ThroughputMode='bursting',
-                    Tags=[
-                        {'Key': 'Name', 'Value': fs_name},
-                        {'Key': 'Project', 'Value': settings.app_name},
-                        {'Key': 'Purpose', 'Value': 'scripts-storage'}
-                    ]
-                )
-                fs_id = fs_response['FileSystemId']
-                self.file_systems['scripts'] = fs_response
-                logger.info(f"Created scripts EFS: {fs_id}")
-                
-                # Wait for file system to become available
-                logger.info("Waiting for scripts EFS to become available...")
-                self._wait_for_file_system_available(fs_id)
-                logger.info(f"Scripts EFS is now available: {fs_id}")
-            
-            # Create mount target in private subnet
-            mount_target = self._create_mount_target(
-                fs_id, subnet_id, security_group_id, 'scripts'
-            )
-            
-            # Create access point for scripts
-            access_point = self._create_access_point(
-                fs_id, 'deployment-scripts', '/scripts', 1000, 1000
-            )
-            
-            return {
-                'file_system_id': fs_id,
-                'mount_target_id': mount_target['MountTargetId'],
-                'access_point_id': access_point['AccessPointId'],
-                'mount_target_ip': mount_target.get('IpAddress'),
-                'dns_name': f"{fs_id}.efs.{self.region}.amazonaws.com"
-            }
-            
-        except ClientError as e:
-            logger.error(f"Failed to create scripts EFS: {e}")
-            raise
-
-    def create_models_efs(self, vpc_id: str, subnet_id: str, security_group_id: str) -> Dict[str, Any]:
-        """Create EFS file system for VLM model storage."""
-        fs_name = f"{settings.app_name}-vlm-models"
-        
-        try:
-            # Check for existing file system
-            existing_fs = self._find_existing_file_system(fs_name)
-            if existing_fs:
-                fs_id = existing_fs['FileSystemId']
-                logger.info(f"Using existing models EFS: {fs_id}")
-                self.file_systems['models'] = existing_fs
-            else:
-                # Create new file system with general purpose throughput for model loading
-                fs_response = self.efs_client.create_file_system(
-                    CreationToken=f"{settings.app_name}-models-{hash(fs_name) % 10000}",
-                    PerformanceMode='generalPurpose',
-                    ThroughputMode='bursting',
-                    Tags=[
-                        {'Key': 'Name', 'Value': fs_name},
-                        {'Key': 'Project', 'Value': settings.app_name},
-                        {'Key': 'Purpose', 'Value': 'vlm-models'}
-                    ]
-                )
-                fs_id = fs_response['FileSystemId']
-                self.file_systems['models'] = fs_response
-                logger.info(f"Created models EFS: {fs_id}")
-                
-                # Wait for file system to become available
-                logger.info("Waiting for models EFS to become available...")
-                self._wait_for_file_system_available(fs_id)
-                logger.info(f"Models EFS is now available: {fs_id}")
-            
-            # Create mount target in private subnet (for VLM workers)
-            mount_target = self._create_mount_target(
-                fs_id, subnet_id, security_group_id, 'models'
-            )
-            
-            # Create single access point for all models (matches Docker volume structure)
-            models_ap = self._create_access_point(
                 fs_id, 'models-cache', '/cache', 1000, 1000
             )
             
             return {
                 'file_system_id': fs_id,
                 'mount_target_id': mount_target['MountTargetId'],
-                'access_point_id': models_ap['AccessPointId'],
+                'access_point_id': access_point['AccessPointId'],
                 'mount_target_ip': mount_target.get('IpAddress'),
                 'dns_name': f"{fs_id}.efs.{self.region}.amazonaws.com"
             }
             
         except ClientError as e:
-            logger.error(f"Failed to create models EFS: {e}")
+            logger.error(f"Failed to create shared models EFS: {e}")
             raise
+
+
     
     def wait_for_mount_targets_available(self) -> None:
         """Wait for all mount targets to become available."""
@@ -196,11 +125,12 @@ class EFSManager:
                 raise
     
     def get_efs_config(self) -> Dict[str, Any]:
-        """Get complete EFS configuration."""
+        """Get complete EFS configuration for shared models storage."""
         return {
             'file_systems': self.file_systems,
             'mount_targets': self.mount_targets,
-            'access_points': self.access_points
+            'access_points': self.access_points,
+            'shared_models_info': self.file_systems.get('shared_models', {})
         }
     
     def _find_existing_file_system(self, name: str) -> Optional[Dict[str, Any]]:
@@ -319,7 +249,7 @@ class EFSManager:
             return None
     
     def cleanup_efs_resources(self) -> None:
-        """Clean up EFS resources (for testing/cleanup)."""
+        """Clean up EFS resources (shared models EFS only)."""
         try:
             # Delete access points first
             for name, access_point_id in self.access_points.items():
@@ -351,14 +281,15 @@ class EFSManager:
                 except Exception:
                     pass  # May not exist or already deleted
             
-            # Delete file systems
-            for purpose, file_system in self.file_systems.items():
-                fs_id = file_system['FileSystemId']
+            # Delete shared models file system
+            shared_models_fs = self.file_systems.get('shared_models')
+            if shared_models_fs:
+                fs_id = shared_models_fs['FileSystemId']
                 try:
                     self.efs_client.delete_file_system(FileSystemId=fs_id)
-                    logger.info(f"Deleted file system {purpose}: {fs_id}")
+                    logger.info(f"Deleted shared models file system: {fs_id}")
                 except ClientError as e:
-                    logger.warning(f"Failed to delete file system {purpose}: {e}")
+                    logger.warning(f"Failed to delete shared models file system: {e}")
                     
         except Exception as e:
             logger.error(f"Error during EFS cleanup: {e}")

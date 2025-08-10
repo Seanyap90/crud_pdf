@@ -138,17 +138,64 @@ class EC2DatabaseManager:
                 logger.debug("Cleaned up partial private key file")
             raise
         
-    def create_database_instance(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Create EC2 instance for SQLite HTTP server."""
+    def validate_subnet_exists(self, subnet_id: str) -> bool:
+        """Validate that the subnet exists and is available."""
+        try:
+            response = self.ec2_client.describe_subnets(SubnetIds=[subnet_id])
+            subnets = response['Subnets']
+            
+            if not subnets:
+                logger.error(f"❌ Subnet not found: {subnet_id}")
+                return False
+            
+            subnet = subnets[0]
+            if subnet['State'] != 'available':
+                logger.error(f"❌ Subnet not available: {subnet_id} (state: {subnet['State']})")
+                return False
+            
+            logger.info(f"✅ Subnet validated: {subnet_id} (CIDR: {subnet['CidrBlock']})")
+            return True
+            
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'InvalidSubnetID.NotFound':
+                logger.error(f"❌ Subnet not found: {subnet_id}")
+            else:
+                logger.error(f"❌ Subnet validation error: {e}")
+            return False
+    
+    def find_existing_database_instance(self) -> Optional[Dict[str, Any]]:
+        """Find existing database instance."""
         instance_name = f"{settings.app_name}-database-server"
+        return self._find_existing_instance(instance_name)
+    
+    def create_database_instance(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Create EC2 instance for SQLite HTTP server with validation."""
+        instance_name = f"{settings.app_name}-database-server"
+        subnet_id = vpc_config.get('public_subnet_id')
+        security_group_id = vpc_config.get('database_security_group_id')
         
         try:
+            # Validate subnet exists before proceeding
+            if not subnet_id:
+                raise ValueError("Missing public_subnet_id in vpc_config")
+            
+            if not self.validate_subnet_exists(subnet_id):
+                raise ValueError(f"Subnet validation failed: {subnet_id}")
+            
+            # Validate security group exists
+            if not security_group_id:
+                raise ValueError("Missing database_security_group_id in vpc_config")
+            
+            if not self._validate_security_group_exists(security_group_id):
+                raise ValueError(f"Security group validation failed: {security_group_id}")
+            
             # Check for existing instance
-            existing_instance = self._find_existing_instance(instance_name)
+            existing_instance = self.find_existing_database_instance()
             if existing_instance:
                 self.instance_id = existing_instance['InstanceId']
                 self.private_ip = existing_instance['PrivateIpAddress']
-                logger.info(f"Using existing database instance: {self.instance_id}")
+                logger.info(f"✅ Using existing database instance: {self.instance_id}")
+                logger.info(f"📋 Manual setup required: Follow deployment/aws/services/README.md")
                 
                 # Ensure SSH key pair exists even for existing instances
                 key_name = self.ensure_ssh_key_pair()
@@ -156,23 +203,25 @@ class EC2DatabaseManager:
                 return {
                     'instance_id': self.instance_id,
                     'private_ip': self.private_ip,
+                    'public_ip': existing_instance.get('PublicIpAddress'),
                     'instance_state': existing_instance['State']['Name'],
                     'ssh_key_name': key_name,
                     'ssh_private_key_path': str(self.private_key_path),
-                    'ssh_command': f'ssh -i {self.private_key_path} ec2-user@{self.private_ip}'
+                    'ssh_command': f'ssh -i {self.private_key_path} ubuntu@{existing_instance.get("PublicIpAddress", self.private_ip)}',
+                    'manual_setup_required': True,
+                    'setup_guide': 'deployment/aws/services/README.md'
                 }
             
             # Ensure SSH key pair exists before creating instance
             key_name = self.ensure_ssh_key_pair()
             logger.info(f"SSH key pair ready: {key_name}")
             
-            # Create security group for database server
-            self.security_group_id = self._create_database_security_group(vpc_config)
+            # Use console-created security group (no need to create new one)
+            self.security_group_id = security_group_id
+            logger.info(f"Using console-created security group: {security_group_id}")
             
-            # Generate user data script
-            user_data_script = self.setup_user_data_script()
-            
-            # Launch EC2 instance
+            # Launch EC2 instance (no user data - manual setup)
+            logger.info(f"Launching EC2 instance in subnet: {subnet_id}")
             response = self.ec2_client.run_instances(
                 ImageId=self._get_ubuntu_22_ami(),
                 InstanceType='t3.small',  # Optimal for SQLite HTTP server (2 vCPU, 2GB RAM)
@@ -182,10 +231,9 @@ class EC2DatabaseManager:
                 NetworkInterfaces=[{
                     'AssociatePublicIpAddress': True,
                     'DeviceIndex': 0,
-                    'SubnetId': vpc_config['public_subnet_id'],  # Public subnet for direct access
-                    'Groups': [self.security_group_id]
+                    'SubnetId': subnet_id,  # Public subnet for direct access
+                    'Groups': [security_group_id]
                 }],
-                UserData=user_data_script,
                 IamInstanceProfile={
                     'Name': self._get_or_create_instance_profile()
                 },
@@ -212,23 +260,96 @@ class EC2DatabaseManager:
             waiter = self.ec2_client.get_waiter('instance_running')
             waiter.wait(InstanceIds=[self.instance_id])
             
-            # SQLite HTTP server will start automatically via systemd
-            logger.info("✅ EC2 instance running - SQLite HTTP server starting via systemd")
-            logger.info("Note: Server readiness can be verified manually if needed")
+            # Get public IP after instance is running
+            instance_info = self.ec2_client.describe_instances(InstanceIds=[self.instance_id])
+            public_ip = instance_info['Reservations'][0]['Instances'][0].get('PublicIpAddress')
+            
+            # Manual setup required - no user data script
+            logger.info("✅ EC2 instance running - Manual SQLite setup required")
+            logger.info("📋 Next steps: Follow deployment/aws/services/README.md")
+            logger.info(f"🔗 SSH command: ssh -i {self.private_key_path} ubuntu@{public_ip}")
             
             return {
                 'instance_id': self.instance_id,
                 'private_ip': self.private_ip,
+                'public_ip': public_ip,
                 'security_group_id': self.security_group_id,
                 'instance_state': 'running',
                 'ssh_key_name': key_name,
                 'ssh_private_key_path': str(self.private_key_path),
-                'ssh_command': f'ssh -i {self.private_key_path} ec2-user@{self.private_ip}'
+                'ssh_command': f'ssh -i {self.private_key_path} ubuntu@{public_ip}',
+                'manual_setup_required': True,
+                'setup_guide': 'deployment/aws/services/README.md'
             }
             
         except ClientError as e:
             logger.error(f"Failed to create database instance: {e}")
             raise
+    
+    def _validate_security_group_exists(self, security_group_id: str) -> bool:
+        """Validate security group exists."""
+        try:
+            response = self.ec2_client.describe_security_groups(GroupIds=[security_group_id])
+            security_groups = response['SecurityGroups']
+            
+            if not security_groups:
+                logger.error(f"❌ Security group not found: {security_group_id}")
+                return False
+            
+            sg = security_groups[0]
+            logger.info(f"✅ Security group validated: {security_group_id} (Name: {sg['GroupName']})")
+            return True
+            
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'InvalidGroupId.NotFound':
+                logger.error(f"❌ Security group not found: {security_group_id}")
+            else:
+                logger.error(f"❌ Security group validation error: {e}")
+            return False
+    
+    def wait_for_manual_setup_completion(self, host: str, port: int = 8080, timeout_minutes: int = 30) -> bool:
+        """
+        Wait for manual SQLite server setup to complete by testing connectivity.
+        
+        Args:
+            host: Database host (private IP)
+            port: Database port (default 8080)
+            timeout_minutes: Maximum time to wait
+            
+        Returns:
+            bool: True if setup completed successfully
+        """
+        import requests
+        import time
+        
+        logger.info(f"⏳ Waiting for manual SQLite setup completion on {host}:{port}")
+        logger.info("📋 Please complete setup following: deployment/aws/services/README.md")
+        
+        timeout_seconds = timeout_minutes * 60
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout_seconds:
+            try:
+                # Test health endpoint
+                response = requests.get(f"http://{host}:{port}/health", timeout=5)
+                if response.status_code == 200:
+                    logger.info("✅ SQLite HTTP server is responding - setup completed!")
+                    return True
+                    
+            except (requests.RequestException, ConnectionError):
+                # Expected until setup is complete
+                pass
+            
+            # Wait before retrying
+            time.sleep(30)
+            elapsed = int(time.time() - start_time)
+            remaining = int(timeout_seconds - elapsed)
+            logger.info(f"⏳ Still waiting for setup... ({elapsed}s elapsed, {remaining}s remaining)")
+        
+        logger.warning(f"⚠️ Timeout waiting for manual setup completion after {timeout_minutes} minutes")
+        logger.info("You can continue manually and validate later with:")
+        logger.info(f"  curl http://{host}:{port}/health")
+        return False
     
     def setup_user_data_script(self) -> str:
         """Return empty user data - manual setup required."""

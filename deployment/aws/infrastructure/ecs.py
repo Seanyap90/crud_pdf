@@ -25,7 +25,7 @@ class ECSClusterManager:
         self.cluster_arn = None
         self.capacity_providers = {}
         
-    def create_cluster(self, vpc_id: str, private_subnet_ids: List[str]) -> Dict[str, Any]:
+    def create_cluster(self, vpc_id: str, subnet_ids: List[str]) -> Dict[str, Any]:
         """Create ECS cluster with GPU capacity provider."""
         try:
             # Check for existing cluster
@@ -41,7 +41,7 @@ class ECSClusterManager:
                     logger.info(f"GPU capacity provider not found, creating: {cp_name}")
                     # Create GPU capacity provider for existing cluster
                     gpu_capacity_provider = self._create_gpu_capacity_provider(
-                        vpc_id, private_subnet_ids
+                        vpc_id, subnet_ids
                     )
                     # Associate capacity providers with cluster
                     self._associate_capacity_providers([gpu_capacity_provider['name']])
@@ -72,7 +72,7 @@ class ECSClusterManager:
             
             # Create GPU capacity provider
             gpu_capacity_provider = self._create_gpu_capacity_provider(
-                vpc_id, private_subnet_ids
+                vpc_id, subnet_ids
             )
             
             # Associate capacity providers with cluster
@@ -84,7 +84,7 @@ class ECSClusterManager:
             logger.error(f"Failed to create ECS cluster: {e}")
             raise
     
-    def _create_gpu_capacity_provider(self, vpc_id: str, private_subnet_ids: List[str]) -> Dict[str, Any]:
+    def _create_gpu_capacity_provider(self, vpc_id: str, subnet_ids: List[str]) -> Dict[str, Any]:
         """Create GPU-optimized capacity provider with Auto Scaling Group."""
         cp_name = f"{self.cluster_name}-gpu-cp"
         asg_name = f"{self.cluster_name}-gpu-asg"
@@ -102,7 +102,7 @@ class ECSClusterManager:
             
             # Create Auto Scaling Group
             asg = self._create_auto_scaling_group(
-                asg_name, launch_template['LaunchTemplateId'], private_subnet_ids
+                asg_name, launch_template['LaunchTemplateId'], subnet_ids
             )
             
             # Create capacity provider

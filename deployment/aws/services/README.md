@@ -1,6 +1,8 @@
 # SQLite HTTP Server Setup Guide
 
-Manual setup instructions for the SQLite HTTP server on Ubuntu 22.04.
+Manual setup instructions for the SQLite HTTP server on Ubuntu 22.04 EC2 instance.
+
+**Updated for Optimized Architecture**: Database stored on EC2 boot volume (not EFS) for better performance.
 
 ## 🚀 **Quick Setup (Ubuntu 22.04)**
 
@@ -24,12 +26,12 @@ pip3 install flask
 # Create application directories
 sudo mkdir -p /opt/sqlite-server
 sudo mkdir -p /var/log/sqlite-server
-sudo mkdir -p /mnt/efs/database
+sudo mkdir -p /var/lib/sqlite-server
 
 # Set ownership to ubuntu user
 sudo chown -R ubuntu:ubuntu /opt/sqlite-server
 sudo chown -R ubuntu:ubuntu /var/log/sqlite-server
-sudo chown -R ubuntu:ubuntu /mnt/efs/database
+sudo chown -R ubuntu:ubuntu /var/lib/sqlite-server
 ```
 
 ### **Step 3: Copy SQLite Server Code**
@@ -69,7 +71,7 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/opt/sqlite-server
-ExecStart=/usr/bin/python3 /opt/sqlite-server/sqlite_server.py --db-path /mnt/efs/database/recycling.db --port 8080
+ExecStart=/usr/bin/python3 /opt/sqlite-server/sqlite_server.py --db-path /var/lib/sqlite-server/recycling.db --port 8080
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -169,13 +171,13 @@ ls -la /opt/sqlite-server/sqlite_server.py
 
 # Test server manually
 cd /opt/sqlite-server
-python3 sqlite_server.py --db-path /mnt/efs/database/recycling.db --port 8080
+python3 sqlite_server.py --db-path /var/lib/sqlite-server/recycling.db --port 8080
 ```
 
 ### **Permission Issues**
 ```bash
 # Fix ownership
-sudo chown -R ubuntu:ubuntu /opt/sqlite-server /var/log/sqlite-server /mnt/efs/database
+sudo chown -R ubuntu:ubuntu /opt/sqlite-server /var/log/sqlite-server /var/lib/sqlite-server
 
 # Fix permissions
 chmod +x /opt/sqlite-server/sqlite_server.py
@@ -198,8 +200,8 @@ sudo netstat -tlnp | grep 8080
 /var/log/sqlite-server/
 └── server.log                # Application logs
 
-/mnt/efs/database/
-└── recycling.db              # SQLite database file
+/var/lib/sqlite-server/
+└── recycling.db              # SQLite database file (on EBS boot volume)
 
 /etc/systemd/system/
 └── sqlite-server.service     # Systemd service configuration
@@ -207,16 +209,33 @@ sudo netstat -tlnp | grep 8080
 
 ## 🔒 **Security Notes**
 
-- Server runs on port 8080 (internal traffic only)
-- No external access - only Lambda functions in VPC can connect
-- Database stored on EFS mount for persistence
+- Server runs on port 8080 (accessible via security group rules)
+- Database stored on EBS boot volume for optimal performance
 - Service runs as `ubuntu` user (non-root)
 - Automatic restart on failure
+- Access controlled via AWS Security Groups
 
 ## 🎯 **Next Steps**
 
 After setup completion:
-1. Update Lambda environment variables with EC2 private IP
-2. Test end-to-end with frontend client
-3. Monitor service logs during initial testing
-4. Set up log rotation if needed for production use
+1. Note the EC2 instance's **private IP address** for Lambda configuration
+2. Update your deployment code with the database endpoint
+3. Test connectivity from Lambda functions
+4. Monitor service logs during initial testing
+
+## 📝 **Important Information to Collect**
+
+After successful setup, collect these values:
+
+```bash
+# Get EC2 private IP for Lambda configuration
+curl http://169.254.169.254/latest/meta-data/local-ipv4
+
+# Test database connectivity
+curl http://localhost:8080/health
+```
+
+**Save this information for your code deployment:**
+- **Database Host**: [EC2_PRIVATE_IP]
+- **Database Port**: 8080
+- **Database Path**: `/var/lib/sqlite-server/recycling.db`

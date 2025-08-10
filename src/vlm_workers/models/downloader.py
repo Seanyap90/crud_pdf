@@ -175,7 +175,7 @@ def main():
     if args.cache_dir:
         cache_dir = args.cache_dir
     elif args.mode == "efs-downloader":
-        cache_dir = os.environ.get('MODEL_CACHE_DIR', '/efs/models')
+        cache_dir = os.environ.get('MODEL_CACHE_DIR', '/app/cache')
     else:
         cache_dir = os.environ.get('TRANSFORMERS_CACHE', '/app/cache')
     

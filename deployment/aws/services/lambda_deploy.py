@@ -33,8 +33,8 @@ settings = get_settings()
 # Constants
 DEFAULT_REGION = settings.aws_region
 LAMBDA_RUNTIME = "python3.11"
-LAMBDA_TIMEOUT = 120  # 2 minutes for HTTP calls to EC2 + EFS access
-LAMBDA_MEMORY = 2048  # 2GB for FastAPI + concurrent requests + EC2 database calls
+LAMBDA_TIMEOUT = 120  # 2 minutes for HTTP calls to EC2 (reduced from EFS access needs)
+LAMBDA_MEMORY = 2048  # 2GB for FastAPI + concurrent requests + direct database calls
 
 
 def log_operation(description: str):
@@ -363,7 +363,7 @@ class LambdaDeployer:
                     },
                     VpcConfig=(
                         {
-                            'SubnetIds': [vpc_config['private_subnet_id']],
+                            'SubnetIds': [vpc_config['public_subnet_id']],
                             'SecurityGroupIds': [vpc_config['lambda_security_group_id']]
                         } if vpc_config else {}
                     ),
@@ -403,6 +403,92 @@ class LambdaDeployer:
             
         except Exception as e:
             logger.error(f"Failed to deploy Files API Lambda: {e}")
+            raise
+    
+    @log_operation("Deploying Files API Lambda without VPC")
+    def deploy_files_api_lambda_no_vpc(self, database_host: str = None, 
+                                       database_port: int = 8080) -> Dict[str, Any]:
+        """Deploy Files API as Lambda function without VPC attachment (optimized architecture)."""
+        function_name = f"{settings.app_name}-files-api"
+        
+        try:
+            # Create FastAPI layer
+            layer_info = self.layer_manager.create_fastapi_layer()
+            
+            # Create deployment package
+            deployment_zip = self._create_files_api_package()
+            
+            # Get or create execution role (no VPC permissions needed)
+            execution_role_arn = self._get_lambda_execution_role_no_vpc()
+            
+            # Check for existing function
+            existing_function = self._find_existing_function(function_name)
+            
+            if existing_function:
+                # Update existing function to remove VPC config if present
+                lambda_response = self._update_lambda_function_no_vpc(
+                    function_name, deployment_zip, [layer_info['layer_version_arn']], 
+                    database_host, database_port
+                )
+                logger.info(f"Updated Files API Lambda (removed VPC): {function_name}")
+            else:
+                # Create new function without VPC configuration
+                with open(deployment_zip, 'rb') as f:
+                    deployment_zip_content = f.read()
+                lambda_response = self.lambda_client.create_function(
+                    FunctionName=function_name,
+                    Runtime=LAMBDA_RUNTIME,
+                    Role=execution_role_arn,
+                    Handler="files_api.lambda_handler.lambda_handler",
+                    Code={'ZipFile': deployment_zip_content},
+                    Description="Files API FastAPI application (no VPC)",
+                    Timeout=LAMBDA_TIMEOUT,
+                    MemorySize=LAMBDA_MEMORY,
+                    Layers=[layer_info['layer_version_arn']],
+                    Environment={
+                        'Variables': {
+                            'DEPLOYMENT_MODE': 'aws-prod',
+                            'S3_BUCKET_NAME': settings.s3_bucket_name,
+                            'SQS_QUEUE_URL': settings.sqs_queue_url or '',
+                            'DATABASE_HOST': database_host or '',
+                            'DATABASE_PORT': str(database_port),
+                        }
+                    },
+                    # No VPC configuration - direct internet access
+                    Tags={
+                        'Project': settings.app_name,
+                        'Component': 'FilesAPI',
+                        'Type': 'Lambda',
+                        'Architecture': 'No-VPC-Optimized'
+                    }
+                )
+                logger.info(f"Created Files API Lambda without VPC: {function_name}")
+            
+            function_info = {
+                'function_name': function_name,
+                'function_arn': lambda_response['FunctionArn'],
+                'version': lambda_response.get('Version', '$LATEST'),
+                'handler': lambda_response['Handler'],
+                'layers': [layer_info['layer_version_arn']],
+                'vpc_config': None  # Explicitly no VPC
+            }
+            
+            self.functions['files_api_no_vpc'] = function_info
+            
+            # Cleanup
+            os.remove(deployment_zip)
+            
+            # Create Function URL for direct access (no API Gateway needed)
+            function_url = self.create_lambda_function_url(function_name)
+            function_info['function_url'] = function_url
+            
+            logger.info(f"✅ Lambda deployed without VPC - eliminating NAT Gateway costs")
+            logger.info(f"🔗 Direct access URL: {function_url}")
+            
+            return function_info
+            
+        except Exception as e:
+            logger.error(f"Failed to deploy Files API Lambda without VPC: {e}")
             raise
     
     @log_operation("Deploying IoT Backend Lambda")
@@ -682,6 +768,55 @@ lambda_handler = handler
             logger.error(f"Failed to create Lambda execution role: {e}")
             raise
     
+    def _get_lambda_execution_role_no_vpc(self) -> str:
+        """Get or create Lambda execution role without VPC permissions (optimized architecture)."""
+        role_name = f"{settings.app_name}-lambda-execution-role-no-vpc"
+        
+        try:
+            # Check for existing role
+            try:
+                role_response = self.iam_client.get_role(RoleName=role_name)
+                return role_response['Role']['Arn']
+            except self.iam_client.exceptions.NoSuchEntityException:
+                pass
+            
+            # Create execution role without VPC permissions
+            trust_policy = {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"Service": "lambda.amazonaws.com"},
+                        "Action": "sts:AssumeRole"
+                    }
+                ]
+            }
+            
+            role_response = self.iam_client.create_role(
+                RoleName=role_name,
+                AssumeRolePolicyDocument=json.dumps(trust_policy),
+                Description=f"Lambda execution role for {settings.app_name} (no VPC)",
+                Tags=[
+                    {'Key': 'Name', 'Value': role_name},
+                    {'Key': 'Project', 'Value': settings.app_name},
+                    {'Key': 'Architecture', 'Value': 'No-VPC-Optimized'}
+                ]
+            )
+            
+            # Attach only basic execution policy (no VPC policy)
+            self.iam_client.attach_role_policy(
+                RoleName=role_name,
+                PolicyArn='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+            )
+            
+            # No VPC execution policy attached - this eliminates ENI creation delays
+            logger.info(f"Created Lambda execution role without VPC permissions: {role_name}")
+            return role_response['Role']['Arn']
+            
+        except Exception as e:
+            logger.error(f"Failed to create Lambda execution role (no VPC): {e}")
+            raise
+    
     def _find_existing_function(self, function_name: str) -> Dict[str, Any]:
         """Find existing Lambda function."""
         try:
@@ -707,6 +842,41 @@ lambda_handler = handler
                 MemorySize=LAMBDA_MEMORY
             )
             
+            return response
+    
+    def _update_lambda_function_no_vpc(self, function_name: str, zip_content: str, 
+                                       layers: List[str], database_host: str, 
+                                       database_port: int) -> Dict[str, Any]:
+        """Update existing Lambda function and remove VPC configuration."""
+        with open(zip_content, 'rb') as f:
+            # Update function code
+            self.lambda_client.update_function_code(
+                FunctionName=function_name,
+                ZipFile=f.read()
+            )
+            
+            # Update function configuration and remove VPC
+            response = self.lambda_client.update_function_configuration(
+                FunctionName=function_name,
+                Layers=layers,
+                Timeout=LAMBDA_TIMEOUT,
+                MemorySize=LAMBDA_MEMORY,
+                Environment={
+                    'Variables': {
+                        'DEPLOYMENT_MODE': 'aws-prod',
+                        'S3_BUCKET_NAME': settings.s3_bucket_name,
+                        'SQS_QUEUE_URL': settings.sqs_queue_url or '',
+                        'DATABASE_HOST': database_host or '',
+                        'DATABASE_PORT': str(database_port),
+                    }
+                },
+                VpcConfig={
+                    'SubnetIds': [],
+                    'SecurityGroupIds': []
+                }  # Empty VPC config removes VPC association
+            )
+            
+            logger.info(f"Removed VPC configuration from Lambda function: {function_name}")
             return response
     
     def get_deployment_summary(self) -> Dict[str, Any]:
@@ -763,6 +933,7 @@ def main():
     parser.add_argument("--region", default=DEFAULT_REGION, help="AWS region")
     parser.add_argument("--cleanup", action="store_true", help="Clean up Lambda functions instead of deploying")
     parser.add_argument("--files-api-only", action="store_true", help="Deploy only Files API Lambda")
+    parser.add_argument("--files-api-no-vpc", action="store_true", help="Deploy Files API Lambda without VPC (optimized)")
     parser.add_argument("--iot-only", action="store_true", help="Deploy only IoT Backend Lambda")
     
     args = parser.parse_args()
@@ -776,6 +947,10 @@ def main():
         if args.files_api_only:
             deployer = LambdaDeployer(args.region)
             result = deployer.deploy_files_api_lambda()
+            print(json.dumps(result, indent=2, default=str))
+        elif args.files_api_no_vpc:
+            deployer = LambdaDeployer(args.region)
+            result = deployer.deploy_files_api_lambda_no_vpc()
             print(json.dumps(result, indent=2, default=str))
         elif args.iot_only:
             deployer = LambdaDeployer(args.region)

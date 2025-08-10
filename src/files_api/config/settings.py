@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     
     # GPU Instance Configuration
     primary_instance_type: str = Field(
-        default="g5.xlarge",
+        default="g4dn.xlarge",
         description="Primary GPU instance type - A10G with better availability than g4dn"
     )
     
@@ -174,6 +174,9 @@ class Settings(BaseSettings):
             mode = values['deployment_mode']
             if mode in ["local-dev", "aws-mock"]:
                 return "mock"
+            elif mode == "aws-prod":
+                # In production, return None to let IAM execution role handle auth
+                return None
         return v
     
     @property
@@ -212,8 +215,8 @@ class Settings(BaseSettings):
         """GPU optimization configuration per region."""
         return {
             'us-east-1': {
-                'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge', 'g4dn.large'],
-                'spot_max_price': 0.42,  # Increased for better availability across AZs
+                'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge'],
+                'spot_max_price': 0.26,  # Increased for better spot instance availability
                 'gpu_memory_limit': '12GiB'  # Safe for 16GB T4
             },
             'us-west-2': {
@@ -247,14 +250,20 @@ class Settings(BaseSettings):
             'S3_BUCKET_NAME': self.s3_bucket_name,
             'SQS_QUEUE_NAME': self.sqs_queue_name,
             'AWS_DEFAULT_REGION': self.aws_region,
-            'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
-            'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
-            'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
             'SQS_QUEUE_URL': self.sqs_queue_url or '',
             'MODEL_MEMORY_LIMIT': self.model_memory_limit,
             'DISABLE_DUPLICATE_LOADING': str(self.disable_duplicate_loading).lower(),
             'LOG_LEVEL': self.log_level,
         }
+        
+        # Only set AWS credentials and endpoint for local/mock modes
+        if self.deployment_mode in ['local-dev', 'aws-mock']:
+            env_vars.update({
+                'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
+                'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
+                'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
+            })
+        # For aws-prod, let Lambda execution role handle credentials automatically
         
         for key, value in env_vars.items():
             if value:  # Only set non-empty values
@@ -266,19 +275,26 @@ class Settings(BaseSettings):
         Returns:
             Dictionary of environment variables
         """
-        return {
+        env_dict = {
             'DEPLOYMENT_MODE': self.deployment_mode,
             'S3_BUCKET_NAME': self.s3_bucket_name,
             'SQS_QUEUE_NAME': self.sqs_queue_name,
             'AWS_DEFAULT_REGION': self.aws_region,
-            'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
-            'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
-            'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
             'SQS_QUEUE_URL': self.sqs_queue_url or '',
             'MODEL_MEMORY_LIMIT': self.model_memory_limit,
             'DISABLE_DUPLICATE_LOADING': str(self.disable_duplicate_loading).lower(),
             'LOG_LEVEL': self.log_level,
         }
+        
+        # Only include AWS credentials for local/mock modes
+        if self.deployment_mode in ['local-dev', 'aws-mock']:
+            env_dict.update({
+                'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
+                'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
+                'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
+            })
+        
+        return env_dict
 
     model_config = SettingsConfigDict(
         case_sensitive=False,
