@@ -53,3 +53,4 @@ __pycache__/
 .env.aws-mock
 .env.aws-prod
 .env.local-dev
+claude.local2.md
