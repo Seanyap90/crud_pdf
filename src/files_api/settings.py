@@ -172,6 +172,9 @@ class Settings(BaseSettings):
             mode = values['deployment_mode']
             if mode in ["local-dev", "aws-mock"]:
                 return "mock"
+            elif mode == "aws-prod":
+                # In production, return None to let IAM execution role handle auth
+                return None
         return v
     
     @property
@@ -211,12 +214,12 @@ class Settings(BaseSettings):
         return {
             'us-east-1': {
                 'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge', 'g4dn.large'],
-                'spot_max_price': 0.20,  # Conservative for g4dn.xlarge
+                'spot_max_price': 0.23,  # Conservative for g4dn.xlarge
                 'gpu_memory_limit': '12GiB'  # Safe for 16GB T4
             },
             'us-west-2': {
                 'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge'],
-                'spot_max_price': 0.22,  # Slightly higher for us-west-2
+                'spot_max_price': 0.23,  # Slightly higher for us-west-2
                 'gpu_memory_limit': '12GiB'
             }
         }
@@ -245,14 +248,20 @@ class Settings(BaseSettings):
             'S3_BUCKET_NAME': self.s3_bucket_name,
             'SQS_QUEUE_NAME': self.sqs_queue_name,
             'AWS_DEFAULT_REGION': self.aws_region,
-            'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
-            'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
-            'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
             'SQS_QUEUE_URL': self.sqs_queue_url or '',
             'MODEL_MEMORY_LIMIT': self.model_memory_limit,
             'DISABLE_DUPLICATE_LOADING': str(self.disable_duplicate_loading).lower(),
             'LOG_LEVEL': self.log_level,
         }
+        
+        # Only set AWS credentials and endpoint for local/mock modes
+        if self.deployment_mode in ['local-dev', 'aws-mock']:
+            env_vars.update({
+                'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
+                'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
+                'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
+            })
+        # For aws-prod, let Lambda execution role handle credentials automatically
         
         for key, value in env_vars.items():
             if value:  # Only set non-empty values
@@ -264,23 +273,30 @@ class Settings(BaseSettings):
         Returns:
             Dictionary of environment variables
         """
-        return {
+        env_dict = {
             'DEPLOYMENT_MODE': self.deployment_mode,
             'S3_BUCKET_NAME': self.s3_bucket_name,
             'SQS_QUEUE_NAME': self.sqs_queue_name,
             'AWS_DEFAULT_REGION': self.aws_region,
-            'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
-            'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
-            'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
             'SQS_QUEUE_URL': self.sqs_queue_url or '',
             'MODEL_MEMORY_LIMIT': self.model_memory_limit,
             'DISABLE_DUPLICATE_LOADING': str(self.disable_duplicate_loading).lower(),
             'LOG_LEVEL': self.log_level,
         }
+        
+        # Only include AWS credentials for local/mock modes
+        if self.deployment_mode in ['local-dev', 'aws-mock']:
+            env_dict.update({
+                'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
+                'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
+                'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
+            })
+        
+        return env_dict
 
     model_config = SettingsConfigDict(
         case_sensitive=False,
-        env_file=(".env", ".env.aws"),  # Read both .env and .env.aws (aws takes precedence)
+        env_file=(".env", ".env.local-dev", ".env.aws-mock", ".env.aws-prod"),  # Support new env files
         env_file_encoding="utf-8",
         extra="allow",  # Allow extra fields for backwards compatibility
         # Allow reading from environment variables with different names
@@ -307,3 +323,32 @@ settings = get_settings()
 S3_BUCKET_NAME = settings.s3_bucket_name
 SQS_QUEUE_NAME = settings.sqs_queue_name
 AWS_DEFAULT_REGION = settings.aws_region
+
+
+def get_settings_with_env_helper(env_file: str = None) -> Settings:
+    """
+    Get settings instance with env_helper integration.
+    
+    This function loads the specified .env file using the env_helper
+    before creating the Settings instance, ensuring environment
+    variables are properly loaded.
+    
+    Args:
+        env_file: Path to .env file (e.g., '.env.aws-prod')
+        
+    Returns:
+        Settings instance with loaded environment
+    """
+    if env_file:
+        try:
+            # Import env_helper dynamically to avoid circular imports
+            from files_api.env_helper import EnvironmentHelper
+            helper = EnvironmentHelper(env_file)
+            helper.load_environment()
+        except (ImportError, FileNotFoundError) as e:
+            print(f"Warning: Could not load env_helper or {env_file}: {e}")
+            print("Falling back to default settings loading")
+    
+    # Clear the settings cache and return fresh instance
+    get_settings.cache_clear()
+    return get_settings()

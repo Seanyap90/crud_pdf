@@ -10,7 +10,7 @@ import os
 from typing import Dict, List, Optional, Any, Tuple
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
-from src.files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 
 logger = logging.getLogger(__name__)
 

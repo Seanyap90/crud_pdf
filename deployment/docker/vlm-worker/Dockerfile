@@ -73,7 +73,9 @@ RUN touch /app/src/__init__.py \
     && touch /app/src/vlm_workers/__init__.py
 
 # Copy application modules - copy these layers last as they change most frequently
-COPY src/files_api/config/ /app/src/files_api/config/
+#COPY src/files_api/config/ /app/src/files_api/config/
+COPY src/files_api/config.py /app/src/files_api/
+COPY src/files_api/env_helper.py /app/src/files_api/
 COPY src/files_api/settings.py /app/src/files_api/
 COPY src/files_api/msg_queue.py /app/src/files_api/
 COPY src/files_api/adapters/ /app/src/files_api/adapters/

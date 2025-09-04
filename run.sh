@@ -16,22 +16,19 @@ CERT_DAYS=365
 # --- Helper Functions --- #
 ##########################
 
-# Function to get settings as environment variables
-function get_settings_as_env {
-    python3 -c "
-from files_api.config.settings import get_settings
-settings = get_settings()
-print(f'export S3_BUCKET_NAME=\"{settings.s3_bucket_name}\"')
-print(f'export SQS_QUEUE_NAME=\"{settings.sqs_queue_name}\"')
-print(f'export AWS_DEFAULT_REGION=\"{settings.aws_region}\"')
-print(f'export AWS_ENDPOINT_URL=\"{settings.aws_endpoint_url or \"\"}\"')
-print(f'export AWS_ACCESS_KEY_ID=\"{settings.aws_access_key_id or \"mock\"}\"')
-print(f'export AWS_SECRET_ACCESS_KEY=\"{settings.aws_secret_access_key or \"mock\"}\"')
-print(f'export SQS_QUEUE_URL=\"{settings.sqs_queue_url or \"\"}\"')
-print(f'export MODEL_MEMORY_LIMIT=\"{settings.model_memory_limit}\"')
-print(f'export DISABLE_DUPLICATE_LOADING=\"{str(settings.disable_duplicate_loading).lower()}\"')
-print(f'export LOG_LEVEL=\"{settings.log_level}\"')
-"
+# Function to load environment variables from .env files
+function load_env_file {
+    local env_file=$1
+    if [ -f "$env_file" ]; then
+        set -a  # automatically export all variables
+        source "$env_file"
+        set +a
+        echo "✅ Loaded environment from $env_file"
+        return 0
+    else
+        echo "❌ Environment file $env_file not found"
+        return 1
+    fi
 }
 
 ##########################
@@ -54,27 +51,21 @@ function run {
 function local-dev {
     set +e
     
-    # Create .env.local to override any aws-mock settings
-    cat > .env.local << EOF
-DEPLOYMENT_MODE=local-dev
-QUEUE_TYPE=local-dev
-AWS_ENDPOINT_URL=http://localhost:5000
-AWS_ACCESS_KEY_ID=mock
-AWS_SECRET_ACCESS_KEY=mock
-S3_BUCKET_NAME=some-bucket
-MODEL_MEMORY_LIMIT=24GiB
-DISABLE_DUPLICATE_LOADING=true
-EOF
-
-    # Configure AWS mock environment
-    export DEPLOYMENT_MODE="local-dev"
-    export QUEUE_TYPE="local-dev"
-    export DISABLE_DUPLICATE_LOADING="true"
-    export MODEL_MEMORY_LIMIT="24GiB"
-    export AWS_ENDPOINT_URL="http://localhost:5000"
-    export AWS_SECRET_ACCESS_KEY="mock"
-    export AWS_ACCESS_KEY_ID="mock"
-    export S3_BUCKET_NAME="some-bucket"
+    # Load local development environment
+    load_env_file ".env.local-dev"
+    
+    if [ $? -ne 0 ]; then
+        echo "⚠️ Could not load .env.local-dev, using fallback configuration"
+        # Fallback configuration
+        export DEPLOYMENT_MODE="local-dev"
+        export QUEUE_TYPE="local-dev"
+        export DISABLE_DUPLICATE_LOADING="true"
+        export MODEL_MEMORY_LIMIT="24GiB"
+        export AWS_ENDPOINT_URL="http://localhost:5000"
+        export AWS_SECRET_ACCESS_KEY="mock"
+        export AWS_ACCESS_KEY_ID="mock"
+        export S3_BUCKET_NAME="some-bucket"
+    fi
 
     # Start moto server
     python -m moto.server -p 5000 &
@@ -189,12 +180,22 @@ EOF
 function aws-mock {
     set +e
     
-    echo "Setting up AWS mock infrastructure with EB worker autoscaling simulation..."
+    # Load AWS mock environment
+    load_env_file ".env.aws-mock"
+    
+    if [ $? -ne 0 ]; then
+        echo "⚠️ Could not load .env.aws-mock, using fallback configuration"
+        # Fallback configuration
+        export DEPLOYMENT_MODE="aws-mock"
+        export AWS_ENDPOINT_URL="http://localhost:5000"
+        export AWS_SECRET_ACCESS_KEY="mock"
+        export AWS_ACCESS_KEY_ID="mock"
+        export S3_BUCKET_NAME="rag-pdf-storage"
+    fi
+    
+    echo "Setting up AWS mock infrastructure with ECS worker autoscaling simulation..."
     echo "🚀 Using decoupled architecture: separate model downloader + worker containers"
     echo "📦 Models downloaded once by dedicated container, then used by worker"
-    
-    # Set deployment mode
-    export DEPLOYMENT_MODE="aws-mock"
     
     # Get absolute path to project root
     PROJECT_ROOT="$(pwd)"
@@ -225,12 +226,6 @@ function aws-mock {
         kill $MOTO_PID 2>/dev/null
         exit 1
     fi
-    
-    # Set AWS mock environment variables
-    export AWS_ENDPOINT_URL="http://localhost:5000"
-    export AWS_SECRET_ACCESS_KEY="mock"
-    export AWS_ACCESS_KEY_ID="mock"
-    export S3_BUCKET_NAME="rag-pdf-storage"
     
     # Deploy ECS infrastructure using deploy_ecs.py
     echo "Creating ECS mock resources (S3, SQS, etc.)..."
@@ -344,139 +339,89 @@ function aws-mock-down {
 function aws-prod {
     set +e
     
-    echo "🚀 AWS Production Deployment - Choose Architecture"
-    echo "================================================"
-    echo "Available deployment modes:"
-    echo "  1. Traditional Full Code Deployment (creates all infrastructure)"
-    echo "  2. Hybrid Console+Code Deployment (validates console resources, deploys services)"
-    echo "  3. Infrastructure-Only (creates infrastructure, exports config)"
+    # Load AWS production environment first
+    load_env_file ".env.aws-prod"
+    
+    echo "🚀 AWS Production Deployment"
+    echo "============================"
+    echo "Select deployment mode:"
+    echo "  1) Hybrid (Console infrastructure + Parallel Lambda+ECS)"
+    echo "  2) Infrastructure Only (Setup + Export config)" 
+    echo "  3) Status & Cost Analysis"
+    echo "  4) Cleanup Options"
     echo ""
     
-    # Check if environment variables for console deployment are set
-    if [ -n "$VPC_ID" ] && [ -n "$PUBLIC_SUBNET_ID" ] && [ -n "$EFS_FILE_SYSTEM_ID" ]; then
-        echo "🔍 Detected console resource environment variables - suggesting hybrid deployment"
-        DEFAULT_MODE="hybrid"
-    else
-        echo "📋 No console resources detected - suggesting traditional deployment"
-        DEFAULT_MODE="traditional"
-    fi
-    
-    echo ""
-    read -p "Choose deployment mode (1=traditional, 2=hybrid, 3=infrastructure-only) [default: auto]: " DEPLOYMENT_CHOICE
-    
-    # Set deployment mode based on user choice
-    case $DEPLOYMENT_CHOICE in
-        1)
-            DEPLOY_MODE="traditional"
-            ;;
-        2)
-            DEPLOY_MODE="hybrid"
-            ;;
-        3)
-            DEPLOY_MODE="infrastructure-only"
-            ;;
-        *)
-            DEPLOY_MODE=$DEFAULT_MODE
-            echo "Using auto-detected mode: $DEPLOY_MODE"
-            ;;
-    esac
+    read -p "Choose mode (1-4) [default: 1]: " mode
     
     export DEPLOYMENT_MODE="aws-prod"
     
-    # Execute deployment based on chosen mode
-    if [ "$DEPLOY_MODE" = "hybrid" ]; then
-        aws_prod_hybrid
-    elif [ "$DEPLOY_MODE" = "infrastructure-only" ]; then
-        aws_prod_infrastructure_only
-    else
-        aws_prod_traditional
-    fi
-}
-
-# Traditional full code deployment (original approach)
-function aws_prod_traditional {
-    echo "🚀 Traditional AWS Production Deployment"
-    echo "========================================"
-    echo "📦 Architecture: Full code-based infrastructure + services"
-    
-    # Phase 1: Deploy infrastructure with optimized architecture
-    echo "🏗️ Phase 1: Deploying optimized ECS infrastructure..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --infrastructure-only --export-config .env.aws-prod
-    
-    if [ $? -ne 0 ]; then
-        echo "❌ Error: Infrastructure deployment failed"
-        exit 1
-    fi
-    
-    # Source the exported configuration
-    if [ -f ".env.aws-prod" ]; then
-        echo "📋 Loading infrastructure configuration..."
-        source .env.aws-prod
-        echo "✅ Configuration loaded"
-    else
-        echo "❌ Error: .env.aws-prod configuration file not found"
-        exit 1
-    fi
-    
-    # Phase 2: Deploy services
-    echo "🚀 Phase 2: Deploying ECS services..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --deploy-services
-    
-    if [ $? -ne 0 ]; then
-        echo "❌ Error: ECS services deployment failed"
-        exit 1
-    fi
-    
-    # Phase 3: Deploy Lambda functions (optimized - no VPC)
-    echo "⚡ Phase 3: Deploying Lambda functions (no VPC)..."
-    python -m deployment.aws.services.lambda_deploy --files-api-no-vpc
-    
-    if [ $? -ne 0 ]; then
-        echo "❌ Error: Lambda deployment failed"
-        exit 1
-    fi
-    
-    echo ""
-    echo "🎉 Traditional AWS Production deployment completed!"
-    _show_deployment_summary
-}
-
-# Hybrid console+code deployment (optimized approach)
-function aws_prod_hybrid {
-    echo "🔍 Hybrid Console+Code AWS Production Deployment"
-    echo "==============================================="
-    echo "📦 Architecture: Console infrastructure + code services"
-    
-    # Validate console prerequisites
-    echo "📋 Validating console-created resources..."
-    
-    # Check required environment variables
-    REQUIRED_VARS=("VPC_ID" "PUBLIC_SUBNET_ID" "EFS_FILE_SYSTEM_ID" "EFS_ACCESS_POINT_ID" "S3_BUCKET_NAME" "SQS_QUEUE_URL" "DATABASE_SG_ID" "EFS_SG_ID" "ECS_WORKERS_SG_ID")
-    
-    for var in "${REQUIRED_VARS[@]}"; do
-        if [ -z "${!var}" ]; then
-            echo "❌ Error: Required environment variable $var is not set"
-            echo "💡 Set console resource environment variables before running hybrid deployment"
-            echo "   Example: export VPC_ID=vpc-12345678"
+    case $mode in
+        1|"")
+            echo "Using hybrid deployment with parallel Lambda+ECS"
+            aws_prod_hybrid_parallel
+            ;;
+        2)
+            aws_prod_infrastructure_only
+            ;;
+        3)
+            aws_prod_status_enhanced
+            ;;
+        4)
+            aws_prod_cleanup_menu
+            ;;
+        *)
+            echo "❌ Invalid selection. Please choose 1-4."
             exit 1
-        fi
-    done
+            ;;
+    esac
+}
+
+# Hybrid console+code deployment with true make-based parallel execution
+function aws_prod_hybrid_parallel {
+    echo "🔍 Hybrid Console+Code with Parallel Deployment"
+    echo "==============================================="
+    echo "📦 Architecture: Console infrastructure + parallel Lambda+ECS deployment"
     
-    echo "✅ Console resource environment variables detected"
+    # Environment already loaded by parent aws-prod function
     
-    # Deploy using hybrid approach
-    echo "🚀 Deploying services using console infrastructure..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console
+    # Validate infrastructure first (dependency)
+    echo "🏗️ Validating infrastructure and prerequisites..."
+    make aws-prod-infra
     
     if [ $? -ne 0 ]; then
-        echo "❌ Error: Hybrid deployment failed"
+        echo "❌ Infrastructure validation failed"
         exit 1
     fi
     
-    echo ""
-    echo "🎉 Hybrid Console+Code deployment completed!"
-    echo "💰 Cost Optimization: NAT Gateway eliminated (saves $32.40/month)"
-    _show_deployment_summary
+    echo "✅ Infrastructure validation completed"
+    
+    # Run Lambda and ECS in parallel using make -j2
+    echo "🚀 Starting parallel Lambda + ECS deployment..."
+    make -j2 aws-prod-lambda aws-prod-ecs
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ Parallel deployment completed successfully"
+        
+        # Post-deployment verification
+        echo "🔐 Verifying IAM roles..."
+        python -c "
+from deployment.aws.utils.iam_verification import generate_iam_verification_report
+import json
+try:
+    report = generate_iam_verification_report(['fastapi-app-files-api'], 'fastapi-app-ecs-cluster')
+    print('✅ IAM Verification:', 'PASS' if report['overall_status'] == 'PASS' else 'FAIL')
+except Exception as e:
+    print('⚠️ IAM Verification: Unable to verify -', str(e))
+" 2>/dev/null
+        
+        echo ""
+        echo "🎉 Hybrid Console+Code deployment with parallel Lambda+ECS completed!"
+        echo "💰 Cost Optimization: NAT Gateway eliminated (saves $32.40/month)"
+        _show_deployment_summary
+    else
+        echo "❌ Parallel deployment failed"
+        exit 1
+    fi
 }
 
 # Infrastructure-only deployment
@@ -551,338 +496,137 @@ function _show_deployment_summary {
     echo "   • View logs: aws logs tail /ecs/*"
 }
 
-# Cleanup AWS production deployment with state tracking
+# Cleanup AWS production deployment with parallel cleanup support
 function aws-prod-cleanup {
     set +e
     
-    echo "🧹 AWS Production Cleanup - Complete Teardown"
-    echo "⚠️ This will destroy ALL AWS resources created by aws-prod deployment"
+    echo "🧹 AWS Production Cleanup"
+    echo "========================"
+    echo "This will destroy ALL AWS resources created by aws-prod deployment"
+    echo ""
+    read -p "Are you sure? (y/N): " confirm
     
-    # Check for deployment state
-    if [ -f ".deployment_state.json" ]; then
-        echo "📋 Found deployment state - using LIFO rollback strategy"
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        echo "🚀 Running cleanup..."
         
-        # Show current deployment status
-        python -m deployment.aws.state.state_manager --action status --state-file .deployment_state.json
+        # Set deployment mode
+        export DEPLOYMENT_MODE="aws-prod"
         
-        echo ""
-        read -p "🤔 Proceed with rollback? (y/N): " -n 1 -r
-        echo
-        
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            echo "🔄 Executing LIFO rollback..."
-            python -m deployment.aws.state.state_manager --action rollback --state-file .deployment_state.json
-            
-            if [ $? -eq 0 ]; then
-                echo "✅ State-based rollback completed"
-            else
-                echo "⚠️ State-based rollback had issues - proceeding with manual cleanup"
-            fi
-        else
-            echo "❌ Rollback cancelled by user"
-            return 1
+        # Load config
+        if [ -f ".env.aws-prod" ]; then
+            load_env_file ".env.aws-prod"
         fi
+        
+        # Sequential cleanup (simple and reliable)
+        echo "⚡ Cleaning up Lambda functions..."
+        python -m deployment.aws.services.lambda_deploy --mode aws-prod --cleanup
+        
+        echo "🐳 Cleaning up ECS infrastructure..."
+        python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --cleanup
+        
+        # Remove config files
+        rm -f .env.aws-prod .env.aws-prod.json .deployment_state.json
+        
+        echo "🎉 Cleanup completed!"
     else
-        echo "📋 No deployment state found - proceeding with manual cleanup"
+        echo "❌ Cleanup cancelled"
     fi
-    
-    # Set deployment mode for cleanup
-    export DEPLOYMENT_MODE="aws-prod"
-    
-    # Load infrastructure config if available
-    if [ -f ".env.aws-prod" ]; then
-        echo "📋 Loading infrastructure configuration..."
-        source .env.aws-prod
-    fi
-    
-    # Phase 1: Stop ECS services
-    echo "🐳 Phase 1: Stopping ECS services..."
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-vlm-workers" --desired-count 0 2>/dev/null || echo "⚠️ VLM workers service not found"
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-mongodb" --desired-count 0 2>/dev/null || echo "⚠️ MongoDB service not found"
-        echo "✅ ECS services stopped"
-    else
-        echo "⚠️ ECS_CLUSTER_NAME not found - cannot stop services"
-    fi
-    
-    # Phase 2: Unmount EFS file systems (optimized architecture - single EFS)
-    echo "💾 Phase 2: Unmounting EFS file systems..."
-    sudo umount /mnt/efs/models 2>/dev/null || echo "⚠️ Shared models EFS not mounted or unmount failed"
-    
-    # Cleanup local mount directories
-    sudo rmdir /mnt/efs/models /mnt/efs 2>/dev/null || true
-    rm -rf /tmp/efs-models 2>/dev/null || true
-    echo "✅ EFS mount points cleaned up"
-    
-    # Phase 3: Cleanup AWS ECS infrastructure
-    echo "🏗️ Phase 3: Cleaning up ECS infrastructure..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --cleanup
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ ECS infrastructure cleaned up"
-    else
-        echo "⚠️ ECS cleanup had issues - check AWS console for remaining resources"
-    fi
-    
-    # Phase 4: Cleanup Lambda functions
-    echo "📋 Phase 4: Cleaning up Lambda functions..."
-    python -m deployment.aws.services.lambda_deploy --cleanup 2>/dev/null || {
-        echo "⚠️ Lambda cleanup script not available - manual cleanup may be needed"
-    }
-    
-    # Phase 5: Remove local configuration files
-    echo "🗑️ Phase 5: Cleaning up local files..."
-    rm -f .env.aws-prod .env.aws-prod.json .deployment_state.json
-    echo "✅ Local configuration files removed"
-    
-    # Phase 6: Remove ECR images and repository
-    echo "📦 Phase 6: ECR repository cleanup..."
-    if [ -n "$ECR_REPO_NAME" ]; then
-        echo "🗑️ Deleting ECR repository: $ECR_REPO_NAME"
-        if aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$AWS_DEFAULT_REGION" 2>/dev/null; then
-            echo "✅ ECR repository '$ECR_REPO_NAME' deleted successfully"
-        else
-            echo "⚠️ ECR repository '$ECR_REPO_NAME' not found or already deleted"
-        fi
-    else
-        echo "⚠️ ECR_REPO_NAME not set - skipping ECR cleanup"
-    fi
-    
-    echo ""
-    echo "🎉 AWS Production cleanup completed!"
-    echo "📊 Cleanup summary:"
-    echo "   • ✅ Docker Compose services stopped"
-    echo "   • ✅ EFS mount points unmounted"
-    echo "   • ✅ ECS infrastructure cleaned up"
-    echo "   • ✅ Lambda functions cleaned up"
-    echo "   • ✅ Local configuration removed"
-    echo ""
-    echo "💡 Manual verification recommended:"
-    echo "   • Check AWS Console for any remaining resources"
-    echo "   • Verify S3 buckets are deleted"
-    echo "   • Confirm EFS file systems are removed"
-    echo "   • Check CloudWatch log groups"
-    echo ""
-    echo "🔍 Cost verification: aws ce get-cost-and-usage --help"
 }
 
-# Soft cleanup AWS production deployment (preserves expensive infrastructure)
-function aws-prod-cleanup-soft {
-    set +e
-    
-    echo "🧹 AWS Production Soft Cleanup - Preserve Infrastructure"
-    echo "💰 This preserves NAT Gateway, VPC, EFS, and ECR to avoid recreation costs"
-    echo "🔄 Only cleans up: ECS Services, Tasks, Auto Scaling Groups, Lambda functions"
-    
-    # Set deployment mode for cleanup
-    export DEPLOYMENT_MODE="aws-prod"
-    
-    # Load infrastructure config if available
-    if [ -f ".env.aws-prod" ]; then
-        echo "📋 Loading infrastructure configuration..."
-        source .env.aws-prod
-    fi
-    
-    # Phase 1: Stop ECS services
-    echo "🐳 Phase 1: Stopping ECS services..."
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-vlm-workers" --desired-count 0 2>/dev/null || echo "⚠️ VLM workers service not found"
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-mongodb" --desired-count 0 2>/dev/null || echo "⚠️ MongoDB service not found"
-        echo "✅ ECS services stopped"
-    else
-        echo "⚠️ ECS_CLUSTER_NAME not found - cannot stop services"
-    fi
-    
-    # Phase 2: Scale down ECS services (preserve infrastructure)
-    echo "🏗️ Phase 2: Scaling down ECS services (preserving infrastructure)..."
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "vlm-worker" --desired-count 0 2>/dev/null || echo "⚠️ vlm-worker service not found or already scaled down"
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "mongodb" --desired-count 0 2>/dev/null || echo "⚠️ mongodb service not found or already scaled down"
-        echo "✅ ECS services scaled to 0 (infrastructure preserved)"
-    else
-        echo "⚠️ ECS_CLUSTER_NAME not found - skipping service scaling"
-    fi
-    
-    # Phase 3: Cleanup Lambda functions
-    echo "⚡ Phase 3: Cleaning up Lambda functions..."
-    python -m files_api.aws.deploy_lambda --mode aws-prod --cleanup
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ Lambda functions cleaned up"
-    else
-        echo "⚠️ Lambda cleanup had issues - check AWS console for remaining functions"
-    fi
-    
-    # Phase 4: Scale down auto scaling groups to 0 (don't delete)
-    echo "📊 Phase 4: Scaling down auto scaling groups..."
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        # Find and scale down auto scaling groups
-        ASG_NAMES=$(aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?contains(Tags[?Key=='Project'].Value, 'FastAPI App')].AutoScalingGroupName" --output text 2>/dev/null || echo "")
-        if [ -n "$ASG_NAMES" ]; then
-            for asg in $ASG_NAMES; do
-                aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$asg" --desired-capacity 0 --min-size 0 2>/dev/null || echo "⚠️ Could not scale ASG: $asg"
-            done
-            echo "✅ Auto scaling groups scaled to 0"
-        else
-            echo "⚠️ No auto scaling groups found"
-        fi
-    fi
-    
-    # Clean up deployment state for services only
-    if [ -f ".deployment_state.json" ]; then
-        echo "📋 Updating deployment state (preserving infrastructure entries)..."
-        python -c "
-import json
-try:
-    with open('.deployment_state.json', 'r') as f:
-        state = json.load(f)
-    
-    # Remove service-level entries but keep infrastructure
-    preserved_keys = ['vpc', 'subnets', 'internet_gateway', 'nat_gateway', 'security_groups', 'efs', 'ecr']
-    new_state = {k: v for k, v in state.items() if any(pk in k.lower() for pk in preserved_keys)}
-    
-    with open('.deployment_state.json', 'w') as f:
-        json.dump(new_state, f, indent=2)
-    print('✅ Deployment state updated')
-except Exception as e:
-    print(f'⚠️ Could not update deployment state: {e}')
-"
-    fi
-    
-    echo ""
-    echo "✅ AWS Production Soft Cleanup Complete!"
-    echo ""
-    echo "💰 Cost Savings: Preserved expensive infrastructure:"
-    echo "   • NAT Gateway: ~$32.40/month (preserved)"
-    echo "   • Elastic IP: ~$3.60/month (preserved)"
-    echo "   • VPC/Subnets: FREE (preserved)"
-    echo "   • EFS: Pay-per-use (preserved)"
-    echo "   • ECR: Pay-per-use (preserved)"
-    echo ""
-    echo "🔄 Cleaned up pay-per-use resources:"
-    echo "   • ECS Services and Tasks: $0/month when scaled to 0"
-    echo "   • Lambda Functions: $0/month when not invoked"
-    echo "   • Auto Scaling Groups: $0/month when scaled to 0"
-    echo ""
-    echo "🚀 Next deployment will reuse existing infrastructure!"
-    echo "💡 To completely destroy everything: make aws-prod-cleanup"
-}
-
-# Show AWS production deployment status
+# Show AWS production deployment status with enhanced analysis
 function aws-prod-status {
     set +e
     
-    echo "📊 AWS Production Deployment Status"
-    echo "=================================="
+    echo "📊 AWS Production Status & Cost Analysis"
+    echo "======================================="
     
-    # Check deployment state
-    if [ -f ".deployment_state.json" ]; then
-        echo "📋 Deployment State:"
-        python -m deployment.aws.state.state_manager --action status --state-file .deployment_state.json
-        echo ""
-    else
-        echo "📋 No deployment state file found"
-        echo ""
-    fi
-    
-    # Check configuration files
-    echo "📁 Configuration Files:"
+    # Load config if available
     if [ -f ".env.aws-prod" ]; then
-        echo "   ✅ .env.aws-prod (infrastructure config)"
-        echo "   📋 Key values:"
-        grep -E "^(ECS_CLUSTER_NAME|EFS_.*_ID|VPC_ID)" .env.aws-prod 2>/dev/null | sed 's/^/      /'
+        source .env.aws-prod
+        echo "✅ Configuration loaded from .env.aws-prod"
+        echo "   📋 Key resources:"
+        grep -E "^(ECS_CLUSTER_NAME|EFS_.*_ID|VPC_ID|DATABASE_HOST)" .env.aws-prod 2>/dev/null | sed 's/^/      /' || echo "      ⚠️ Key variables not found"
     else
-        echo "   ❌ .env.aws-prod (missing)"
+        echo "❌ .env.aws-prod not found"
     fi
     echo ""
     
-    # Check ECS services
-    echo "🐳 ECS Services:"
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        echo "   📦 Services status:"
-        aws ecs describe-services --cluster "$ECS_CLUSTER_NAME" --services "fastapi-app-vlm-workers" "fastapi-app-mongodb" \
-            --query 'services[*].[serviceName,status,runningCount,desiredCount]' --output table 2>/dev/null | sed 's/^/      /' \
-            || echo "      ⚠️ No ECS services found"
-    else
-        echo "   ❌ ECS_CLUSTER_NAME not set"
-    fi
-    echo ""
-    
-    # Check EFS mounts
-    echo "💾 EFS Mount Points:"
-    if mount | grep -q "/mnt/efs"; then
-        echo "   ✅ EFS mounts active:"
-        mount | grep "/mnt/efs" | sed 's/^/      /'
-    else
-        echo "   ❌ No EFS mounts found"
-    fi
-    echo ""
-    
-    # Check AWS resources (if AWS CLI available)
+    # Deployment status
+    echo "🚀 Deployment Status:"
     if command -v aws &> /dev/null; then
-        echo "☁️ AWS Resources:"
-        
-        # Load config if available
-        if [ -f ".env.aws-prod" ]; then
-            source .env.aws-prod
-        fi
-        
+        # Check ECS cluster
         if [ -n "$ECS_CLUSTER_NAME" ]; then
-            echo "   🏗️ ECS Cluster:"
-            aws ecs describe-clusters --clusters "$ECS_CLUSTER_NAME" --query 'clusters[0].status' --output text 2>/dev/null | sed 's/^/      Cluster: /' || echo "      ❌ Cluster not found or AWS CLI error"
+            cluster_status=$(aws ecs describe-clusters --clusters "$ECS_CLUSTER_NAME" --query 'clusters[0].status' --output text 2>/dev/null || echo "NOT_FOUND")
+            echo "   🏗️ ECS Cluster ($ECS_CLUSTER_NAME): $cluster_status"
             
-            echo "   🔧 ECS Services:"
-            aws ecs list-services --cluster "$ECS_CLUSTER_NAME" --query 'serviceArns' --output text 2>/dev/null | wc -w | sed 's/^/      Services: /' || echo "      ❌ Cannot check services"
+            # Check services
+            service_count=$(aws ecs list-services --cluster "$ECS_CLUSTER_NAME" --query 'length(serviceArns)' --output text 2>/dev/null || echo "0")
+            echo "   🔧 ECS Services: $service_count active"
+        else
+            echo "   ❌ ECS_CLUSTER_NAME not set"
         fi
         
-        if [ -n "$EFS_MONGODB_ID" ]; then
-            echo "   💾 EFS File Systems:"
-            aws efs describe-file-systems --file-system-id "$EFS_MONGODB_ID" --query 'FileSystems[0].LifeCycleState' --output text 2>/dev/null | sed 's/^/      MongoDB EFS: /' || echo "      ❌ MongoDB EFS not found"
-        fi
+        # Check Lambda functions
+        lambda_count=$(aws lambda list-functions --query 'length(Functions[?starts_with(FunctionName, `fastapi-app`)])' --output text 2>/dev/null || echo "0")
+        echo "   ⚡ Lambda Functions: $lambda_count deployed"
         
-        if [ -n "$EFS_MODELS_ID" ]; then
-            aws efs describe-file-systems --file-system-id "$EFS_MODELS_ID" --query 'FileSystems[0].LifeCycleState' --output text 2>/dev/null | sed 's/^/      Models EFS: /' || echo "      ❌ Models EFS not found"
+        # Check EFS
+        if [ -n "$EFS_FILE_SYSTEM_ID" ]; then
+            efs_status=$(aws efs describe-file-systems --file-system-id "$EFS_FILE_SYSTEM_ID" --query 'FileSystems[0].LifeCycleState' --output text 2>/dev/null || echo "NOT_FOUND")
+            echo "   💾 Shared Models EFS: $efs_status"
         fi
     else
-        echo "☁️ AWS CLI not available - cannot check AWS resources"
+        echo "   ⚠️ AWS CLI not available - cannot check deployment status"
+    fi
+    echo ""
+    
+    # Cost analysis
+    echo "💰 Cost Analysis:"
+    python -m deployment.aws.cleanup.orphan_detector --estimate-costs --brief 2>/dev/null | head -10 || echo "   ⚠️ Cost analysis unavailable"
+    echo ""
+    
+    # Resource health
+    echo "🔍 Resource Health Check:"
+    python -m deployment.aws.cleanup.orphan_detector --scan --brief 2>/dev/null | head -5 || echo "   ⚠️ Resource scan unavailable"
+    echo ""
+    
+    # IAM verification
+    echo "🔐 IAM Status:"
+    python -c "
+from deployment.aws.utils.iam_verification import generate_iam_verification_report
+try:
+    report = generate_iam_verification_report(['fastapi-app-files-api'], 'fastapi-app-ecs-cluster')
+    print('   Overall IAM Status:', report['overall_status'])
+    if report.get('lambda_functions'):
+        for func, status in report['lambda_functions'].items():
+            print(f'   Lambda {func}: {'✅ PASS' if status else '❌ FAIL'}')
+    if report.get('ecs_services', {}).get('valid') is not None:
+        ecs_status = report['ecs_services']['valid']
+        print(f'   ECS Services: {'✅ PASS' if ecs_status else '❌ FAIL'}')
+except Exception as e:
+    print('   ⚠️ IAM verification unavailable:', str(e)[:50])
+" 2>/dev/null
+    echo ""
+    
+    # Database connectivity
+    if [ -n "$DATABASE_HOST" ]; then
+        echo "🗄️ Database Status:"
+        if curl -s --connect-timeout 5 "http://$DATABASE_HOST:8080/health" >/dev/null 2>&1; then
+            echo "   ✅ Database server responding on $DATABASE_HOST:8080"
+        else
+            echo "   ❌ Database server not responding on $DATABASE_HOST:8080"
+        fi
+        echo ""
     fi
     
-    echo ""
     echo "💡 Commands:"
-    echo "   • View logs: aws logs describe-log-groups --log-group-name-prefix '/ecs/fastapi-app'"
-    echo "   • Scale workers: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 3"
-    echo "   • Full cleanup: make aws-prod-cleanup"
+    echo "   • Full deployment: make aws-prod"
+    echo "   • Cleanup options: make aws-prod-cleanup" 
+    echo "   • Prerequisites: make aws-prod-validate"
+    echo "   • Detailed costs: python -m deployment.aws.cleanup.orphan_detector --estimate-costs"
+    echo "   • Resource scan: python -m deployment.aws.cleanup.orphan_detector --scan"
 }
 
-# Show AWS production cost analysis
-function aws-prod-costs {
-    set +e
-    
-    echo "💰 AWS Production Cost Analysis"
-    echo "==============================="
-    
-    # Use the cost optimizer to analyze current deployment costs
-    python -m deployment.aws.cleanup.orphan_detector --estimate-costs
-    
-    echo ""
-    echo "💡 Use 'make aws-prod-cleanup-soft' to reduce costs while preserving infrastructure"
-    echo "🚨 Use 'make aws-prod-cleanup' for full cleanup to minimize costs"
-}
-
-# Scan for orphaned AWS resources
-function aws-prod-orphans {
-    set +e
-    
-    echo "🔍 Scanning for Orphaned AWS Resources"
-    echo "======================================"
-    
-    # Use the orphan detector to scan for untracked resources
-    python -m deployment.aws.cleanup.orphan_detector --scan
-    
-    echo ""
-    echo "💡 Review the report above for resources that may need cleanup"
-    echo "🚨 Use caution when cleaning up orphaned resources"
-}
 
 # Validate AWS production deployment prerequisites
 function aws-prod-validate {

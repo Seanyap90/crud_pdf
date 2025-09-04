@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 import json
 from botocore.exceptions import ClientError
 
-from src.files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 from deployment.aws.utils.aws_clients import get_ecs_client, get_logs_client
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,9 @@ class ECSServiceManager:
         self.cluster_name = f"{settings.app_name}-ecs-cluster"
         self.services = {}
         self.task_definitions = {}
+        # Add Application Auto Scaling client
+        import boto3
+        self.autoscaling_client = boto3.client('application-autoscaling', region_name=self.region)
         
     
     def run_model_downloader_task(self, vpc_config: Dict[str, Any], 
@@ -72,7 +75,8 @@ class ECSServiceManager:
             raise
 
     def create_vlm_worker_service(self, vpc_config: Dict[str, Any], 
-                                 efs_config: Dict[str, Any]) -> Dict[str, Any]:
+                                 efs_config: Dict[str, Any], 
+                                 database_host: str = None) -> Dict[str, Any]:
         """Create VLM worker service with EC2 GPU instances."""
         service_name = f"{settings.app_name}-vlm-workers"
         
@@ -85,7 +89,7 @@ class ECSServiceManager:
             
             # STEP 2: Create worker task definition
             logger.info("🏗️ Step 2: Creating VLM worker task definition...")
-            task_def_arn = self._create_vlm_worker_task_definition(efs_config)
+            task_def_arn = self._create_vlm_worker_task_definition(efs_config, database_host)
             
             # Check for existing service
             existing_service = self._find_existing_service(service_name)
@@ -99,7 +103,7 @@ class ECSServiceManager:
                 cluster=self.cluster_name,
                 serviceName=service_name,
                 taskDefinition=task_def_arn,
-                desiredCount=1,
+                desiredCount=0,  # Start with zero tasks (scale-to-zero architecture)
                 capacityProviderStrategy=[
                     {
                         'capacityProvider': f"{self.cluster_name}-gpu-cp",
@@ -124,6 +128,9 @@ class ECSServiceManager:
             
             vlm_service = service_response['service']
             self.services['vlm_workers'] = vlm_service
+            
+            # Set up auto-scaling for VLM worker service
+            self._setup_vlm_worker_auto_scaling(service_name)
             
             logger.info(f"Created VLM worker service: {service_name}")
             return vlm_service
@@ -239,7 +246,7 @@ class ECSServiceManager:
         return False
     
     
-    def _create_vlm_worker_task_definition(self, efs_config: Dict[str, Any]) -> str:
+    def _create_vlm_worker_task_definition(self, efs_config: Dict[str, Any], database_host: str = None) -> str:
         """Create task definition for VLM workers."""
         family = f"{settings.app_name}-vlm-worker"
         
@@ -284,9 +291,15 @@ class ECSServiceManager:
                             {'name': 'AWS_REGION', 'value': self.region},
                             {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
                             {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},
-                            {'name': 'MODEL_CACHE_DIR', 'value': '/models'},
+                            {'name': 'DATABASE_HOST', 'value': database_host or 'localhost'},
+                            {'name': 'DATABASE_PORT', 'value': '8080'},
+                            {'name': 'MODEL_CACHE_DIR', 'value': '/app/cache'},
                             {'name': 'CUDA_VISIBLE_DEVICES', 'value': '0'},
-                            {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:256'}
+                            {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:256'},
+                            {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
+                            {'name': 'HF_HOME', 'value': '/app/cache'},
+                            {'name': 'HF_HUB_OFFLINE', 'value': '1'},  # Use cached models only
+                            {'name': 'PYTHONPATH', 'value': '/app/src'}
                         ],
                         'mountPoints': [
                             {
@@ -302,7 +315,8 @@ class ECSServiceManager:
                                 'awslogs-region': self.region,
                                 'awslogs-stream-prefix': 'vlm-worker'
                             }
-                        }
+                        },
+                        'command': ['python', '-m', 'vlm_workers.cli', 'worker', '--mode', 'aws-prod']
                     }
                 ],
                 'tags': [
@@ -566,7 +580,8 @@ class ECSServiceManager:
                         "Action": [
                             "sqs:ReceiveMessage",
                             "sqs:DeleteMessage",
-                            "sqs:GetQueueAttributes"
+                            "sqs:GetQueueAttributes",
+                            "sqs:ChangeMessageVisibility"
                         ],
                         "Resource": settings.sqs_queue_arn or "*"
                     },
@@ -597,14 +612,15 @@ class ECSServiceManager:
             raise
     
     def deploy_all_services(self, vpc_config: Dict[str, Any], 
-                           efs_config: Dict[str, Any]) -> Dict[str, Any]:
+                           efs_config: Dict[str, Any], 
+                           database_host: str = None) -> Dict[str, Any]:
         """Deploy all ECS services (VLM workers only - MongoDB removed)."""
         logger.info("Starting deployment of all ECS services...")
         
         try:
             # Deploy VLM worker service only
             logger.info("Deploying VLM worker service...")
-            vlm_service = self.create_vlm_worker_service(vpc_config, efs_config)
+            vlm_service = self.create_vlm_worker_service(vpc_config, efs_config, database_host)
             
             # Return deployment summary
             deployment_summary = {
@@ -684,9 +700,90 @@ class ECSServiceManager:
         except ClientError:
             return None
     
+    def _setup_vlm_worker_auto_scaling(self, service_name: str) -> None:
+        """Set up Application Auto Scaling for VLM worker service based on SQS queue depth."""
+        try:
+            logger.info(f"🎯 Setting up auto-scaling for {service_name}")
+            
+            # Step 1: Register scalable target
+            resource_id = f"service/{self.cluster_name}/{service_name}"
+            
+            self.autoscaling_client.register_scalable_target(
+                ServiceNamespace='ecs',
+                ResourceId=resource_id,
+                ScalableDimension='ecs:service:DesiredCount',
+                MinCapacity=0,  # Scale to zero for cost optimization
+                MaxCapacity=2  # Limited by GPU quota
+                # RoleARN is optional - AWS creates service-linked role automatically
+            )
+            
+            logger.info(f"✅ Registered scalable target: {resource_id}")
+            
+            # Step 2: Create target tracking scaling policy for SQS queue depth
+            policy_name = f"{service_name}-sqs-scaling-policy"
+            
+            self.autoscaling_client.put_scaling_policy(
+                PolicyName=policy_name,
+                ServiceNamespace='ecs',
+                ResourceId=resource_id,
+                ScalableDimension='ecs:service:DesiredCount',
+                PolicyType='TargetTrackingScaling',
+                TargetTrackingScalingPolicyConfiguration={
+                    'TargetValue': 1.0,  # Target 1 message per task
+                    'CustomizedMetricSpecification': {
+                        'MetricName': 'ApproximateNumberOfMessagesVisible',
+                        'Namespace': 'AWS/SQS',
+                        'Dimensions': [
+                            {
+                                'Name': 'QueueName',
+                                'Value': settings.sqs_queue_name
+                            }
+                        ],
+                        'Statistic': 'Average'
+                    },
+                    'ScaleOutCooldown': 60,   # Scale up quickly (1 minute) 
+                    'ScaleInCooldown': 300,   # Scale down slowly (5 minutes) 
+                    'DisableScaleIn': False   # Allow scaling in to zero
+                }
+            )
+            
+            logger.info(f"✅ Created SQS-based scaling policy: {policy_name}")
+            logger.info(f"   Target: 1 message per task")
+            logger.info(f"   Capacity: 0-2 tasks")
+            logger.info(f"   Cooldowns: Scale-out=60s, Scale-in=300s")
+            
+        except ClientError as e:
+            logger.error(f"Failed to setup auto-scaling: {e}")
+            # Don't fail the deployment if auto-scaling setup fails
+            logger.warning("Continuing deployment without auto-scaling")
+    
     def cleanup_services_resources(self) -> None:
         """Clean up services resources (for testing/cleanup)."""
         try:
+            # Clean up auto-scaling policies first
+            for service_name, service_info in self.services.items():
+                try:
+                    resource_id = f"service/{self.cluster_name}/{service_info['serviceName']}"
+                    
+                    # Delete scaling policies
+                    self.autoscaling_client.delete_scaling_policy(
+                        PolicyName=f"{service_info['serviceName']}-sqs-scaling-policy",
+                        ServiceNamespace='ecs',
+                        ResourceId=resource_id,
+                        ScalableDimension='ecs:service:DesiredCount'
+                    )
+                    
+                    # Deregister scalable target
+                    self.autoscaling_client.deregister_scalable_target(
+                        ServiceNamespace='ecs',
+                        ResourceId=resource_id,
+                        ScalableDimension='ecs:service:DesiredCount'
+                    )
+                    
+                    logger.info(f"Cleaned up auto-scaling for: {service_info['serviceName']}")
+                except ClientError as e:
+                    logger.warning(f"Failed to cleanup auto-scaling: {e}")
+            
             # Delete services
             for service_name, service_info in self.services.items():
                 try:

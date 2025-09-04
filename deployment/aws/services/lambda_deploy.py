@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 # Import settings
-from files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 
 # Import AWS utilities
 from deployment.aws.utils.aws_clients import (
     get_iam_client,
     AWSClientManager
 )
+from deployment.aws.utils.iam_verification import IAMVerifier
 
 # Configure logging
 logging.basicConfig(
@@ -321,6 +322,26 @@ class LambdaDeployer:
         """Deploy Files API as Lambda function."""
         function_name = f"{settings.app_name}-files-api"
         
+        # Get database host from environment if not provided (for command-line usage)
+        if database_host is None:
+            database_host = os.getenv('DATABASE_HOST', 'localhost')
+            logger.info(f"Using DATABASE_HOST from environment: {database_host}")
+        
+        if database_port is None:
+            database_port = int(os.getenv('DATABASE_PORT', '8080'))
+            
+        # Also get other environment variables for consistent deployment
+        s3_bucket = os.getenv('S3_BUCKET_NAME', settings.s3_bucket_name)
+        sqs_queue_url = os.getenv('SQS_QUEUE_URL', settings.sqs_queue_url or '')
+        
+        logger.info(f"Lambda environment: DATABASE_HOST={database_host}, S3_BUCKET={s3_bucket}")
+        logger.info(f"Lambda environment: SQS_QUEUE_URL={sqs_queue_url}")
+            
+        # For command-line usage without VPC config, deploy without VPC (accessing database via public IP)
+        if vpc_config is None:
+            logger.info("No VPC config provided - deploying Lambda without VPC (database access via public IP)")
+            return self.deploy_files_api_lambda_no_vpc(database_host, database_port, s3_bucket, sqs_queue_url)
+        
         try:
             # Create FastAPI layer
             layer_info = self.layer_manager.create_fastapi_layer()
@@ -355,8 +376,8 @@ class LambdaDeployer:
                     Environment={
                         'Variables': {
                             'DEPLOYMENT_MODE': 'aws-prod',
-                            'S3_BUCKET_NAME': settings.s3_bucket_name,
-                            'SQS_QUEUE_URL': settings.sqs_queue_url or '',
+                            'S3_BUCKET_NAME': s3_bucket,
+                            'SQS_QUEUE_URL': sqs_queue_url,
                             'DATABASE_HOST': database_host or '',
                             'DATABASE_PORT': str(database_port),
                         }
@@ -399,6 +420,13 @@ class LambdaDeployer:
                 function_url = self.create_lambda_function_url(function_name)
                 function_info['function_url'] = function_url
             
+            # Perform post-deployment IAM verification
+            verification_result = self.verify_lambda_iam_role(function_name)
+            function_info['iam_verification'] = verification_result
+            
+            if not verification_result:
+                logger.warning(f"⚠️ IAM verification failed for {function_name}, but deployment continues")
+            
             return function_info
             
         except Exception as e:
@@ -407,9 +435,15 @@ class LambdaDeployer:
     
     @log_operation("Deploying Files API Lambda without VPC")
     def deploy_files_api_lambda_no_vpc(self, database_host: str = None, 
-                                       database_port: int = 8080) -> Dict[str, Any]:
+                                       database_port: int = 8080,
+                                       s3_bucket: str = None,
+                                       sqs_queue_url: str = None) -> Dict[str, Any]:
         """Deploy Files API as Lambda function without VPC attachment (optimized architecture)."""
         function_name = f"{settings.app_name}-files-api"
+        
+        # Use provided parameters or fallback to settings
+        s3_bucket = s3_bucket or settings.s3_bucket_name
+        sqs_queue_url = sqs_queue_url or settings.sqs_queue_url or ''
         
         try:
             # Create FastAPI layer
@@ -448,8 +482,8 @@ class LambdaDeployer:
                     Environment={
                         'Variables': {
                             'DEPLOYMENT_MODE': 'aws-prod',
-                            'S3_BUCKET_NAME': settings.s3_bucket_name,
-                            'SQS_QUEUE_URL': settings.sqs_queue_url or '',
+                            'S3_BUCKET_NAME': s3_bucket,
+                            'SQS_QUEUE_URL': sqs_queue_url,
                             'DATABASE_HOST': database_host or '',
                             'DATABASE_PORT': str(database_port),
                         }
@@ -484,6 +518,16 @@ class LambdaDeployer:
             
             logger.info(f"✅ Lambda deployed without VPC - eliminating NAT Gateway costs")
             logger.info(f"🔗 Direct access URL: {function_url}")
+            
+            # Update .env.aws-prod with Lambda Function URL for ECS tasks
+            self._update_env_file_with_lambda_url(function_url)
+            
+            # Perform post-deployment IAM verification
+            verification_result = self.verify_lambda_iam_role(function_name)
+            function_info['iam_verification'] = verification_result
+            
+            if not verification_result:
+                logger.warning(f"⚠️ IAM verification failed for {function_name}, but deployment continues")
             
             return function_info
             
@@ -600,6 +644,43 @@ class LambdaDeployer:
         except Exception as e:
             logger.error(f"Failed to create Function URL for {function_name}: {e}")
             raise
+    
+    def _update_env_file_with_lambda_url(self, function_url: str) -> None:
+        """Update .env.aws-prod file with Lambda Function URL for ECS tasks."""
+        env_file = ".env.aws-prod"
+        
+        try:
+            # Read existing content
+            if os.path.exists(env_file):
+                with open(env_file, 'r') as f:
+                    lines = f.readlines()
+            else:
+                lines = []
+            
+            # Update or add Lambda Function URL
+            updated_lines = []
+            lambda_url_updated = False
+            
+            for line in lines:
+                if line.startswith('LAMBDA_FUNCTION_URL='):
+                    updated_lines.append(f"LAMBDA_FUNCTION_URL={function_url}\n")
+                    lambda_url_updated = True
+                else:
+                    updated_lines.append(line)
+            
+            # Add if missing
+            if not lambda_url_updated:
+                updated_lines.append(f"LAMBDA_FUNCTION_URL={function_url}\n")
+            
+            # Write updated content
+            with open(env_file, 'w') as f:
+                f.writelines(updated_lines)
+            
+            logger.info(f"📝 Updated {env_file} with LAMBDA_FUNCTION_URL={function_url}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update {env_file} with Lambda URL: {e}")
+            # Don't raise - deployment can continue without this
     
     def _create_files_api_package(self) -> str:
         """Create deployment package for Files API."""
@@ -769,8 +850,8 @@ lambda_handler = handler
             raise
     
     def _get_lambda_execution_role_no_vpc(self) -> str:
-        """Get or create Lambda execution role without VPC permissions (optimized architecture)."""
-        role_name = f"{settings.app_name}-lambda-execution-role-no-vpc"
+        """Get or create Lambda execution role (standard architecture)."""
+        role_name = f"{settings.app_name}-lambda-execution-role"
         
         try:
             # Check for existing role
@@ -879,14 +960,90 @@ lambda_handler = handler
             logger.info(f"Removed VPC configuration from Lambda function: {function_name}")
             return response
     
+    def post_deployment_verification(self, function_names: List[str] = None) -> Dict[str, Any]:
+        """
+        Perform post-deployment IAM verification for Lambda functions.
+        
+        Args:
+            function_names: List of function names to verify (defaults to all deployed functions)
+            
+        Returns:
+            Dictionary containing verification results
+        """
+        try:
+            # Use deployed functions if no specific names provided
+            if not function_names:
+                function_names = [info['function_name'] for info in self.functions.values()]
+            
+            if not function_names:
+                logger.warning("No Lambda functions to verify")
+                return {'status': 'SKIP', 'message': 'No functions deployed'}
+            
+            logger.info(f"Starting post-deployment IAM verification for functions: {function_names}")
+            
+            # Create IAM verifier
+            verifier = IAMVerifier()
+            
+            # Generate comprehensive verification report
+            verification_report = verifier.generate_verification_report(
+                lambda_functions=function_names
+            )
+            
+            # Log verification results
+            if verification_report['overall_status'] == 'PASS':
+                logger.info("✅ Post-deployment IAM verification PASSED")
+            elif verification_report['overall_status'] == 'FAIL':
+                logger.error("❌ Post-deployment IAM verification FAILED")
+                logger.error(f"Verification details: {json.dumps(verification_report, indent=2)}")
+            else:
+                logger.warning(f"⚠️ Post-deployment IAM verification status: {verification_report['overall_status']}")
+            
+            return verification_report
+            
+        except Exception as e:
+            logger.error(f"Post-deployment verification failed: {e}")
+            return {
+                'status': 'ERROR',
+                'error': str(e),
+                'overall_status': 'ERROR'
+            }
+    
+    def verify_lambda_iam_role(self, function_name: str) -> bool:
+        """
+        Verify IAM role for a specific Lambda function.
+        
+        Args:
+            function_name: Name of the Lambda function to verify
+            
+        Returns:
+            True if verification passes, False otherwise
+        """
+        try:
+            verifier = IAMVerifier()
+            return verifier.verify_lambda_role(function_name)
+        except Exception as e:
+            logger.error(f"Failed to verify IAM role for {function_name}: {e}")
+            return False
+    
     def get_deployment_summary(self) -> Dict[str, Any]:
-        """Get deployment summary."""
-        return {
+        """Get deployment summary with optional IAM verification."""
+        summary = {
             'functions': self.functions,
             'layers': self.layer_manager.layers,
             'region': self.region,
             'runtime': LAMBDA_RUNTIME
         }
+        
+        # Add IAM verification if functions are deployed
+        if self.functions:
+            try:
+                verification_report = self.post_deployment_verification()
+                summary['iam_verification'] = verification_report
+            except Exception as e:
+                logger.warning(f"Could not include IAM verification in summary: {e}")
+                summary['iam_verification'] = {'status': 'ERROR', 'error': str(e)}
+        
+        return summary
     
     def cleanup_functions(self) -> None:
         """Clean up Lambda functions."""

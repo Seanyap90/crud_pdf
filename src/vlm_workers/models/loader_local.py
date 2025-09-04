@@ -106,7 +106,7 @@ class LocalModelLoader(ModelLoaderInterface):
             logger.info(f"GPU Memory - Total: {total_gb:.1f}GB, Free: {free_gb:.1f}GB")
             
             # Get memory requirement from settings (default to 2GB for local dev flexibility)
-            from files_api.config.settings import get_settings
+            from src.files_api.settings import get_settings
             settings = get_settings()
             
             # Parse memory limit setting (e.g., "12GiB" -> 12.0)

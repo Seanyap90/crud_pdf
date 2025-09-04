@@ -32,25 +32,23 @@ aws-prod:
 aws-prod-cleanup:
 	bash run.sh aws-prod-cleanup
 
-# Soft cleanup AWS production deployment (preserves NAT Gateway, VPC, EFS, ECR)
-aws-prod-cleanup-soft:
-	bash run.sh aws-prod-cleanup-soft
-
-# Show AWS production deployment status
+# Show AWS production deployment status with costs and health checks
 aws-prod-status:
 	bash run.sh aws-prod-status
-
-# Show AWS production cost analysis
-aws-prod-costs:
-	bash run.sh aws-prod-costs
-
-# Scan for orphaned AWS resources
-aws-prod-orphans:
-	bash run.sh aws-prod-orphans
 
 # Validate AWS production deployment prerequisites
 aws-prod-validate:
 	bash run.sh aws-prod-validate
+
+# Internal targets for parallel execution
+aws-prod-infra:
+	@bash -c '. run.sh && load_env_file ".env.aws-prod" && python -m files_api.env_helper --validate-required-vars VPC_ID,PUBLIC_SUBNET_ID,EFS_FILE_SYSTEM_ID,EFS_ACCESS_POINT_ID,S3_BUCKET_NAME,SQS_QUEUE_URL,DATABASE_SG_ID,EFS_SG_ID,ECS_WORKERS_SG_ID && python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console --validate-only'
+
+aws-prod-lambda:
+	@bash -c '. run.sh && load_env_file ".env.aws-prod" && python -m deployment.aws.services.lambda_deploy --files-api-only'
+
+aws-prod-ecs:
+	@bash -c '. run.sh && load_env_file ".env.aws-prod" && python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console --deploy-services'
 
 # Validate AWS mock deployment prerequisites
 aws-mock-validate:

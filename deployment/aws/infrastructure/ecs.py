@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional, List
 import boto3
 from botocore.exceptions import ClientError
 
-from files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 from deployment.aws.utils.aws_clients import get_ecs_client, get_ec2_client, get_iam_client, get_asg_client
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,10 @@ class ECSClusterManager:
                 autoScalingGroupProvider={
                     'autoScalingGroupArn': asg['AutoScalingGroupARN'],
                     'managedScaling': {
-                        'status': 'DISABLED'  # Disable ECS managed scaling to prevent dynamic policies
+                        'status': 'ENABLED',  # Enable ECS managed scaling for auto-scaling
+                        'targetCapacity': 80,  # Target 80% resource utilization
+                        'minimumScalingStepSize': 1,  # Scale by 1 instance at a time
+                        'maximumScalingStepSize': 2   # Maximum 2 instances per scaling action
                     },
                     'managedTerminationProtection': 'DISABLED'
                 },
@@ -282,7 +285,7 @@ systemctl restart ecs
                 },
                 MinSize=0,          # Scale to zero when idle
                 MaxSize=2,          # HARD LIMIT: 2 instances max (adjusted for current quota)
-                DesiredCapacity=1,  # Start with one instance ready
+                DesiredCapacity=0,  # Start with zero instances (scale-to-zero architecture)
                 VPCZoneIdentifier=','.join(subnet_ids),
                 DefaultCooldown=300,  # 5 minutes cooldown
                 Tags=[

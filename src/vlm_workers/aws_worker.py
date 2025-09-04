@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional, List
 from vlm_workers.worker import Worker
 from deployment.aws.utils.aws_clients import get_cloudwatch_client
 from vlm_workers.scaling.auto_scaler import get_task_manager, AutoScalingManager
-from files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 
 logger = logging.getLogger(__name__)
 

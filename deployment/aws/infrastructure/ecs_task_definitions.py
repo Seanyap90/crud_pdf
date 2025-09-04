@@ -115,20 +115,20 @@ class TaskDefinitionBuilder:
         self.task_role_arn = f"arn:aws:iam::{settings.account_id}:role/{settings.app_name}-ecs-task-role"
         
     
-    def add_api_gateway_environment(self, container_def: dict, api_gateway_url: str) -> dict:
-        """Add API Gateway URL to container environment variables."""
+    def add_lambda_function_environment(self, container_def: dict, lambda_function_url: str) -> dict:
+        """Add Lambda Function URL to container environment variables."""
         if not container_def.get('environment'):
             container_def['environment'] = []
 
-        # Add or update API Gateway URL environment variables
+        # Add or update Lambda Function URL environment variables
         env_vars = {env['name']: env for env in container_def['environment']}
-        env_vars['API_GATEWAY_URL'] = {'name': 'API_GATEWAY_URL', 'value': api_gateway_url}
-        env_vars['API_BASE_URL'] = {'name': 'API_BASE_URL', 'value': api_gateway_url}
+        env_vars['LAMBDA_FUNCTION_URL'] = {'name': 'LAMBDA_FUNCTION_URL', 'value': lambda_function_url}
+        env_vars['API_BASE_URL'] = {'name': 'API_BASE_URL', 'value': lambda_function_url}  # For backward compatibility
 
         container_def['environment'] = list(env_vars.values())
         return container_def
 
-    def build_vlm_worker_task_definition(self, efs_config: Dict[str, Any], api_gateway_url: str = None) -> Dict[str, Any]:
+    def build_vlm_worker_task_definition(self, efs_config: Dict[str, Any], lambda_function_url: str = None, database_host: str = None) -> Dict[str, Any]:
         """Build VLM worker task definition with GPU and EFS support. Returns task definition dict.""" 
         family = f"{settings.app_name}-vlm-worker"
         
@@ -170,12 +170,15 @@ class TaskDefinitionBuilder:
                             {'name': 'AWS_REGION', 'value': self.region},
                             {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
                             {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},
+                            {'name': 'DATABASE_HOST', 'value': database_host or 'localhost'},
+                            {'name': 'DATABASE_PORT', 'value': '8080'},
                             {'name': 'MODEL_CACHE_DIR', 'value': '/app/cache'},
                             {'name': 'CUDA_VISIBLE_DEVICES', 'value': '0'},
                             {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:256'},
                             {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
                             {'name': 'HF_HOME', 'value': '/app/cache'},
-                            {'name': 'HF_HUB_OFFLINE', 'value': '1'}  # Use cached models only
+                            {'name': 'HF_HUB_OFFLINE', 'value': '1'},  # Use cached models only
+                            {'name': 'LAMBDA_FUNCTION_URL', 'value': lambda_function_url or ''}
                         ],
                         'mountPoints': [
                             {
@@ -197,11 +200,8 @@ class TaskDefinitionBuilder:
                 ]
             )
             
-            # Add API Gateway URL if provided (for aws-prod mode)
-            if api_gateway_url:
-                for container in config.container_definitions:
-                    if container['name'] == 'vlm-worker':
-                        container = self.add_api_gateway_environment(container, api_gateway_url)
+            # Lambda function URL is already added to environment variables above
+            # No additional processing needed since it's included in the environment array
             
             task_def_dict = config.to_dict()
             logger.info(f"Built VLM worker task definition: {family}")
@@ -279,9 +279,9 @@ class TaskDefinitionBuilder:
             raise
     
     
-    def create_vlm_worker_task_definition(self, efs_config: Dict[str, Any]) -> str:
+    def create_vlm_worker_task_definition(self, efs_config: Dict[str, Any], lambda_function_url: str = None, database_host: str = None) -> str:
         """Create and register VLM worker task definition. Returns task definition ARN."""
-        task_def_dict = self.build_vlm_worker_task_definition(efs_config)
+        task_def_dict = self.build_vlm_worker_task_definition(efs_config, lambda_function_url, database_host)
         return self._register_task_definition(task_def_dict)
     
     def create_model_downloader_task_definition(self, efs_config: Dict[str, Any]) -> str:
@@ -372,7 +372,7 @@ def create_model_downloader_task_definition(efs_config: Dict[str, Any]) -> str:
     builder = TaskDefinitionBuilder()
     return builder.create_model_downloader_task_definition(efs_config)
 
-def create_vlm_worker_task_definition(efs_config: Dict[str, Any]) -> str:
+def create_vlm_worker_task_definition(efs_config: Dict[str, Any], lambda_function_url: str = None) -> str:
     """Create VLM worker task definition (convenience function). Returns ARN."""
     builder = TaskDefinitionBuilder()
-    return builder.create_vlm_worker_task_definition(efs_config)
+    return builder.create_vlm_worker_task_definition(efs_config, lambda_function_url)

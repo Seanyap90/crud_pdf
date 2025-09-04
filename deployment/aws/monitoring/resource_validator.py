@@ -10,7 +10,7 @@ import json
 import os
 from typing import Dict, List, Optional, Any, Tuple
 from botocore.exceptions import ClientError, NoCredentialsError
-from src.files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 from deployment.aws.infrastructure.console_validator import ConsoleResourceDetector
 
 
@@ -428,25 +428,18 @@ class ResourceValidator:
     
     def _get_console_resource_config(self) -> Optional[Dict[str, str]]:
         """Extract console resource configuration from environment variables."""
-        required_env_vars = {
-            'VPC_ID': 'vpc_id',
-            'PUBLIC_SUBNET_ID': 'public_subnet_id', 
-            'EFS_FILE_SYSTEM_ID': 'efs_file_system_id',
-            'EFS_ACCESS_POINT_ID': 'efs_access_point_id',
-            'S3_BUCKET_NAME': 's3_bucket_name',
-            'SQS_QUEUE_URL': 'sqs_queue_url',
-            'DATABASE_SG_ID': 'database_sg_id',
-            'EFS_SG_ID': 'efs_sg_id',
-            'ECS_WORKERS_SG_ID': 'ecs_workers_sg_id'
-        }
+        required_env_vars = [
+            'VPC_ID', 'PUBLIC_SUBNET_ID', 'EFS_FILE_SYSTEM_ID', 'EFS_ACCESS_POINT_ID',
+            'S3_BUCKET_NAME', 'SQS_QUEUE_URL', 'DATABASE_SG_ID', 'EFS_SG_ID', 'ECS_WORKERS_SG_ID'
+        ]
         
         config = {}
         missing_vars = []
         
-        for env_var, config_key in required_env_vars.items():
+        for env_var in required_env_vars:
             value = os.getenv(env_var)
             if value:
-                config[config_key] = value
+                config[env_var] = value  # Use original env var name as key
             else:
                 missing_vars.append(env_var)
         

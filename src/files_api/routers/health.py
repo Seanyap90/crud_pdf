@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from files_api.config.settings import get_settings
+from files_api.settings import get_settings
 from files_api.adapters.queue import QueueFactory
 from files_api.services.database import get_invoice_service
 

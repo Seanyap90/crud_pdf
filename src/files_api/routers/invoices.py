@@ -19,7 +19,7 @@ from files_api.schemas import (
     InvoiceStatusUpdate,
     InvoiceResultUpdate
 )
-from files_api.config.settings import Settings
+from files_api.settings import Settings
 from files_api.services.database import get_invoice_service, get_category_service
 from files_api.adapters.queue import QueueFactory
 

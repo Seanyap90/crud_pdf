@@ -8,7 +8,7 @@ import boto3
 from typing import Dict, Any, List
 
 # Import settings
-from src.files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 
 # Import AWS utilities
 from deployment.aws.utils.aws_clients import (
@@ -260,7 +260,7 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
                 "lambda": lambda_config,
                 "endpoints": {
                     "lambda_function_url": lambda_function_url,
-                    "database_host": database_config.get('private_ip'),
+                    "database_host": database_config.get('public_ip', database_config.get('private_ip')),
                     "database_port": "8080"
                 },
                 "deployment_time": time.time()
@@ -353,13 +353,23 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             logger.info("🗄️ Phase 4: EC2 Database Instance Creation")
             database_config = self._setup_database_infrastructure(ecs_vpc_config)
             
-            # Phase 5: Code-based service deployment
+            # Phase 4.5: Update .env.aws-prod with DATABASE_HOST for ECS services
+            logger.info("📝 Phase 4.5: Update environment configuration for ECS")
+            if database_config and database_config.get('public_ip'):
+                database_public_ip = database_config['public_ip']
+                self._export_updated_configuration(database_public_ip, ecs_vpc_config, database_config)
+                logger.info(f"Updated .env.aws-prod with DATABASE_HOST={database_public_ip}")
+                # Update console config to use the new database host
+                console_config['config']['DATABASE_HOST'] = database_public_ip
+            else:
+                logger.info("Using existing DATABASE_HOST from .env.aws-prod")
+            
+            # Phase 5: Code-based service deployment (ECS only)
             logger.info("🚀 Phase 5: Code-based Services Deployment")  
             services_config = self._deploy_services_only(console_config)
             
-            # Phase 6: Lambda deployment (no VPC attachment)
-            logger.info("⚡ Phase 6: Lambda Functions (no VPC)")
-            lambda_config = self._deploy_lambda_no_vpc(console_config)
+            # Note: Lambda deployment handled by parallel make target (aws-prod-lambda)
+            logger.info("ℹ️  Lambda functions will be deployed in parallel by make aws-prod-lambda")
             
             # Deployment Summary
             hybrid_config = {
@@ -369,7 +379,6 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
                 "console_resources": console_config,
                 "database": database_config,
                 "services": services_config,
-                "lambda": lambda_config,
                 "deployment_time": time.time()
             }
             
@@ -435,8 +444,9 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             }
         }
         
-        # Deploy ECS services
-        deployment_result = self.service_manager.deploy_all_services(ecs_vpc_config, ecs_efs_config)
+        # Deploy ECS services with database host from console config  
+        database_host = console_config['config'].get('DATABASE_HOST', 'localhost')
+        deployment_result = self.service_manager.deploy_all_services(ecs_vpc_config, ecs_efs_config, database_host)
         
         if deployment_result['status'] == 'success':
             logger.info("✅ ECS services deployed successfully using console infrastructure")
@@ -603,7 +613,9 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         # Deploy VLM worker services initially (Lambda Function URL added later)
         logger.info("📦 Deploying VLM workers (Lambda Function URL will be added later)")
         
-        deployment_result = self.service_manager.deploy_all_services(vpc_config, efs_config)
+        # Pass database host from earlier database deployment (prefer public IP)
+        database_host = self.deployment_config.get('endpoints', {}).get('database_host', 'localhost')
+        deployment_result = self.service_manager.deploy_all_services(vpc_config, efs_config, database_host)
         
         if deployment_result['status'] == 'success':
             services_deployed = deployment_result['services_deployed']
@@ -1358,6 +1370,8 @@ def main():
                        help="Deploy using hybrid console+code approach")
     parser.add_argument("--export-config", default=".env.aws-prod",
                        help="File to export infrastructure configuration")
+    parser.add_argument("--validate-only", action="store_true",
+                       help="Only validate console infrastructure, don't deploy")
     
     args = parser.parse_args()
     
@@ -1365,6 +1379,37 @@ def main():
         if args.cleanup:
             cleanup_deployment(args.mode)
             return
+            
+        if args.validate_only:
+            # Use existing resource validator for console infrastructure
+            logger.info("Validating console infrastructure...")
+            import subprocess
+            import sys
+            import os
+            
+            # Debug: Print key environment variables
+            required_vars = ['VPC_ID', 'PUBLIC_SUBNET_ID', 'EFS_FILE_SYSTEM_ID', 'EFS_ACCESS_POINT_ID', 
+                           'S3_BUCKET_NAME', 'SQS_QUEUE_URL', 'DATABASE_SG_ID', 'EFS_SG_ID', 'ECS_WORKERS_SG_ID']
+            print("🔍 Environment variables for validation:")
+            for var in required_vars:
+                value = os.getenv(var, 'NOT_SET')
+                print(f"  {var}={value}")
+            print()
+            
+            # Pass current environment (includes variables from .env.aws-prod)
+            result = subprocess.run([
+                sys.executable, "-m", "deployment.aws.monitoring.resource_validator", 
+                "--check", "console"
+            ], capture_output=True, text=True, env=os.environ.copy())
+            
+            if result.returncode == 0:
+                logger.info("✅ Console infrastructure validation successful!")
+                print(result.stdout)
+            else:
+                logger.error("❌ Console infrastructure validation failed!")
+                print(result.stderr)
+            
+            sys.exit(result.returncode)
         
         # Execute deployment
         builder = ECSDeploymentBuilder(args.mode, args.infrastructure_only, args.hybrid_console)

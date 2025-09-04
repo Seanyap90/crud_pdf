@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Tuple, Optional, Any
 import os
 import logging
-from files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 
 logger = logging.getLogger(__name__)
 

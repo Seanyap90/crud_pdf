@@ -16,7 +16,7 @@ from deployment.aws.utils.aws_clients import (
     get_ec2_client, get_ecs_client, get_s3_client,
     get_lambda_client, get_efs_client, get_ecr_client
 )
-from src.files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 
 logger = logging.getLogger(__name__)
 

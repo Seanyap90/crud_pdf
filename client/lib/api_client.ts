@@ -15,9 +15,9 @@ import type {
 
 // Base API URL
 // Production API Gateway URL
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://x7tfdk9jj3.execute-api.us-east-1.amazonaws.com/dev';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://u303pn1snh.execute-api.us-east-1.amazonaws.com/dev';
 // Local development URL (commented out)
-//const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 /**
  * API client for FastAPI backend

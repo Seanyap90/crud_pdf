@@ -9,7 +9,7 @@ import click
 import os
 import asyncio
 import logging
-from files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 from files_api.adapters.queue import QueueFactory
 
 # Configure logging
@@ -76,15 +76,10 @@ def worker(mode, preload_models):
         except Exception as e:
             print(f"Warning: VLM model loading failed: {e}")
     
-    # Create worker based on mode
-    if settings.deployment_mode == "aws-prod":
-        from vlm_workers.aws_worker import AWSWorker
-        worker_instance = AWSWorker(queue)
-        print("AWS Worker initialized with CloudWatch integration")
-    else:
-        from vlm_workers.worker import Worker
-        worker_instance = Worker(queue)
-        print("Standard Worker initialized")
+    # Create worker (use standard Worker for all modes)
+    from vlm_workers.worker import Worker
+    worker_instance = Worker(queue)
+    print(f"Worker initialized for {settings.deployment_mode} mode")
     
     try:
         # Run worker

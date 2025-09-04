@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from deployment.aws.utils.aws_clients import get_ecs_client, get_sqs_client
-from files_api.config.settings import get_settings
+from src.files_api.settings import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Database configuration
-DB_PATH = '/mnt/efs/database/recycling.db'
+DB_PATH = '/var/lib/sqlite-server/recycling.db'
 DB_LOCK = threading.RLock()  # Reentrant lock for nested operations
 
 class SQLiteHTTPServer:

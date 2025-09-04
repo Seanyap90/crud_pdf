@@ -4,7 +4,7 @@ import os
 import asyncio
 import logging
 from files_api.adapters.queue import QueueFactory
-from files_api.config.settings import get_settings
+from files_api.settings import get_settings
 
 # Configure logging
 logger = logging.getLogger(__name__)

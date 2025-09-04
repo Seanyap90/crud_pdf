@@ -12,9 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from pdf2image import convert_from_path
 from vlm_workers.models.manager import ModelManager, model_on_device
-from files_api.config.config import config
+from src.files_api.config import config
 from files_api.services.database import get_invoice_service
-from vlm_workers.scaling.auto_scaler import get_task_manager
+#from vlm_workers.scaling.auto_scaler import get_task_manager
 from typing import Optional, List, Tuple, Dict, Any
 from transformers import GenerationConfig
 
@@ -430,8 +430,8 @@ class Worker:
         # Pre-initialize the PDFProcessor to share the same model instance
         self.pdf_processor = PDFProcessor()
         # Initialize scaling manager for scale-to-zero functionality
-        self.scaling_manager = get_task_manager()
-        self.scaling_manager.register_current_task()
+        #self.scaling_manager = get_task_manager()
+        #self.scaling_manager.register_current_task()
         logger.info("Worker initialized with shared PDFProcessor and scaling manager")
 
     async def process_task(self, task):
@@ -569,13 +569,13 @@ class Worker:
                 else:
                     # No task received - check if we should scale to zero
                     queue_url = getattr(self.queue, 'queue_url', None)
-                    if queue_url and hasattr(self.scaling_manager, 'scale_to_zero'):
-                        should_terminate = self.scaling_manager.scale_to_zero(queue_url, grace_period_seconds=30)
-                        if should_terminate:
-                            logger.info("Queue empty for 30+ seconds - initiating graceful shutdown")
-                            self.scaling_manager.initiate_graceful_shutdown("Scale to zero - queue empty")
-                            self.running = False
-                            break
+                    #if queue_url and hasattr(self.scaling_manager, 'scale_to_zero'):
+                    #    should_terminate = self.scaling_manager.scale_to_zero(queue_url, grace_period_seconds=30)
+                    #    if should_terminate:
+                    #        logger.info("Queue empty for 30+ seconds - initiating graceful shutdown")
+                    #        self.scaling_manager.initiate_graceful_shutdown("Scale to zero - queue empty")
+                    #        self.running = False
+                    #        break
                 
                 await asyncio.sleep(1.0)  # Reduced from 0.1s to 1s to minimize API calls
             except Exception as e:

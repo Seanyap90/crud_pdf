@@ -26,7 +26,7 @@ from files_api.schemas import (
     GetFilesResponse,
     PutFileResponse,
 )
-from files_api.config.settings import Settings
+from files_api.settings import Settings
 from files_api.adapters.queue import QueueFactory
 from files_api.services.database import get_invoice_service, get_category_service
 
