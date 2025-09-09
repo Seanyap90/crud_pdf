@@ -214,12 +214,10 @@ class Settings(BaseSettings):
         return {
             'us-east-1': {
                 'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge', 'g4dn.large'],
-                'spot_max_price': 0.23,  # Conservative for g4dn.xlarge
                 'gpu_memory_limit': '12GiB'  # Safe for 16GB T4
             },
             'us-west-2': {
                 'instance_types': ['g4dn.xlarge', 'g4dn.2xlarge'],
-                'spot_max_price': 0.23,  # Slightly higher for us-west-2
                 'gpu_memory_limit': '12GiB'
             }
         }

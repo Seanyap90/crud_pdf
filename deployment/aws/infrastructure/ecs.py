@@ -111,10 +111,7 @@ class ECSClusterManager:
                 autoScalingGroupProvider={
                     'autoScalingGroupArn': asg['AutoScalingGroupARN'],
                     'managedScaling': {
-                        'status': 'ENABLED',  # Enable ECS managed scaling for auto-scaling
-                        'targetCapacity': 80,  # Target 80% resource utilization
-                        'minimumScalingStepSize': 1,  # Scale by 1 instance at a time
-                        'maximumScalingStepSize': 2   # Maximum 2 instances per scaling action
+                        'status': 'DISABLED'  # Lambda handles scaling via EventBridge triggers
                     },
                     'managedTerminationProtection': 'DISABLED'
                 },
@@ -138,6 +135,64 @@ class ECSClusterManager:
             
         except ClientError as e:
             logger.error(f"Failed to create GPU capacity provider: {e}")
+            raise
+    
+    def _create_or_get_key_pair(self) -> str:
+        """Create or get existing SSH key pair for GPU instances."""
+        key_pair_name = f"{self.cluster_name}-gpu-key"
+        
+        try:
+            # Check if key pair already exists
+            response = self.ec2_client.describe_key_pairs(KeyNames=[key_pair_name])
+            if response['KeyPairs']:
+                logger.info(f"Using existing key pair: {key_pair_name}")
+                return key_pair_name
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'InvalidKeyPair.NotFound':
+                raise
+        
+        # Create new key pair
+        try:
+            response = self.ec2_client.create_key_pair(
+                KeyName=key_pair_name,
+                KeyType='rsa',
+                KeyFormat='pem',
+                TagSpecifications=[
+                    {
+                        'ResourceType': 'key-pair',
+                        'Tags': [
+                            {'Key': 'Name', 'Value': key_pair_name},
+                            {'Key': 'Project', 'Value': settings.app_name},
+                            {'Key': 'Purpose', 'Value': 'GPU-Instance-Access'}
+                        ]
+                    }
+                ]
+            )
+            
+            # Save private key to local file for SSH access
+            private_key = response['KeyMaterial']
+            key_file_path = f"{key_pair_name}.pem"
+            
+            try:
+                with open(key_file_path, 'w') as f:
+                    f.write(private_key)
+                
+                # Set proper permissions for SSH key
+                import os
+                os.chmod(key_file_path, 0o600)  # Read/write for owner only
+                
+                logger.info(f"✅ Created SSH key pair: {key_pair_name}")
+                logger.info(f"📂 Private key saved to: {key_file_path}")
+                logger.info(f"🔐 SSH access: ssh -i {key_file_path} ec2-user@<instance-ip>")
+                
+            except Exception as e:
+                logger.error(f"Failed to save private key to {key_file_path}: {e}")
+                logger.warning(f"Private key material available in response - save manually for SSH access")
+            
+            return key_pair_name
+            
+        except ClientError as e:
+            logger.error(f"Failed to create key pair: {e}")
             raise
     
     def _create_gpu_launch_template(self, vpc_id: str) -> Dict[str, Any]:
@@ -175,42 +230,15 @@ class ECSClusterManager:
             logger.info("Waiting for IAM instance profile to propagate...")
             time.sleep(10)  # Wait 10 seconds for IAM propagation
             
+            # Create or get SSH key pair for instance access
+            key_pair_name = self._create_or_get_key_pair()
+            
             # User data script for ECS agent configuration
+            # ECS GPU-optimized AMI has NVIDIA drivers and Docker GPU runtime pre-configured
             user_data = f"""#!/bin/bash
 echo ECS_CLUSTER={self.cluster_name} >> /etc/ecs/ecs.config
 echo ECS_ENABLE_GPU_SUPPORT=true >> /etc/ecs/ecs.config
 echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
-echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
-echo ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true >> /etc/ecs/ecs.config
-
-# Install NVIDIA Docker runtime
-amazon-linux-extras install docker
-service docker start
-usermod -a -G docker ec2-user
-
-# Install nvidia-docker2
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-
-yum install -y nvidia-docker2
-systemctl restart docker
-
-# Configure Docker daemon for NVIDIA runtime
-cat > /etc/docker/daemon.json <<EOF
-{{
-    "default-runtime": "nvidia",
-    "runtimes": {{
-        "nvidia": {{
-            "path": "nvidia-container-runtime",
-            "runtimeArgs": []
-        }}
-    }}
-}}
-EOF
-
-systemctl restart docker
-systemctl restart ecs
 """
             
             # Create launch template
@@ -219,20 +247,12 @@ systemctl restart ecs
                 LaunchTemplateData={
                     'ImageId': gpu_ami_id,
                     'InstanceType': settings.primary_instance_type,
+                    'KeyName': key_pair_name,
                     'IamInstanceProfile': {
                         'Name': instance_profile_name
                     },
                     'SecurityGroupIds': [gpu_sg_id],
                     'UserData': base64.b64encode(user_data.encode('utf-8')).decode('utf-8'),  # Must be Base64 encoded for launch templates
-                    
-                    # Spot instance configuration for 70% cost savings
-                    'InstanceMarketOptions': {
-                        'MarketType': 'spot',
-                        'SpotOptions': {
-                            'MaxPrice': str(settings.regional_config[settings.aws_region]['spot_max_price']),
-                            'SpotInstanceType': 'one-time'
-                        }
-                    },
                     'TagSpecifications': [
                         {
                             'ResourceType': 'instance',
@@ -309,6 +329,31 @@ systemctl restart ecs
             # Get ASG details
             asg_details = self._get_asg_details(asg_name)
             logger.info(f"Created Auto Scaling Group: {asg_name}")
+            
+            # Create lifecycle hook for warm pool management
+            try:
+                self.asg_client.put_lifecycle_hook(
+                    LifecycleHookName=f'{asg_name}-launch-hook',
+                    AutoScalingGroupName=asg_name,
+                    LifecycleTransition='autoscaling:EC2_INSTANCE_LAUNCHING',
+                    DefaultResult='CONTINUE',  # Returns instances to warm pool after timeout
+                    HeartbeatTimeout=200
+                )
+                logger.info(f"Created lifecycle hook for ASG: {asg_name}")
+            except ClientError as e:
+                logger.warning(f"Failed to create lifecycle hook: {e}")
+            
+            # Create warm pool for faster GPU worker scaling
+            try:
+                self.asg_client.put_warm_pool(
+                    AutoScalingGroupName=asg_name,
+                    MaxGroupPreparedCapacity=1,
+                    MinSize=1,
+                    PoolState='Stopped'
+                )
+                logger.info(f"Created warm pool for ASG: {asg_name}")
+            except ClientError as e:
+                logger.warning(f"Failed to create warm pool: {e}")
             
             return asg_details
             

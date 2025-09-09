@@ -21,9 +21,6 @@ class ECSServiceManager:
         self.cluster_name = f"{settings.app_name}-ecs-cluster"
         self.services = {}
         self.task_definitions = {}
-        # Add Application Auto Scaling client
-        import boto3
-        self.autoscaling_client = boto3.client('application-autoscaling', region_name=self.region)
         
     
     def run_model_downloader_task(self, vpc_config: Dict[str, Any], 
@@ -74,70 +71,6 @@ class ECSServiceManager:
             logger.error(f"Failed to run model downloader task: {e}")
             raise
 
-    def create_vlm_worker_service(self, vpc_config: Dict[str, Any], 
-                                 efs_config: Dict[str, Any], 
-                                 database_host: str = None) -> Dict[str, Any]:
-        """Create VLM worker service with EC2 GPU instances."""
-        service_name = f"{settings.app_name}-vlm-workers"
-        
-        try:
-            # STEP 1: Ensure models are downloaded first
-            logger.info("🤖 Step 1: Ensuring models are downloaded to EFS...")
-            downloader_result = self.run_model_downloader_task(vpc_config, efs_config)
-            if downloader_result != "SKIPPED":
-                logger.info("✅ Model download completed successfully")
-            
-            # STEP 2: Create worker task definition
-            logger.info("🏗️ Step 2: Creating VLM worker task definition...")
-            task_def_arn = self._create_vlm_worker_task_definition(efs_config, database_host)
-            
-            # Check for existing service
-            existing_service = self._find_existing_service(service_name)
-            if existing_service:
-                logger.info(f"Using existing VLM worker service: {service_name}")
-                self.services['vlm_workers'] = existing_service
-                return existing_service
-            
-            # Create VLM worker service
-            service_response = self.ecs_client.create_service(
-                cluster=self.cluster_name,
-                serviceName=service_name,
-                taskDefinition=task_def_arn,
-                desiredCount=0,  # Start with zero tasks (scale-to-zero architecture)
-                capacityProviderStrategy=[
-                    {
-                        'capacityProvider': f"{self.cluster_name}-gpu-cp",
-                        'weight': 1,
-                        'base': 0
-                    }
-                ],
-                networkConfiguration={
-                    'awsvpcConfiguration': {
-                        'subnets': [vpc_config['public_subnet_id']],  # Use public subnet for optimized architecture
-                        'securityGroups': [vpc_config['ecs_workers_security_group_id']],
-                        # EC2 launch type gets internet access via EC2 instance public IP, not task-level assignPublicIp
-                    }
-                },
-                enableExecuteCommand=True,
-                tags=[
-                    {'key': 'Name', 'value': service_name},
-                    {'key': 'Project', 'value': settings.app_name},
-                    {'key': 'Purpose', 'value': 'VLM-GPU-Processing'}
-                ]
-            )
-            
-            vlm_service = service_response['service']
-            self.services['vlm_workers'] = vlm_service
-            
-            # Set up auto-scaling for VLM worker service
-            self._setup_vlm_worker_auto_scaling(service_name)
-            
-            logger.info(f"Created VLM worker service: {service_name}")
-            return vlm_service
-            
-        except ClientError as e:
-            logger.error(f"Failed to create VLM worker service: {e}")
-            raise
 
     def _check_models_exist(self, efs_config: Dict[str, Any]) -> bool:
         """Check if models already exist in EFS (basic heuristic)."""
@@ -246,7 +179,7 @@ class ECSServiceManager:
         return False
     
     
-    def _create_vlm_worker_task_definition(self, efs_config: Dict[str, Any], database_host: str = None) -> str:
+    def _create_vlm_worker_task_definition(self, efs_config: Dict[str, Any], database_host: str = None, lambda_function_url: str = None) -> str:
         """Create task definition for VLM workers."""
         family = f"{settings.app_name}-vlm-worker"
         
@@ -257,7 +190,7 @@ class ECSServiceManager:
             # VLM worker task definition  
             task_definition = {
                 'family': family,
-                'networkMode': 'awsvpc',
+                'networkMode': 'host',
                 'requiresCompatibilities': ['EC2'],
                 'cpu': '3584',
                 'memory': '14336',
@@ -299,7 +232,11 @@ class ECSServiceManager:
                             {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
                             {'name': 'HF_HOME', 'value': '/app/cache'},
                             {'name': 'HF_HUB_OFFLINE', 'value': '1'},  # Use cached models only
-                            {'name': 'PYTHONPATH', 'value': '/app/src'}
+                            {'name': 'PYTHONPATH', 'value': '/app/src'},
+                            {'name': 'CLUSTER_NAME', 'value': self.cluster_name},
+                            {'name': 'CAPACITY_PROVIDER', 'value': f"{self.cluster_name}-gpu-cp"},
+                            {'name': 'LAMBDA_FUNCTION_URL', 'value': lambda_function_url or ''},
+                            {'name': 'API_BASE_URL', 'value': lambda_function_url or ''}  # For backward compatibility
                         ],
                         'mountPoints': [
                             {
@@ -611,38 +548,40 @@ class ECSServiceManager:
             logger.error(f"Failed to create ECS task role: {e}")
             raise
     
-    def deploy_all_services(self, vpc_config: Dict[str, Any], 
-                           efs_config: Dict[str, Any], 
-                           database_host: str = None) -> Dict[str, Any]:
-        """Deploy all ECS services (VLM workers only - MongoDB removed)."""
-        logger.info("Starting deployment of all ECS services...")
+    def deploy_task_definitions_only(self, vpc_config: Dict[str, Any], 
+                                    efs_config: Dict[str, Any], 
+                                    database_host: str = None,
+                                    lambda_function_url: str = None) -> Dict[str, Any]:
+        """Deploy task definitions only - model downloader (Fargate) + VLM worker (EC2 host mode)."""
+        logger.info("Deploying task definitions only...")
         
         try:
-            # Deploy VLM worker service only
-            logger.info("Deploying VLM worker service...")
-            vlm_service = self.create_vlm_worker_service(vpc_config, efs_config, database_host)
+            # STEP 1: Run model downloader (Fargate + awsvpc) - UNCHANGED
+            logger.info("✅ Running model downloader task (Fargate + awsvpc)")
+            downloader_result = self.run_model_downloader_task(vpc_config, efs_config)
+            
+            # STEP 2: Create VLM worker task definition (EC2 + host mode) - MODIFIED
+            logger.info("🔧 Creating VLM worker task definition (EC2 + host mode)")
+            task_def_arn = self._create_vlm_worker_task_definition(efs_config, database_host, lambda_function_url)
             
             # Return deployment summary
             deployment_summary = {
                 'status': 'success',
-                'services_deployed': {
-                    'vlm_workers': {
-                        'service_name': vlm_service['serviceName'],
-                        'service_arn': vlm_service['serviceArn'],
-                        'status': vlm_service['status'],
-                        'desired_count': vlm_service['desiredCount'],
-                        'running_count': vlm_service['runningCount']
-                    }
+                'task_definitions': {
+                    'model_downloader': 'fargate_awsvpc_unchanged',  # ✅ Preserved
+                    'vlm_worker': task_def_arn  # 🔧 Modified for host mode
                 },
+                'model_downloader_result': downloader_result,
+                'vlm_worker_network_mode': 'host',
                 'cluster_name': self.cluster_name,
                 'deployment_time': self._get_current_timestamp()
             }
             
-            logger.info("All ECS services deployed successfully")
+            logger.info("All task definitions deployed successfully")
             return deployment_summary
             
         except Exception as e:
-            logger.error(f"Failed to deploy ECS services: {e}")
+            logger.error(f"Failed to deploy task definitions: {e}")
             return {
                 'status': 'failed',
                 'error': str(e),
@@ -700,62 +639,6 @@ class ECSServiceManager:
         except ClientError:
             return None
     
-    def _setup_vlm_worker_auto_scaling(self, service_name: str) -> None:
-        """Set up Application Auto Scaling for VLM worker service based on SQS queue depth."""
-        try:
-            logger.info(f"🎯 Setting up auto-scaling for {service_name}")
-            
-            # Step 1: Register scalable target
-            resource_id = f"service/{self.cluster_name}/{service_name}"
-            
-            self.autoscaling_client.register_scalable_target(
-                ServiceNamespace='ecs',
-                ResourceId=resource_id,
-                ScalableDimension='ecs:service:DesiredCount',
-                MinCapacity=0,  # Scale to zero for cost optimization
-                MaxCapacity=2  # Limited by GPU quota
-                # RoleARN is optional - AWS creates service-linked role automatically
-            )
-            
-            logger.info(f"✅ Registered scalable target: {resource_id}")
-            
-            # Step 2: Create target tracking scaling policy for SQS queue depth
-            policy_name = f"{service_name}-sqs-scaling-policy"
-            
-            self.autoscaling_client.put_scaling_policy(
-                PolicyName=policy_name,
-                ServiceNamespace='ecs',
-                ResourceId=resource_id,
-                ScalableDimension='ecs:service:DesiredCount',
-                PolicyType='TargetTrackingScaling',
-                TargetTrackingScalingPolicyConfiguration={
-                    'TargetValue': 1.0,  # Target 1 message per task
-                    'CustomizedMetricSpecification': {
-                        'MetricName': 'ApproximateNumberOfMessagesVisible',
-                        'Namespace': 'AWS/SQS',
-                        'Dimensions': [
-                            {
-                                'Name': 'QueueName',
-                                'Value': settings.sqs_queue_name
-                            }
-                        ],
-                        'Statistic': 'Average'
-                    },
-                    'ScaleOutCooldown': 60,   # Scale up quickly (1 minute) 
-                    'ScaleInCooldown': 300,   # Scale down slowly (5 minutes) 
-                    'DisableScaleIn': False   # Allow scaling in to zero
-                }
-            )
-            
-            logger.info(f"✅ Created SQS-based scaling policy: {policy_name}")
-            logger.info(f"   Target: 1 message per task")
-            logger.info(f"   Capacity: 0-2 tasks")
-            logger.info(f"   Cooldowns: Scale-out=60s, Scale-in=300s")
-            
-        except ClientError as e:
-            logger.error(f"Failed to setup auto-scaling: {e}")
-            # Don't fail the deployment if auto-scaling setup fails
-            logger.warning("Continuing deployment without auto-scaling")
     
     def cleanup_services_resources(self) -> None:
         """Clean up services resources (for testing/cleanup)."""

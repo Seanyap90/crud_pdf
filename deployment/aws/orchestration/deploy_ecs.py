@@ -444,15 +444,17 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             }
         }
         
-        # Deploy ECS services with database host from console config  
+        # Deploy ECS task definitions with database host from console config  
         database_host = console_config['config'].get('DATABASE_HOST', 'localhost')
-        deployment_result = self.service_manager.deploy_all_services(ecs_vpc_config, ecs_efs_config, database_host)
+        # Note: Lambda function URL will be empty initially, can be updated later
+        lambda_function_url = ""  # TODO: Update after Lambda deployment
+        deployment_result = self.service_manager.deploy_task_definitions_only(ecs_vpc_config, ecs_efs_config, database_host, lambda_function_url)
         
         if deployment_result['status'] == 'success':
-            logger.info("✅ ECS services deployed successfully using console infrastructure")
+            logger.info("✅ ECS task definitions deployed successfully using console infrastructure")
             return deployment_result
         else:
-            raise Exception(f"ECS services deployment failed: {deployment_result.get('error')}")
+            raise Exception(f"ECS task definitions deployment failed: {deployment_result.get('error')}")
     
     def _deploy_lambda_no_vpc(self, console_config: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy Lambda functions without VPC attachment (optimized architecture)."""
@@ -542,14 +544,10 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             logger.info("📋 Manual SQLite setup required - see deployment/aws/services/README.md")
             logger.info(f"🔗 SSH command: {database_config.get('ssh_command', 'N/A')}")
             
-            # Optionally wait for manual setup completion
-            setup_complete = self.database_manager.wait_for_manual_setup_completion(
-                database_config['private_ip'], timeout_minutes=5  # Short timeout for automated deployment
-            )
-            
-            if not setup_complete:
-                logger.warning("⚠️ Manual setup not completed - continuing deployment")
-                logger.info("You can complete setup later using the SSH command above")
+            # Skip waiting for manual setup since we're deploying task definitions only
+            # ECS tasks won't start immediately, so database setup can be completed later
+            logger.info("⏩ Skipping database setup wait - tasks will be launched by Lambda scaler when needed")
+            logger.info("Complete database setup using the SSH command above before processing documents")
         
         logger.info(f"Database server ready: {database_config['instance_id']} at {database_config.get('public_ip', database_config['private_ip'])}")
         
@@ -615,19 +613,23 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         
         # Pass database host from earlier database deployment (prefer public IP)
         database_host = self.deployment_config.get('endpoints', {}).get('database_host', 'localhost')
-        deployment_result = self.service_manager.deploy_all_services(vpc_config, efs_config, database_host)
+        # Note: Lambda function URL will be empty initially, updated later
+        lambda_function_url = ""  # TODO: Update after Lambda deployment
+        deployment_result = self.service_manager.deploy_task_definitions_only(vpc_config, efs_config, database_host, lambda_function_url)
         
         if deployment_result['status'] == 'success':
-            services_deployed = deployment_result['services_deployed']
-            logger.info(f"✅ VLM Workers: {services_deployed['vlm_workers']['service_name']}")
+            task_definitions = deployment_result['task_definitions']
+            logger.info(f"✅ VLM Worker Task Definition: {task_definitions['vlm_worker']}")
+            logger.info(f"✅ Model Downloader: {deployment_result['model_downloader_result']}")
             
             return {
-                'vlm_workers': services_deployed['vlm_workers'],
+                'vlm_worker_task_definition': task_definitions['vlm_worker'],
+                'network_mode': deployment_result['vlm_worker_network_mode'],
                 'deployment_summary': deployment_result
             }
         else:
-            logger.error(f"Service deployment failed: {deployment_result.get('error')}")
-            raise Exception(f"ECS services deployment failed: {deployment_result.get('error')}")
+            logger.error(f"Task definition deployment failed: {deployment_result.get('error')}")
+            raise Exception(f"ECS task definitions deployment failed: {deployment_result.get('error')}")
 
     def _update_ecs_with_lambda_url(self, services_config: Dict[str, Any], lambda_function_url: str) -> None:
         """Update ECS task definitions to include Lambda Function URL."""

@@ -190,11 +190,27 @@ class SQLiteHTTPAdapter:
             # Serialize document to JSON
             doc_json = json.dumps(document, default=str)
             
-            # Update document
+            # Use collection-specific table and ID column
+            table_name = f"{collection}_docs"
+            
+            if collection == 'vendor_invoices':
+                id_column = 'invoice_id'
+            elif collection == 'gateways':
+                id_column = 'gateway_id'
+            elif collection == 'devices':
+                id_column = 'device_id'
+            elif collection == 'measurements':
+                id_column = 'measurement_id'
+            elif collection == 'config_updates':
+                id_column = 'update_id'
+            else:
+                id_column = 'id'  # fallback
+            
+            # Update document using collection-specific table
             result = self._execute_command(
-                """UPDATE documents SET document = ?, updated_at = ? 
-                   WHERE collection = ? AND doc_id = ?""",
-                (doc_json, datetime.utcnow(), collection, str(doc_id))
+                f"""UPDATE {table_name} SET document = ?, updated_at = CURRENT_TIMESTAMP 
+                   WHERE {id_column} = ?""",
+                (doc_json, doc_id)
             )
             
             success = result.get('rowcount', 0) > 0
@@ -212,9 +228,25 @@ class SQLiteHTTPAdapter:
     def delete_document(self, collection: str, doc_id: Union[str, int]) -> bool:
         """Delete a document from the collection."""
         try:
+            # Use collection-specific table and ID column
+            table_name = f"{collection}_docs"
+            
+            if collection == 'vendor_invoices':
+                id_column = 'invoice_id'
+            elif collection == 'gateways':
+                id_column = 'gateway_id'
+            elif collection == 'devices':
+                id_column = 'device_id'
+            elif collection == 'measurements':
+                id_column = 'measurement_id'
+            elif collection == 'config_updates':
+                id_column = 'update_id'
+            else:
+                id_column = 'id'  # fallback
+            
             result = self._execute_command(
-                "DELETE FROM documents WHERE collection = ? AND doc_id = ?",
-                (collection, str(doc_id))
+                f"DELETE FROM {table_name} WHERE {id_column} = ?",
+                (doc_id,)
             )
             
             success = result.get('rowcount', 0) > 0

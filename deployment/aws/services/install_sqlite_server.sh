@@ -13,7 +13,7 @@ pip3 install flask gunicorn requests
 
 # Create application directory
 mkdir -p /opt/sqlite-server
-mkdir -p /mnt/efs/database
+mkdir -p /var/lib/sqlite-server
 mkdir -p /var/log/sqlite-server
 
 # Copy server script (will be provided via user data)
