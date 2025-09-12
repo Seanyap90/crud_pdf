@@ -54,3 +54,4 @@ __pycache__/
 .env.aws-prod
 .env.local-dev
 claude.local2.md
+AMI_INTEGRATION_SUMMARY.md
