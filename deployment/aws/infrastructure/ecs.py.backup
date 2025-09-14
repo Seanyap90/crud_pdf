@@ -1,8 +1,6 @@
 """ECS cluster management with GPU-optimized capacity provider."""
 import base64
-import json
 import logging
-import os
 from typing import Dict, Any, Optional, List
 import boto3
 from botocore.exceptions import ClientError
@@ -29,21 +27,6 @@ class ECSClusterManager:
         
     def create_cluster(self, vpc_id: str, subnet_ids: List[str]) -> Dict[str, Any]:
         """Create ECS cluster with GPU capacity provider."""
-        # Use environment variables if not provided (for .env.aws-prod integration)
-        if not vpc_id:
-            vpc_id = os.getenv('VPC_ID')
-            if not vpc_id:
-                raise ValueError("VPC_ID must be provided as parameter or environment variable")
-        
-        if not subnet_ids:
-            public_subnet = os.getenv('PUBLIC_SUBNET_ID')
-            if public_subnet:
-                subnet_ids = [public_subnet]
-            else:
-                raise ValueError("PUBLIC_SUBNET_ID must be provided as parameter or environment variable")
-        
-        logger.info(f"Creating ECS cluster in VPC {vpc_id}, subnets: {subnet_ids}")
-        
         try:
             # Check for existing cluster
             existing_cluster = self._find_existing_cluster()
@@ -155,44 +138,62 @@ class ECSClusterManager:
             raise
     
     def _create_or_get_key_pair(self) -> str:
-        """Create or get existing SSH key pair using SSH key manager."""
-        try:
-            from deployment.aws.infrastructure.ami.ssh_key_manager import SSHKeyManager
-            
-            ssh_manager = SSHKeyManager(region=self.region)
-            key_name = ssh_manager.ensure_ssh_key()
-            
-            logger.info(f"SSH key ensured for GPU instances: {key_name}")
-            return key_name
-            
-        except Exception as e:
-            logger.error(f"Failed to ensure SSH key: {e}")
-            # Fallback to old method if SSH manager fails
-            logger.warning("Falling back to legacy SSH key creation")
-            return self._create_legacy_key_pair()
-    
-    def _create_legacy_key_pair(self) -> str:
-        """Legacy SSH key creation method (fallback)."""
-        key_pair_name = f"{self.cluster_name}-gpu-key-legacy"
+        """Create or get existing SSH key pair for GPU instances."""
+        key_pair_name = f"{self.cluster_name}-gpu-key"
         
         try:
             # Check if key pair already exists
             response = self.ec2_client.describe_key_pairs(KeyNames=[key_pair_name])
             if response['KeyPairs']:
-                logger.info(f"Using existing legacy key pair: {key_pair_name}")
+                logger.info(f"Using existing key pair: {key_pair_name}")
                 return key_pair_name
         except ClientError as e:
             if e.response['Error']['Code'] != 'InvalidKeyPair.NotFound':
                 raise
         
         # Create new key pair
-        response = self.ec2_client.create_key_pair(
-            KeyName=key_pair_name,
-            KeyType='rsa'
-        )
-        
-        logger.warning(f"Created legacy key pair: {key_pair_name} (private key not saved locally)")
-        return key_pair_name
+        try:
+            response = self.ec2_client.create_key_pair(
+                KeyName=key_pair_name,
+                KeyType='rsa',
+                KeyFormat='pem',
+                TagSpecifications=[
+                    {
+                        'ResourceType': 'key-pair',
+                        'Tags': [
+                            {'Key': 'Name', 'Value': key_pair_name},
+                            {'Key': 'Project', 'Value': settings.app_name},
+                            {'Key': 'Purpose', 'Value': 'GPU-Instance-Access'}
+                        ]
+                    }
+                ]
+            )
+            
+            # Save private key to local file for SSH access
+            private_key = response['KeyMaterial']
+            key_file_path = f"{key_pair_name}.pem"
+            
+            try:
+                with open(key_file_path, 'w') as f:
+                    f.write(private_key)
+                
+                # Set proper permissions for SSH key
+                import os
+                os.chmod(key_file_path, 0o600)  # Read/write for owner only
+                
+                logger.info(f"✅ Created SSH key pair: {key_pair_name}")
+                logger.info(f"📂 Private key saved to: {key_file_path}")
+                logger.info(f"🔐 SSH access: ssh -i {key_file_path} ec2-user@<instance-ip>")
+                
+            except Exception as e:
+                logger.error(f"Failed to save private key to {key_file_path}: {e}")
+                logger.warning(f"Private key material available in response - save manually for SSH access")
+            
+            return key_pair_name
+            
+        except ClientError as e:
+            logger.error(f"Failed to create key pair: {e}")
+            raise
     
     def _create_gpu_launch_template(self, vpc_id: str) -> Dict[str, Any]:
         """Create launch template for GPU instances."""
@@ -217,8 +218,8 @@ class ECSClusterManager:
             # Get ECS-optimized GPU AMI
             gpu_ami_id = self._get_ecs_gpu_ami()
             
-            # Use existing security group from manual setup or create new one
-            gpu_sg_id = self._get_or_create_gpu_security_group(vpc_id)
+            # Create security group for GPU instances
+            gpu_sg_id = self._create_gpu_security_group(vpc_id)
             
             # Create IAM instance profile for ECS instances
             instance_profile_arn = self._create_ecs_instance_profile()
@@ -295,16 +296,16 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                 logger.info(f"Using existing Auto Scaling Group: {asg_name}")
                 return existing_asg
             
-            # Create ASG (simplified - no warm pools or lifecycle hooks for AMI approach)
+            # Create ASG
             asg_response = self.asg_client.create_auto_scaling_group(
                 AutoScalingGroupName=asg_name,
                 LaunchTemplate={
                     'LaunchTemplateId': launch_template_id,
                     'Version': '$Latest'
                 },
-                MinSize=0,          # Allow scaling to zero
-                MaxSize=2,          # Max 2 instances (quota limit)
-                DesiredCapacity=2,  # Keep desired at 2 (instances will be stopped/started, not terminated)
+                MinSize=0,          # Scale to zero when idle
+                MaxSize=2,          # HARD LIMIT: 2 instances max (adjusted for current quota)
+                DesiredCapacity=0,  # Start with zero instances (scale-to-zero architecture)
                 VPCZoneIdentifier=','.join(subnet_ids),
                 DefaultCooldown=300,  # 5 minutes cooldown
                 Tags=[
@@ -321,23 +322,38 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                         'PropagateAtLaunch': True,
                         'ResourceId': asg_name,
                         'ResourceType': 'auto-scaling-group'
-                    },
-                    {
-                        'Key': 'AMIIntegration',
-                        'Value': 'true',
-                        'PropagateAtLaunch': True,
-                        'ResourceId': asg_name,
-                        'ResourceType': 'auto-scaling-group'
                     }
                 ]
             )
             
             # Get ASG details
             asg_details = self._get_asg_details(asg_name)
-            logger.info(f"Created Auto Scaling Group: {asg_name} (AMI-based, no warm pools)")
+            logger.info(f"Created Auto Scaling Group: {asg_name}")
             
-            # NOTE: No lifecycle hooks or warm pools for AMI approach
-            # Instances will be stopped/started by Lambda scaling functions
+            # Create lifecycle hook for warm pool management
+            try:
+                self.asg_client.put_lifecycle_hook(
+                    LifecycleHookName=f'{asg_name}-launch-hook',
+                    AutoScalingGroupName=asg_name,
+                    LifecycleTransition='autoscaling:EC2_INSTANCE_LAUNCHING',
+                    DefaultResult='CONTINUE',  # Returns instances to warm pool after timeout
+                    HeartbeatTimeout=200
+                )
+                logger.info(f"Created lifecycle hook for ASG: {asg_name}")
+            except ClientError as e:
+                logger.warning(f"Failed to create lifecycle hook: {e}")
+            
+            # Create warm pool for faster GPU worker scaling
+            try:
+                self.asg_client.put_warm_pool(
+                    AutoScalingGroupName=asg_name,
+                    MaxGroupPreparedCapacity=1,
+                    MinSize=1,
+                    PoolState='Stopped'
+                )
+                logger.info(f"Created warm pool for ASG: {asg_name}")
+            except ClientError as e:
+                logger.warning(f"Failed to create warm pool: {e}")
             
             return asg_details
             
@@ -345,36 +361,9 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
             logger.error(f"Failed to create Auto Scaling Group: {e}")
             raise
     
-    def _get_or_create_gpu_security_group(self, vpc_id: str) -> str:
-        """Get existing ECS workers security group or create new one."""
-        # First, try to get security group ID from environment (manual setup)
-        existing_sg_id = os.getenv('ECS_WORKERS_SG_ID')
-        
-        if existing_sg_id:
-            logger.info(f"Using existing ECS workers security group from environment: {existing_sg_id}")
-            # Validate that the security group exists and belongs to the correct VPC
-            try:
-                sg_response = self.ec2_client.describe_security_groups(GroupIds=[existing_sg_id])
-                security_groups = sg_response.get('SecurityGroups', [])
-                
-                if security_groups and security_groups[0]['VpcId'] == vpc_id:
-                    sg_name = security_groups[0]['GroupName']
-                    logger.info(f"Validated existing security group: {sg_name} ({existing_sg_id})")
-                    return existing_sg_id
-                else:
-                    logger.warning(f"Security group {existing_sg_id} not found or wrong VPC, creating new one")
-            except Exception as e:
-                logger.warning(f"Could not validate security group {existing_sg_id}: {e}, creating new one")
-        
-        # Look for fastapi-app-ecs-workers-sg by name  
-        target_sg_name = "fastapi-app-ecs-workers-sg"
-        existing_sg = self._find_existing_security_group(target_sg_name, vpc_id)
-        if existing_sg:
-            logger.info(f"Found existing target security group: {target_sg_name}")
-            return existing_sg['GroupId']
-        
-        # Fallback: create new security group with the target name
-        sg_name = target_sg_name
+    def _create_gpu_security_group(self, vpc_id: str) -> str:
+        """Create security group for GPU instances."""
+        sg_name = f"{self.cluster_name}-gpu-sg"
         
         try:
             # Check for existing security group
@@ -386,15 +375,14 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
             # Create security group
             sg_response = self.ec2_client.create_security_group(
                 GroupName=sg_name,
-                Description=f"Security group for ECS VLM workers with GPU support",
+                Description=f"Security group for {self.cluster_name} GPU instances",
                 VpcId=vpc_id,
                 TagSpecifications=[
                     {
                         'ResourceType': 'security-group',
                         'Tags': [
                             {'Key': 'Name', 'Value': sg_name},
-                            {'Key': 'Project', 'Value': settings.app_name},
-                            {'Key': 'Purpose', 'Value': 'ecs-vlm-workers'}
+                            {'Key': 'Project', 'Value': settings.app_name}
                         ]
                     }
                 ]
@@ -402,34 +390,20 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
             
             sg_id = sg_response['GroupId']
             
-            # Add ingress rules for AMI-based ECS workers
+            # Add ingress rules for EFS (NFS)
             self.ec2_client.authorize_security_group_ingress(
                 GroupId=sg_id,
                 IpPermissions=[
                     {
                         'IpProtocol': 'tcp',
-                        'FromPort': 8080,
-                        'ToPort': 8080,
-                        'IpRanges': [{'CidrIp': '10.0.0.0/16', 'Description': 'Database access within VPC'}]
-                    },
-                    {
-                        'IpProtocol': 'tcp',
-                        'FromPort': 443,
-                        'ToPort': 443,
-                        'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTPS outbound for S3/SQS'}]
-                    },
-                    {
-                        'IpProtocol': 'tcp',
-                        'FromPort': 80,
-                        'ToPort': 80,
-                        'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'HTTP outbound'}]
+                        'FromPort': 2049,
+                        'ToPort': 2049,
+                        'IpRanges': [{'CidrIp': '10.0.0.0/16', 'Description': 'EFS NFS within VPC'}]
                     }
                 ]
             )
             
-            logger.info(f"Created ECS workers security group: {sg_name}")
-            logger.info(f"Security group ID: {sg_id}")
-            logger.info(f"Security group will be used by ASG launch template for AMI-based instances")
+            logger.info(f"Created GPU security group: {sg_name}")
             return sg_id
             
         except ClientError as e:
@@ -713,17 +687,9 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
             return None
     
     def _get_ecs_gpu_ami(self) -> str:
-        """Get AMI for ECS GPU instances - custom AMI if available, otherwise latest ECS GPU AMI."""
-        import os
-        
-        # Check for custom AMI (AMI integration)
-        custom_ami_id = os.getenv('CUSTOM_AMI_ID')
-        if custom_ami_id:
-            logger.info(f"Using custom AMI with pre-loaded models: {custom_ami_id}")
-            return custom_ami_id
-        
+        """Get the latest ECS-optimized GPU AMI."""
         try:
-            # Get latest ECS-optimized GPU AMI (fallback)
+            # Get latest ECS-optimized GPU AMI
             response = self.ec2_client.describe_images(
                 Owners=['amazon'],
                 Filters=[
@@ -741,7 +707,7 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
             latest_image = sorted(images, key=lambda x: x['CreationDate'], reverse=True)[0]
             ami_id = latest_image['ImageId']
             
-            logger.info(f"Using standard ECS GPU AMI (no custom AMI set): {ami_id}")
+            logger.info(f"Using ECS GPU AMI: {ami_id}")
             return ami_id
             
         except ClientError as e:
@@ -869,260 +835,3 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
         except Exception as e:
             logger.error(f"Error during cluster cleanup: {e}")
             raise
-    
-    # Task Definition Methods (consolidated from ecs_services.py)
-    
-    def create_vlm_worker_task_definition_ami(self, vpc_config: Dict[str, Any], 
-                                            database_host: str = None) -> str:
-        """Create AMI-based task definition for VLM workers with host path mounts."""
-        family = f"{settings.app_name}-vlm-worker-ami"
-        
-        try:
-            # Create CloudWatch log group
-            log_group = self._create_log_group(f"/ecs/{family}")
-            
-            # AMI-based VLM worker task definition with host path mounts
-            task_definition = {
-                'family': family,
-                'networkMode': 'host',
-                'requiresCompatibilities': ['EC2'],
-                'cpu': '3584',  # 3.5 vCPU
-                'memory': '14336',  # 14 GB
-                'executionRoleArn': self._get_ecs_execution_role_arn(),
-                'taskRoleArn': self._get_ecs_task_role_arn(),
-                'volumes': [
-                    {
-                        'name': 'vlm-models',
-                        'host': {
-                            'sourcePath': '/opt/vlm-models'  # Models pre-loaded on AMI host
-                        }
-                    }
-                ],
-                'containerDefinitions': [
-                    {
-                        'name': 'vlm-worker',
-                        'image': f"{settings.ecr_registry}/{settings.ecr_repo_name}:latest",
-                        'essential': True,
-                        'resourceRequirements': [
-                            {
-                                'type': 'GPU',
-                                'value': '1'
-                            }
-                        ],
-                        'environment': [
-                            {'name': 'DEPLOYMENT_MODE', 'value': 'aws-prod'},
-                            {'name': 'AWS_REGION', 'value': self.region},
-                            {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
-                            {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},
-                            {'name': 'DATABASE_HOST', 'value': database_host or 'localhost'},
-                            {'name': 'DATABASE_PORT', 'value': '8080'},
-                            {'name': 'MODEL_CACHE_DIR', 'value': '/app/cache'},
-                            {'name': 'CUDA_VISIBLE_DEVICES', 'value': '0'},
-                            {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:256'},
-                            {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache/huggingface/transformers'},
-                            {'name': 'HF_HOME', 'value': '/app/cache/huggingface'},
-                            {'name': 'HF_HUB_OFFLINE', 'value': '1'},  # Use pre-loaded models only
-                            {'name': 'PYTHONPATH', 'value': '/app/src'},
-                            {'name': 'CLUSTER_NAME', 'value': self.cluster_name},
-                            {'name': 'AMI_BASED_DEPLOYMENT', 'value': 'true'}  # Flag for AMI deployment
-                        ],
-                        'mountPoints': [
-                            {
-                                'sourceVolume': 'vlm-models',
-                                'containerPath': '/app/cache',  # Container path for models
-                                'readOnly': True  # Read-only since models are pre-loaded
-                            }
-                        ],
-                        'logConfiguration': {
-                            'logDriver': 'awslogs',
-                            'options': {
-                                'awslogs-group': log_group,
-                                'awslogs-region': self.region,
-                                'awslogs-stream-prefix': 'vlm-worker-ami'
-                            }
-                        },
-                        'command': ['python', '-m', 'vlm_workers.cli', 'worker', '--mode', 'aws-prod']
-                    }
-                ],
-                'tags': [
-                    {'key': 'Name', 'value': family},
-                    {'key': 'Project', 'value': settings.app_name},
-                    {'key': 'DeploymentType', 'value': 'ami-based'}
-                ]
-            }
-            
-            # Register task definition
-            response = self.ecs_client.register_task_definition(**task_definition)
-            task_def_arn = response['taskDefinition']['taskDefinitionArn']
-            
-            logger.info(f"Created AMI-based VLM worker task definition: {family}")
-            logger.info(f"Task definition ARN: {task_def_arn}")
-            
-            return task_def_arn
-            
-        except ClientError as e:
-            logger.error(f"Failed to create AMI-based VLM worker task definition: {e}")
-            raise
-    
-    def _create_log_group(self, log_group_name: str) -> str:
-        """Create CloudWatch log group for ECS tasks."""
-        try:
-            from deployment.aws.utils.aws_clients import get_logs_client
-            logs_client = get_logs_client()
-            
-            # Check if log group already exists
-            try:
-                logs_client.describe_log_groups(logGroupNamePrefix=log_group_name)
-                logger.info(f"Using existing log group: {log_group_name}")
-                return log_group_name
-            except ClientError as e:
-                if e.response['Error']['Code'] != 'ResourceNotFoundException':
-                    raise
-            
-            # Create new log group
-            logs_client.create_log_group(
-                logGroupName=log_group_name,
-                tags={
-                    'Project': settings.app_name,
-                    'Purpose': 'ECS-Task-Logs'
-                }
-            )
-            
-            # Set retention policy (30 days)
-            logs_client.put_retention_policy(
-                logGroupName=log_group_name,
-                retentionInDays=30
-            )
-            
-            logger.info(f"Created log group: {log_group_name}")
-            return log_group_name
-            
-        except ClientError as e:
-            logger.error(f"Failed to create log group: {e}")
-            raise
-    
-    def _get_ecs_execution_role_arn(self) -> str:
-        """Get ECS task execution role ARN."""
-        role_name = f"{self.cluster_name}-task-execution-role"
-        
-        try:
-            response = self.iam_client.get_role(RoleName=role_name)
-            return response['Role']['Arn']
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchEntity':
-                # Create the role if it doesn't exist
-                return self._create_ecs_execution_role(role_name)
-            raise
-    
-    def _create_ecs_execution_role(self, role_name: str) -> str:
-        """Create ECS task execution role."""
-        trust_policy = {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Principal": {"Service": "ecs-tasks.amazonaws.com"},
-                    "Action": "sts:AssumeRole"
-                }
-            ]
-        }
-        
-        # Create role
-        response = self.iam_client.create_role(
-            RoleName=role_name,
-            AssumeRolePolicyDocument=json.dumps(trust_policy),
-            Description="ECS task execution role for VLM workers"
-        )
-        
-        # Attach required policy
-        self.iam_client.attach_role_policy(
-            RoleName=role_name,
-            PolicyArn="arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-        )
-        
-        logger.info(f"Created ECS execution role: {role_name}")
-        return response['Role']['Arn']
-    
-    def _get_ecs_task_role_arn(self) -> str:
-        """Get ECS task role ARN for application permissions."""
-        role_name = f"{self.cluster_name}-task-role"
-        
-        try:
-            response = self.iam_client.get_role(RoleName=role_name)
-            return response['Role']['Arn']
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchEntity':
-                # Create the role if it doesn't exist
-                return self._create_ecs_task_role(role_name)
-            raise
-    
-    def _create_ecs_task_role(self, role_name: str) -> str:
-        """Create ECS task role with S3, SQS, and CloudWatch permissions."""
-        
-        trust_policy = {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Principal": {"Service": "ecs-tasks.amazonaws.com"},
-                    "Action": "sts:AssumeRole"
-                }
-            ]
-        }
-        
-        # Create role
-        response = self.iam_client.create_role(
-            RoleName=role_name,
-            AssumeRolePolicyDocument=json.dumps(trust_policy),
-            Description="ECS task role for VLM worker application permissions"
-        )
-        
-        # Create and attach custom policy for S3, SQS, CloudWatch
-        policy_document = {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Action": [
-                        "s3:GetObject",
-                        "s3:PutObject",
-                        "s3:DeleteObject",
-                        "s3:ListBucket"
-                    ],
-                    "Resource": [
-                        f"arn:aws:s3:::{settings.s3_bucket_name}",
-                        f"arn:aws:s3:::{settings.s3_bucket_name}/*"
-                    ]
-                },
-                {
-                    "Effect": "Allow",
-                    "Action": [
-                        "sqs:ReceiveMessage",
-                        "sqs:DeleteMessage",
-                        "sqs:GetQueueAttributes"
-                    ],
-                    "Resource": f"arn:aws:sqs:{self.region}:{settings.aws_account_id}:{settings.sqs_queue_name}"
-                },
-                {
-                    "Effect": "Allow",
-                    "Action": [
-                        "cloudwatch:PutMetricData"
-                    ],
-                    "Resource": "*"
-                }
-            ]
-        }
-        
-        policy_name = f"{role_name}-policy"
-        self.iam_client.put_role_policy(
-            RoleName=role_name,
-            PolicyName=policy_name,
-            PolicyDocument=json.dumps(policy_document)
-        )
-        
-        logger.info(f"Created ECS task role: {role_name}")
-        return response['Role']['Arn']
-
-
-# Consolidated ECS Manager (replaces both ECSClusterManager and ECSServiceManager)
-ECSManager = ECSClusterManager

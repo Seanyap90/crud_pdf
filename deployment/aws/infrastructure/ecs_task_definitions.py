@@ -71,11 +71,7 @@ class TaskDefinitionConfig:
             self.requires_compatibilities = ['EC2']  # GPU requires EC2
             self.tags.append({'key': 'Purpose', 'value': 'VLM-GPU-Processing'})
             
-        elif 'model-downloader' in self.family.lower():
-            if self.cpu == "1024":  # Default wasn't overridden
-                self.cpu = "8192"  # 8 vCPU for heavy downloading
-                self.memory = "16384"  # 16GB for model downloading
-            self.tags.append({'key': 'Purpose', 'value': 'Model-Download'})
+        # Model downloader removed - AMI has pre-loaded models
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to ECS task definition dictionary."""
@@ -211,72 +207,7 @@ class TaskDefinitionBuilder:
             logger.error(f"Failed to build VLM worker task definition: {e}")
             raise
     
-    def build_model_downloader_task_definition(self, efs_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Build model downloader task definition for one-time model downloading. Returns task definition dict."""
-        family = f"{settings.app_name}-model-downloader"
-        
-        try:
-            # Create CloudWatch log group
-            log_group = self._create_log_group(f"/ecs/{family}")
-            
-            # Build model downloader task definition configuration
-            config = TaskDefinitionConfig(
-                family=family,
-                execution_role_arn=self.execution_role_arn,
-                task_role_arn=self.task_role_arn,
-                volumes=[
-                    {
-                        'name': 'model-storage',
-                        'efsVolumeConfiguration': {
-                            'fileSystemId': efs_config['shared_models']['file_system_id'],
-                            'transitEncryption': 'ENABLED',
-                            'authorizationConfig': {
-                                'accessPointId': efs_config['shared_models']['access_point_id']
-                            }
-                        }
-                    }
-                ],
-                container_definitions=[
-                    {
-                        'name': 'model-downloader',
-                        'image': f"{settings.ecr_registry}/{settings.ecr_repo_name}:latest",
-                        'essential': True,
-                        'user': '0:0',  # Run as root
-                        'environment': [
-                            {'name': 'DEPLOYMENT_MODE', 'value': 'aws-prod'},
-                            {'name': 'AWS_REGION', 'value': self.region},
-                            {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
-                            {'name': 'HF_HOME', 'value': '/app/cache'},
-                            {'name': 'HF_HUB_OFFLINE', 'value': '0'},  # Allow downloads
-                            {'name': 'HF_HUB_DOWNLOAD_TIMEOUT', 'value': '600'}  # 10 min timeout
-                        ],
-                        'mountPoints': [
-                            {
-                                'sourceVolume': 'model-storage', 
-                                'containerPath': '/app/cache',
-                                'readOnly': False
-                            }
-                        ],
-                        'logConfiguration': {
-                            'logDriver': 'awslogs',
-                            'options': {
-                                'awslogs-group': log_group,
-                                'awslogs-region': self.region,
-                                'awslogs-stream-prefix': 'model-downloader'
-                            }
-                        },
-                        'command': ['python', '-m', 'vlm_workers.models.downloader']
-                    }
-                ]
-            )
-            
-            task_def_dict = config.to_dict()
-            logger.info(f"Built model downloader task definition: {family}")
-            return task_def_dict
-            
-        except Exception as e:
-            logger.error(f"Failed to build model downloader task definition: {e}")
-            raise
+    # Model downloader task definition removed - AMI has pre-loaded models
     
     
     def create_vlm_worker_task_definition(self, efs_config: Dict[str, Any], lambda_function_url: str = None, database_host: str = None) -> str:
@@ -284,10 +215,7 @@ class TaskDefinitionBuilder:
         task_def_dict = self.build_vlm_worker_task_definition(efs_config, lambda_function_url, database_host)
         return self._register_task_definition(task_def_dict)
     
-    def create_model_downloader_task_definition(self, efs_config: Dict[str, Any]) -> str:
-        """Create and register model downloader task definition. Returns task definition ARN."""
-        task_def_dict = self.build_model_downloader_task_definition(efs_config)
-        return self._register_task_definition(task_def_dict)
+    # Model downloader create method removed - AMI has pre-loaded models
     
     def _register_task_definition(self, task_def_dict: Dict[str, Any]) -> str:
         """Register task definition with ECS. Returns task definition ARN."""
@@ -367,10 +295,7 @@ class TaskDefinitionBuilder:
 
 
 # Convenience functions for direct usage (backwards compatibility)
-def create_model_downloader_task_definition(efs_config: Dict[str, Any]) -> str:
-    """Create model downloader task definition (convenience function). Returns ARN."""
-    builder = TaskDefinitionBuilder()
-    return builder.create_model_downloader_task_definition(efs_config)
+# Model downloader convenience function removed - AMI has pre-loaded models
 
 def create_vlm_worker_task_definition(efs_config: Dict[str, Any], lambda_function_url: str = None) -> str:
     """Create VLM worker task definition (convenience function). Returns ARN."""

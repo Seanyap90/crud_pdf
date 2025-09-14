@@ -40,15 +40,8 @@ aws-prod-status:
 aws-prod-validate:
 	bash run.sh aws-prod-validate
 
-# Internal targets for parallel execution
-aws-prod-infra:
-	@bash -c '. run.sh && load_env_file ".env.aws-prod" && python -m files_api.env_helper --validate-required-vars VPC_ID,PUBLIC_SUBNET_ID,EFS_FILE_SYSTEM_ID,EFS_ACCESS_POINT_ID,S3_BUCKET_NAME,SQS_QUEUE_URL,DATABASE_SG_ID,EFS_SG_ID,ECS_WORKERS_SG_ID && python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console --validate-only'
-
-aws-prod-lambda:
-	@bash -c '. run.sh && load_env_file ".env.aws-prod" && python -m deployment.aws.services.lambda_deploy --files-api-only'
-
-aws-prod-ecs:
-	@bash -c '. run.sh && load_env_file ".env.aws-prod" && python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console --deploy-services'
+# Note: Previously separate targets like aws-prod-infra, aws-prod-lambda, aws-prod-ecs, 
+# aws-prod-ami, and aws-prod-lambda-scaling have been consolidated into the main aws-prod target
 
 # Validate AWS mock deployment prerequisites
 aws-mock-validate:

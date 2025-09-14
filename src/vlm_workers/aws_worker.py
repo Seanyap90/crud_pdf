@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, List
 
 from vlm_workers.worker import Worker
 from deployment.aws.utils.aws_clients import get_cloudwatch_client
-from vlm_workers.scaling.auto_scaler import get_task_manager, AutoScalingManager
+# Auto-scaler removed in AMI integration - using EventBridge Lambda scaling instead
 from src.files_api.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -132,49 +132,7 @@ class LoggingObserver(WorkerObserver):
         return str(id(task))
 
 
-class ECSTaskObserver(WorkerObserver):
-    """ECS-specific observer for task lifecycle management."""
-    
-    def __init__(self, task_manager: ECSTaskManager):
-        """Initialize with ECS task manager."""
-        self.task_manager = task_manager
-        self.processed_tasks = 0
-        
-    def on_task_start(self, task: Dict[str, Any]) -> None:
-        """Handle ECS task start."""
-        # Register current ECS task if not already registered
-        if not self.task_manager.get_current_task_arn():
-            self.task_manager.register_current_task()
-        
-        # Log ECS task info
-        health = self.task_manager.monitor_task_health()
-        if health.get('task_id'):
-            logger.info(f"[ECS Task {health['task_id']}] Processing task {self.processed_tasks + 1}")
-    
-    def on_task_complete(self, task: Dict[str, Any], duration: float, success: bool) -> None:
-        """Handle ECS task completion."""
-        self.processed_tasks += 1
-        
-        # Get current health and statistics
-        health = self.task_manager.monitor_task_health()
-        stats = self.task_manager.get_task_statistics()
-        
-        logger.info(f"[ECS Task] Processed {self.processed_tasks} tasks total")
-        logger.info(f"[ECS Task] Success rate: {stats.get('success_rate', 0):.1f}%")
-        
-        # Check if we should scale to zero based on queue state
-        settings = get_settings()
-        if hasattr(settings, 'sqs_queue_url') and settings.sqs_queue_url:
-            ready_to_scale = self.task_manager.scale_to_zero(settings.sqs_queue_url)
-            if ready_to_scale and self.processed_tasks > 0:  # Only scale to zero after processing at least one task
-                logger.info("Queue is empty and task completed - initiating scale to zero")
-                self.task_manager.initiate_graceful_shutdown("Queue empty - scaling to zero")
-    
-    def on_worker_error(self, error: Exception) -> None:
-        """Handle worker error in ECS context."""
-        # Signal task failure to ECS task manager
-        self.task_manager.signal_task_completion(success=False, reason=f"Worker error: {str(error)}")
-        logger.error(f"[ECS Task] Worker error reported to task manager: {str(error)}")
+# ECSTaskObserver removed - AMI-based scaling uses EventBridge Lambda functions instead of task managers
 
 class AWSWorker(Worker):
     """AWS-specific worker implementation with enhanced monitoring and ECS integration."""
@@ -190,28 +148,18 @@ class AWSWorker(Worker):
         super().__init__(queue)
         self.mode = mode
         
-        # Initialize ECS task manager for aws-prod
-        self.task_manager = None
-        if mode == "aws-prod":
-            try:
-                self.task_manager = get_task_manager()
-                logger.info("ECS task manager initialized")
-            except Exception as e:
-                logger.warning(f"Could not initialize ECS task manager: {e}")
-        
-        # Initialize observers based on mode
+        # Initialize observers based on mode (simplified - no task manager in AMI approach)
         if mode == "aws-mock":
             self.observers = observers or [LoggingObserver()]
         else:  # aws-prod
+            # Only CloudWatch and Logging observers for AMI-based deployment
             base_observers = [LoggingObserver(), CloudWatchObserver()]
-            if self.task_manager:
-                base_observers.append(ECSTaskObserver(self.task_manager))
             self.observers = observers or base_observers
         
         # Log initialization
         logger.info(f"AWS Worker initialized with enhanced monitoring (mode: {mode})")
-        if self.task_manager:
-            logger.info("ECS task lifecycle management enabled")
+        if mode == "aws-prod":
+            logger.info("AMI-based deployment - scaling handled by EventBridge Lambda functions")
         
         # Track continuous error count for health monitoring
         self.consecutive_errors = 0
@@ -283,63 +231,26 @@ class AWSWorker(Worker):
             self._check_memory_limits()
     
     async def listen_for_tasks(self) -> None:
-        """Enhanced task listening with ECS scale-to-zero support."""
-        if self.enable_scale_to_zero and self.task_manager:
-            logger.info("Starting ECS worker with scale-to-zero capability")
+        """AMI-based task listening - scaling handled externally by Lambda functions."""
+        logger.info("Starting AMI-based ECS worker")
+        logger.info("Scaling managed by EventBridge Lambda functions (external)")
         
-        # Call parent implementation but with ECS enhancements
+        # Call parent implementation
         await super().listen_for_tasks()
     
-    def _should_check_for_scale_to_zero(self) -> bool:
-        """Check if it's time to evaluate scale-to-zero."""
-        current_time = time.time()
-        if current_time - self.last_idle_check >= self.idle_check_interval:
-            self.last_idle_check = current_time
-            return True
-        return False
-    
-    async def _check_scale_to_zero_condition(self) -> bool:
-        """Check if worker should scale to zero based on queue state."""
-        if not self.enable_scale_to_zero or not self.task_manager:
-            return False
-        
-        try:
-            settings = get_settings()
-            if not hasattr(settings, 'sqs_queue_url') or not settings.sqs_queue_url:
-                return False
-            
-            # Check queue state for scale decision
-            scale_info = self.task_manager.check_queue_for_scale_decision(settings.sqs_queue_url)
-            
-            # Scale to zero if no messages and no in-flight processing
-            should_scale = (
-                scale_info.get('total_messages', 0) == 0 and
-                scale_info.get('in_flight_messages', 0) == 0
-            )
-            
-            if should_scale:
-                logger.info("Scale-to-zero condition met: queue is empty")
-                return True
-                
-            return False
-            
-        except Exception as e:
-            logger.warning(f"Error checking scale-to-zero condition: {e}")
-            return False
-    
-    def get_ecs_task_info(self) -> Optional[Dict[str, Any]]:
-        """Get current ECS task information."""
-        if not self.task_manager:
-            return None
-        
-        health = self.task_manager.monitor_task_health()
-        stats = self.task_manager.get_task_statistics()
+    def get_worker_info(self) -> Dict[str, Any]:
+        """Get current worker information for AMI-based deployment."""
+        import os
         
         return {
-            'task_health': health,
-            'task_statistics': stats,
+            'deployment_type': 'ami-based',
             'mode': self.mode,
-            'scale_to_zero_enabled': self.enable_scale_to_zero
+            'scaling_method': 'eventbridge-lambda',
+            'ami_deployment': os.getenv('AMI_BASED_DEPLOYMENT', 'false') == 'true',
+            'custom_ami': os.getenv('CUSTOM_AMI_ID', 'not-set'),
+            'observers': [type(obs).__name__ for obs in self.observers],
+            'consecutive_errors': self.consecutive_errors,
+            'max_consecutive_errors': self.max_consecutive_errors
         }
     
     def _report_health(self) -> None:

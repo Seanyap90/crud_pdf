@@ -76,10 +76,15 @@ def worker(mode, preload_models):
         except Exception as e:
             print(f"Warning: VLM model loading failed: {e}")
     
-    # Create worker (use standard Worker for all modes)
-    from vlm_workers.worker import Worker
-    worker_instance = Worker(queue)
-    print(f"Worker initialized for {settings.deployment_mode} mode")
+    # Create worker based on deployment mode
+    if mode == "aws-prod":
+        from vlm_workers.aws_worker import AWSWorker
+        worker_instance = AWSWorker(queue, mode=mode)
+        print(f"AWS Worker initialized for {settings.deployment_mode} mode (AMI-based)")
+    else:
+        from vlm_workers.worker import Worker
+        worker_instance = Worker(queue)
+        print(f"Standard Worker initialized for {settings.deployment_mode} mode")
     
     try:
         # Run worker
@@ -180,71 +185,40 @@ def show_worker_config():
             print(f"  Local loader info unavailable: {e}")
 
 @cli.command()
-@click.option("--scale", default=1, help="Number of worker replicas to simulate")
-def simulate_scaling(scale):
-    """Simulate auto-scaling for testing (aws-mock mode)"""
+def show_scaling_info():
+    """Show scaling information for current deployment mode"""
     settings = get_settings()
     
-    if settings.deployment_mode not in ["aws-mock", "aws-prod"]:
-        print("❌ Scaling simulation only available in aws-mock or aws-prod mode")
-        return
+    print(f"🔧 Scaling Information ({settings.deployment_mode} mode)")
     
-    print(f"Simulating scaling to {scale} worker replicas...")
+    if settings.deployment_mode == "aws-mock":
+        print("📋 AWS Mock Mode:")
+        print("  • Uses Docker Compose for local development")
+        print("  • No auto-scaling capability (single GPU constraint)")
+        print("  • Use 'docker-compose up' to start services")
+        print("  • Use 'docker-compose logs' to view logs")
     
-    try:
-        from vlm_workers.scaling.auto_scaler import get_task_manager
-        
-        task_manager = get_task_manager()
-        result = task_manager.simulate_scaling(desired_count=scale)
-        
-        if result:
-            print(f"✅ Scaling simulation completed: {scale} replicas")
-            
-            # Show scaling history
-            history = task_manager.get_scaling_history()
-            if history:
-                print("\n📊 Recent scaling events:")
-                for event in history[-3:]:  # Show last 3 events
-                    print(f"  {event['timestamp']}: {event['desired_count']} replicas ({event['service']})")
-        else:
-            print("❌ Scaling simulation failed")
-            
-    except Exception as e:
-        print(f"❌ Scaling simulation error: {e}")
-
-@cli.command()
-def show_scaling_status():
-    """Show current scaling status and history"""
-    settings = get_settings()
+    elif settings.deployment_mode == "aws-prod":
+        print("📋 AWS Production Mode:")
+        print("  • Uses AMI-based ECS tasks with EventBridge scaling")
+        print("  • Scaling controlled by Lambda functions (external)")
+        print("  • Scale-out: Start stopped instances (desired 0→2)")
+        print("  • Scale-in: Stop instances but keep desired=2")
+        print("  • Check AWS CloudWatch for task metrics")
     
-    try:
-        from vlm_workers.scaling.auto_scaler import get_task_manager
-        
-        task_manager = get_task_manager()
-        
-        print(f"🔧 Scaling Status ({settings.deployment_mode} mode)")
-        print(f"Cluster: {task_manager.cluster_name}")
-        print(f"Service: {task_manager.service_name or 'docker-compose'}")
-        
-        # Show task statistics
-        stats = task_manager.get_task_statistics()
-        print(f"\n📈 Task Statistics:")
-        print(f"  Active tasks: {stats['active_tasks']}")
-        print(f"  Completed tasks: {stats['completed_tasks']}")
-        print(f"  Failed tasks: {stats['failed_tasks']}")
-        print(f"  Success rate: {stats['success_rate']:.1f}%")
-        
-        # Show scaling history
-        history = task_manager.get_scaling_history()
-        if history:
-            print(f"\n📊 Scaling History ({len(history)} events):")
-            for event in history[-5:]:  # Show last 5 events
-                print(f"  {event['timestamp']}: {event['desired_count']} replicas")
-        else:
-            print("\n📊 No scaling events recorded")
-            
-    except Exception as e:
-        print(f"❌ Error getting scaling status: {e}")
+    elif settings.deployment_mode == "local-dev":
+        print("📋 Local Development Mode:")
+        print("  • Single worker instance for development")
+        print("  • No scaling functionality")
+        print("  • Models loaded on-demand")
+    
+    else:
+        print(f"❓ Unknown deployment mode: {settings.deployment_mode}")
+    
+    print(f"\n⚙️  Configuration:")
+    print(f"  • S3 Bucket: {settings.s3_bucket_name}")
+    print(f"  • SQS Queue: {settings.sqs_queue_name}")
+    print(f"  • AWS Region: {settings.aws_region}")
 
 if __name__ == "__main__":
     cli()
