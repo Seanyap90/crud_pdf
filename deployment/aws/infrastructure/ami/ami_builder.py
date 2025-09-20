@@ -109,7 +109,11 @@ class AMIBuilder:
         try:
             # Ensure SSH key exists
             ssh_key_name = self.ssh_manager.ensure_ssh_key()
-            
+
+            # Add AWS eventual consistency delay for SSH key propagation
+            logger.info("Waiting for SSH key pair propagation...")
+            time.sleep(10)  # Give AWS time to propagate the key pair
+
             # Create IAM instance profile for ECR access
             instance_profile_arn = self._ensure_build_instance_profile()
             
@@ -117,8 +121,16 @@ class AMIBuilder:
             root_device_name = self._get_ami_root_device_name(base_ami_id)
             
             # User data script for model preloading
-            user_data = self._generate_user_data_script()
-            
+            user_data_script = self._generate_user_data_script()
+
+            # Base64 encode user data as required by AWS API
+            import base64
+            user_data = base64.b64encode(user_data_script.encode('utf-8')).decode('utf-8')
+
+            # Verify user data size is within AWS limits (16KB)
+            if len(user_data_script) > 15000:  # Leave some buffer
+                logger.warning(f"User data script is {len(user_data_script)} bytes - approaching AWS 16KB limit")
+
             # Launch instance
             response = self.ec2.run_instances(
                 ImageId=base_ami_id,
@@ -136,7 +148,7 @@ class AMIBuilder:
                     {
                         'DeviceName': root_device_name,
                         'Ebs': {
-                            'VolumeSize': 100,  # 100GB for models + OS
+                            'VolumeSize': 80,  # 100GB for models + OS
                             'VolumeType': 'gp3',
                             'DeleteOnTermination': True
                         }
@@ -162,7 +174,96 @@ class AMIBuilder:
         except Exception as e:
             logger.error(f"Failed to create build instance: {e}")
             raise
-    
+
+    def _cleanup_existing_build_instances(self, profile_name: str) -> None:
+        """Clean up any existing instances using the build instance profile."""
+        try:
+            logger.info(f"Searching for instances using IAM instance profile: {profile_name}")
+
+            # Get ALL running/stopped instances (don't filter by tags initially)
+            response = self.ec2.describe_instances(
+                Filters=[
+                    {'Name': 'instance-state-name', 'Values': ['running', 'pending', 'stopping', 'stopped']}
+                ]
+            )
+
+            instances_to_terminate = []
+            instances_to_stop = []
+
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    # Check if instance is using our IAM instance profile
+                    if 'IamInstanceProfile' in instance:
+                        iam_arn = instance['IamInstanceProfile'].get('Arn', '')
+                        if profile_name in iam_arn:
+                            instance_id = instance['InstanceId']
+                            state = instance['State']['Name']
+
+                            # Get instance name from tags
+                            instance_name = "Unknown"
+                            for tag in instance.get('Tags', []):
+                                if tag['Key'] == 'Name':
+                                    instance_name = tag['Value']
+                                    break
+
+                            logger.warning(f"Found instance using profile: {instance_id} ({instance_name}) - State: {state}")
+
+                            if state in ['running', 'pending']:
+                                instances_to_terminate.append(instance_id)
+                            elif state == 'stopped':
+                                instances_to_terminate.append(instance_id)
+                            elif state == 'stopping':
+                                # Wait for it to stop, then terminate
+                                instances_to_stop.append(instance_id)
+
+            # Wait for stopping instances to complete stopping
+            if instances_to_stop:
+                logger.info(f"Waiting for {len(instances_to_stop)} instances to finish stopping...")
+                try:
+                    waiter = self.ec2.get_waiter('instance_stopped')
+                    waiter.wait(
+                        InstanceIds=instances_to_stop,
+                        WaiterConfig={'Delay': 10, 'MaxAttempts': 30}
+                    )
+                    instances_to_terminate.extend(instances_to_stop)
+                except Exception as e:
+                    logger.warning(f"Timeout waiting for instances to stop: {e}")
+                    instances_to_terminate.extend(instances_to_stop)  # Try to terminate anyway
+
+            if instances_to_terminate:
+                logger.info(f"Terminating {len(instances_to_terminate)} instances using profile {profile_name}")
+
+                # Terminate instances
+                try:
+                    self.ec2.terminate_instances(InstanceIds=instances_to_terminate)
+                    logger.info("Termination initiated successfully")
+                except Exception as e:
+                    logger.error(f"Failed to initiate termination: {e}")
+                    raise
+
+                # Wait for termination to complete with longer timeout
+                logger.info("Waiting for instance termination to complete (up to 10 minutes)...")
+                try:
+                    waiter = self.ec2.get_waiter('instance_terminated')
+                    waiter.wait(
+                        InstanceIds=instances_to_terminate,
+                        WaiterConfig={'Delay': 30, 'MaxAttempts': 20}  # 10 minutes total
+                    )
+                    logger.info("✅ All instances terminated successfully")
+
+                    # Additional wait to ensure IAM cleanup
+                    logger.info("Waiting additional 30 seconds for IAM cleanup...")
+                    time.sleep(30)
+
+                except Exception as e:
+                    logger.warning(f"Timeout waiting for termination, but continuing: {e}")
+            else:
+                logger.info("No instances found using the IAM instance profile")
+
+        except Exception as e:
+            logger.error(f"Error during cleanup of existing build instances: {e}")
+            raise  # Don't continue if cleanup fails
+
     def _ensure_build_instance_profile(self) -> str:
         """Create or get IAM instance profile for build instance."""
         role_name = f"{self.app_name}-ami-build-role"
@@ -213,15 +314,32 @@ class AMIBuilder:
             except ClientError as e:
                 if e.response['Error']['Code'] != 'EntityAlreadyExists':
                     raise
-            
+
             # Add role to instance profile
             try:
                 self.iam.add_role_to_instance_profile(
                     InstanceProfileName=profile_name,
                     RoleName=role_name
                 )
+                logger.info(f"Added role {role_name} to instance profile {profile_name}")
             except ClientError as e:
-                if e.response['Error']['Code'] != 'EntityAlreadyExists':
+                if e.response['Error']['Code'] == 'LimitExceeded':
+                    logger.warning(f"Instance profile quota exceeded, cleaning up existing instances...")
+                    # Clean up existing instances and try again
+                    self._cleanup_existing_build_instances(profile_name)
+                    time.sleep(5)  # Give AWS time to process the cleanup
+
+                    # Try adding role to profile again
+                    try:
+                        self.iam.add_role_to_instance_profile(
+                            InstanceProfileName=profile_name,
+                            RoleName=role_name
+                        )
+                        logger.info(f"Successfully added role {role_name} to instance profile after cleanup")
+                    except ClientError as retry_e:
+                        logger.error(f"Still failed after cleanup: {retry_e}")
+                        raise
+                elif e.response['Error']['Code'] != 'EntityAlreadyExists':
                     logger.warning(f"Role may already be in profile: {e}")
             
             # Add IAM eventual consistency delay
@@ -287,12 +405,23 @@ fi
 # Ensure Docker is running
 systemctl start docker 2>/dev/null || service docker start
 
+# Install prerequisites for AWS CLI
+echo "$(date): Installing prerequisites..."
+yum install -y curl unzip
+
 # Install AWS CLI v2 if not present
 if ! command -v aws &> /dev/null; then
     echo "$(date): Installing AWS CLI v2..."
     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
     cd /tmp && unzip -q awscliv2.zip
     ./aws/install
+
+    # Update PATH for current session and future logins
+    echo 'export PATH=$PATH:/usr/local/bin' >> ~/.bashrc
+    export PATH=$PATH:/usr/local/bin
+
+    # Verify installation
+    /usr/local/bin/aws --version
 else
     echo "$(date): AWS CLI already installed"
 fi
@@ -304,7 +433,7 @@ chown ec2-user:ec2-user /opt/vlm-models
 
 # Login to ECR
 echo "$(date): Logging in to ECR..."
-aws ecr get-login-password --region {self.region} | docker login --username AWS --password-stdin {ecr_repo}
+/usr/local/bin/aws ecr get-login-password --region {self.region} | docker login --username AWS --password-stdin {ecr_repo}
 
 # Pull the VLM worker image
 echo "$(date): Pulling VLM worker image..."
@@ -312,44 +441,21 @@ docker pull {image_uri}
 
 # Run container to preload models to host filesystem
 echo "$(date): Starting model preloading..."
-docker run --rm \\
+docker run \\
+    --network host \\
+    --user root \\
+    --name vlm-model-preloader \\
+    --rm \\
     --gpus all \\
     -v /opt/vlm-models:/app/cache \\
     -e PRELOAD_MODELS=true \\
     -e MODEL_CACHE_DIR=/app/cache \\
-    -e HF_HUB_CACHE=/app/cache/huggingface \\
     -e TRANSFORMERS_CACHE=/app/cache/huggingface/transformers \\
-    {image_uri} python -c "
-import sys
-import os
-import json
-from pathlib import Path
-sys.path.append('/app')
-from src.vlm_workers.models.manager import get_model_manager
-
-print('Starting model preloading...')
-manager = get_model_manager()
-
-try:
-    # Preload VLM models
-    print('Loading VLM models...')
-    vlm_model, vlm_processor = manager.get_vlm_model()
-    print('✅ VLM models loaded successfully')
-except Exception as e:
-    print(f'❌ VLM model loading failed: {{e}}')
-    sys.exit(1)  # Exit with error if VLM models fail
-
-try:
-    # Preload RAG models  
-    print('Loading RAG models...')
-    rag_model = manager.get_rag_model()
-    print('✅ RAG models loaded successfully')
-except Exception as e:
-    print(f'❌ RAG model loading failed: {{e}}')
-    sys.exit(1)  # Exit with error if RAG models fail
-
-print('Model preloading complete!')
-"
+    -e HF_HOME=/app/cache/huggingface \\
+    -e HF_HUB_OFFLINE=0 \\
+    -e CUDA_VISIBLE_DEVICES=0 \\
+    {image_uri} \\
+    python3 -m vlm_workers.models.downloader
 
 # Set proper permissions
 echo "$(date): Setting permissions..."
@@ -358,7 +464,7 @@ chmod -R 755 /opt/vlm-models
 
 # Verify model files exist and validate download success
 echo "$(date): Verifying model downloads..."
-MODEL_FILES_COUNT=$(find /opt/vlm-models -type f \( -name "*.bin" -o -name "*.safetensors" -o -name "*.json" \) | wc -l)
+MODEL_FILES_COUNT=$(find /opt/vlm-models -type f \\( -name "*.bin" -o -name "*.safetensors" -o -name "*.json" \\) | wc -l)
 MODEL_SIZE=$(du -sh /opt/vlm-models 2>/dev/null | cut -f1 || echo "unknown")
 
 echo "$(date): Found $MODEL_FILES_COUNT model files, total size: $MODEL_SIZE"
@@ -368,8 +474,36 @@ if [ $MODEL_FILES_COUNT -lt 10 ]; then
     echo "$(date): ERROR - Only $MODEL_FILES_COUNT model files found, expected at least 10"
     echo "$(date): Model download may have failed - check logs above"
     exit 1
+fi
+
+# Verify specific required models are present
+echo "$(date): Checking for required models..."
+COLPALI_FOUND=false
+SMOLVLM_FOUND=false
+
+# Check for ColPali model
+if find /opt/vlm-models -path "*colpali*" -name "*.safetensors" | grep -q .; then
+    COLPALI_FOUND=true
+    echo "$(date): ✅ ColPali model found"
 else
-    echo "$(date): SUCCESS - Model download completed with $MODEL_FILES_COUNT files"
+    echo "$(date): ❌ ColPali model NOT found"
+fi
+
+# Check for SmolVLM model
+if find /opt/vlm-models -path "*smolvlm*" -name "*.safetensors" | grep -q .; then
+    SMOLVLM_FOUND=true
+    echo "$(date): ✅ SmolVLM model found"
+else
+    echo "$(date): ❌ SmolVLM model NOT found"
+fi
+
+# Validate both required models are present
+if [ "$COLPALI_FOUND" = false ] || [ "$SMOLVLM_FOUND" = false ]; then
+    echo "$(date): ERROR - Required models missing. Both ColPali and SmolVLM are required."
+    echo "$(date): Model download appears incomplete - check logs above"
+    exit 1
+else
+    echo "$(date): SUCCESS - All required models downloaded ($MODEL_FILES_COUNT files, $MODEL_SIZE total)"
 fi
 
 # Create completion marker

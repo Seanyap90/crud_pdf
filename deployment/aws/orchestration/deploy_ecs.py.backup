@@ -589,6 +589,235 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             raise
 
 
+def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> None:
+        """Prepare and push Docker image to ECR."""
+        docker_image_path = docker_image_path or "deployment/docker/vlm-worker"
+        
+        if self.mode == "aws-mock":
+            logger.info("Skipping ECR for mock mode")
+            self.ecr_uri = "mock-image:latest"
+            return self
+        
+        # ECR operations for production
+        ecr_client = get_ecr_client()
+        
+        try:
+            # Create ECR repository if it doesn't exist
+            try:
+                ecr_client.create_repository(repositoryName=ECR_REPO_NAME)
+                logger.info(f"Created ECR repository: {ECR_REPO_NAME}")
+            except ecr_client.exceptions.RepositoryAlreadyExistsException:
+                logger.info(f"ECR repository already exists: {ECR_REPO_NAME}")
+            
+            # Get ECR login token
+            token_response = ecr_client.get_authorization_token()
+            token_data = token_response['authorizationData'][0]
+            
+            # Build ECR URI
+            account_id = token_data['proxyEndpoint'].split('.')[0].split('//')[-1]
+            self.ecr_uri = f"{account_id}.dkr.ecr.{DEFAULT_REGION}.amazonaws.com/{ECR_REPO_NAME}:latest"
+            
+            # Check if image already exists
+            if self._check_image_exists(ecr_client):
+                logger.info(f"✅ Using existing ECR image: {self.ecr_uri}")
+            else:
+                logger.info(f"📦 Building and pushing new ECR image: {self.ecr_uri}")
+                # Docker build and push operations
+                self._build_and_push_image(docker_image_path, token_data)
+            
+            logger.info(f"ECR image ready: {self.ecr_uri}")
+            
+        except Exception as e:
+            logger.error(f"ECR preparation failed: {e}")
+            raise
+        
+        return self
+    
+    def _check_ecr_repository_exists(self, ecr_client) -> bool:
+        """Check if ECR repository exists."""
+        try:
+            ecr_client.describe_repositories(repositoryNames=[ECR_REPO_NAME])
+            logger.info(f"ECR repository '{ECR_REPO_NAME}' exists")
+            return True
+        except ecr_client.exceptions.RepositoryNotFoundException:
+            logger.info(f"ECR repository '{ECR_REPO_NAME}' does not exist - will create")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check ECR repository: {e}")
+            return False
+    
+    def _ensure_ecr_repository_and_image(self) -> bool:
+        """Ensure ECR repository exists and has the required image."""
+        ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+        
+        # Step 1: Check if repository exists
+        if not self._check_ecr_repository_exists(ecr_client):
+            logger.info("Creating ECR repository...")
+            self._create_ecr_repository(ecr_client)
+        
+        # Step 2: Check if image exists in repository
+        if self._check_image_exists(ecr_client):
+            logger.info("✅ ECR image validation successful - using existing image")
+            return True
+        
+        # Step 3: Build and push image if not found
+        logger.info("📦 ECR image not found - building and pushing new image")
+        self._build_and_push_ecr_image()
+        
+        # Step 4: Verify image was pushed successfully
+        if self._check_image_exists(ecr_client):
+            logger.info("✅ ECR image build and push successful")
+            return True
+        else:
+            logger.error("❌ ECR image build/push failed - image still not found")
+            return False
+    
+    def _create_ecr_repository(self, ecr_client) -> None:
+        """Create ECR repository if it doesn't exist."""
+        try:
+            ecr_client.create_repository(
+                repositoryName=ECR_REPO_NAME,
+                imageScanningConfiguration={'scanOnPush': True},
+                tags=[
+                    {'Key': 'Project', 'Value': self.settings.app_name},
+                    {'Key': 'Component', 'Value': 'VLM-Worker'},
+                    {'Key': 'Purpose', 'Value': 'Container-Registry'}
+                ]
+            )
+            logger.info(f"Created ECR repository: {ECR_REPO_NAME}")
+        except ecr_client.exceptions.RepositoryAlreadyExistsException:
+            logger.info(f"ECR repository {ECR_REPO_NAME} already exists")
+        except Exception as e:
+            logger.error(f"Failed to create ECR repository: {e}")
+            raise
+    
+    def _build_and_push_ecr_image(self) -> None:
+        """Build and push Docker image to ECR with proper error handling."""
+        try:
+            # Get ECR login token
+            ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+            token_response = ecr_client.get_authorization_token()
+            token_data = token_response['authorizationData'][0]
+            
+            # Find Docker path (VLM worker)
+            docker_image_path = self._find_docker_path()
+            
+            # Build and push image
+            self._build_and_push_image(docker_image_path, token_data)
+            
+        except Exception as e:
+            logger.error(f"ECR build and push failed: {e}")
+            raise
+    
+    def _find_docker_path(self) -> str:
+        """Find the Docker image path for VLM worker."""
+        from pathlib import Path
+        
+        # Look for VLM worker Dockerfile in the correct location
+        project_root = Path(__file__).parent.parent.parent.parent
+        vlm_docker_path = project_root / "deployment" / "docker" / "vlm-worker"
+        
+        if (vlm_docker_path / "Dockerfile").exists():
+            logger.info(f"Found VLM Dockerfile at: {vlm_docker_path}")
+            return str(vlm_docker_path)
+        else:
+            # Fallback: try the old location in case project structure varies
+            fallback_path = project_root / "src" / "files_api" / "vlm"
+            if (fallback_path / "Dockerfile").exists():
+                logger.info(f"Found VLM Dockerfile at fallback location: {fallback_path}")
+                return str(fallback_path)
+            
+            raise Exception(f"VLM Dockerfile not found at: {vlm_docker_path} or {fallback_path}")
+    
+    def _check_image_exists(self, ecr_client) -> bool:
+        """Check if ECR image already exists."""
+        try:
+            response = ecr_client.describe_images(
+                repositoryName=ECR_REPO_NAME,
+                imageIds=[{'imageTag': 'latest'}]
+            )
+            images = response.get('imageDetails', [])
+            if images:
+                image_size_mb = images[0].get('imageSizeInBytes', 0) / (1024 * 1024)
+                logger.info(f"Found existing image: {image_size_mb:.1f} MB, pushed {images[0].get('imagePushedAt', 'unknown time')}")
+                return True
+            return False
+        except ecr_client.exceptions.ImageNotFoundException:
+            logger.info("No existing image found - will build new one")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check for existing image: {e} - will build new one")
+            return False
+    
+    def _build_and_push_image(self, docker_path: str, token_data: Dict[str, Any]) -> None:
+        """Build and push Docker image to ECR."""
+        import base64
+        import os
+        
+        # Decode ECR token
+        token = base64.b64decode(token_data['authorizationToken']).decode('utf-8')
+        username, password = token.split(':')
+        
+        # Docker login
+        subprocess.run([
+            "docker", "login", "--username", username, "--password-stdin",
+            token_data['proxyEndpoint']
+        ], input=password.encode(), check=True)
+        
+        # Get the project root directory (where src/ directory exists)
+        current_dir = os.getcwd()
+        project_root = current_dir
+        
+        # If we're not in the project root, find it
+        while not os.path.exists(os.path.join(project_root, "src")):
+            parent = os.path.dirname(project_root)
+            if parent == project_root:  # Reached filesystem root
+                raise Exception("Could not find project root (directory containing 'src' folder)")
+            project_root = parent
+        
+        # Build image from project root
+        subprocess.run([
+            "docker", "build", "-t", self.ecr_uri, "-f", f"{docker_path}/Dockerfile", "."
+        ], check=True, cwd=project_root)
+        
+        # Push image
+        subprocess.run([
+            "docker", "push", self.ecr_uri
+        ], check=True)
+        
+        logger.info(f"Pushed image to ECR: {self.ecr_uri}")
+    
+    @log_operation("S3 and SQS setup")
+    def setup_supporting_services(self) -> 'ECSDeploymentBuilder':
+        """Set up S3 bucket and SQS queue."""
+        if self.mode == "aws-mock":
+            logger.info("Skipping S3/SQS setup for mock mode")
+            return self
+        
+        # Create S3 bucket
+        if create_s3_bucket(S3_BUCKET_NAME):
+            logger.info(f"S3 bucket ready: {S3_BUCKET_NAME}")
+        
+        # Create SQS queue
+        queue_url = create_sqs_queue(SQS_QUEUE_NAME)
+        if queue_url:
+            queue_arn = get_queue_arn(queue_url)
+            # Update settings with queue info
+            settings.sqs_queue_url = queue_url
+            settings.sqs_queue_arn = queue_arn
+            logger.info(f"SQS queue ready: {SQS_QUEUE_NAME}")
+        
+        return self
+    
+    @log_operation("ECS infrastructure deployment")
+    def deploy(self) -> Dict[str, Any]:
+        """Execute the deployment strategy."""
+        self.strategy.setup_clients()
+        
+        if self.hybrid_console and hasattr(self.strategy, 'deploy_hybrid_console_code'):
+            return self.strategy.deploy_hybrid_console_code()
+        else:
+            return self.strategy.deploy()
 
 def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> None:
     """Export infrastructure configuration to environment file for docker-compose."""
@@ -621,7 +850,7 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
             f"PUBLIC_SUBNET_ID={result['vpc']['public_subnet_id']}",
             "",
             f"# AMI Configuration (Models pre-loaded)",
-            f"CUSTOM_AMI_ID={os.environ.get('CUSTOM_AMI_ID', 'N/A')}",
+            f"CUSTOM_AMI_ID={result['ami']['ami_id'] if 'ami' in result else 'N/A'}",
             f"MODEL_PATH=/opt/vlm-models",
             "",
             f"# S3 and SQS Configuration", 
@@ -711,8 +940,14 @@ def main():
                        help="Deployment mode")
     parser.add_argument("--cleanup", action="store_true", 
                        help="Clean up deployment instead of deploying")
+    parser.add_argument("--docker-path", default="deployment/docker/vlm-worker",
+                       help="Path to Docker build context")
+    parser.add_argument("--deploy-services", action="store_true",
+                       help="Deploy ECS services (full deployment with containers)")
     parser.add_argument("--hybrid-console", action="store_true",
                        help="Deploy using hybrid console+code approach")
+    parser.add_argument("--export-config", default=".env.aws-prod",
+                       help="File to export infrastructure configuration")
     parser.add_argument("--validate-only", action="store_true",
                        help="Only validate console infrastructure, don't deploy")
     
@@ -754,21 +989,25 @@ def main():
             
             sys.exit(result.returncode)
         
-        # Execute deployment with direct strategy instantiation
-        if args.mode == "aws-mock":
-            strategy = MockECSStrategy()
-            strategy.setup_clients()
-            result = strategy.deploy()
-        elif args.mode == "aws-prod":
-            strategy = ProductionECSStrategy()
-            strategy.setup_clients()
-            if args.hybrid_console:
-                logger.info("Using hybrid console+code deployment approach")
-                result = strategy.deploy_hybrid_console_code()
-            else:
-                raise ValueError("aws-prod mode requires --hybrid-console flag")
+        # Execute deployment
+        builder = ECSDeploymentBuilder(args.mode, args.hybrid_console)
+        
+        # Choose deployment type based on flags
+        if args.hybrid_console:
+            # Hybrid console+code deployment
+            logger.info("Using hybrid console+code deployment approach")
+            result = builder.deploy()
+        elif args.deploy_services:
+            # Full deployment with ECR images and task definitions
+            result = (builder
+                     .setup_supporting_services()
+                     .prepare_ecr_image(args.docker_path)
+                     .deploy())
         else:
-            raise ValueError(f"Unsupported deployment mode: {args.mode}")
+            # Default: infrastructure only for backward compatibility
+            result = (builder
+                     .setup_supporting_services()
+                     .deploy())
         
         # Output deployment summary
         print(json.dumps(result, indent=2, default=str))
@@ -784,18 +1023,14 @@ def main():
                 if result.get('mode') == 'hybrid-console-code':
                     print(f"Console VPC: {result['console_resources']['validated_resources']['vpc']['vpc_id']}")
                     # EFS removed in AMI-based architecture
-                    if 'lambda' in result:
-                        print(f"Lambda Function: {result['lambda']['function_name']}")
-                        if 'function_url' in result['lambda']:
-                            print(f"Function URL: {result['lambda']['function_url']}")
-                    else:
-                        print("Lambda deployment: Not included in hybrid deployment (handled separately)")
+                    print(f"Lambda Function: {result['lambda']['function_name']}")
+                    if 'function_url' in result['lambda']:
+                        print(f"Function URL: {result['lambda']['function_url']}")
                 else:
                     print(f"VPC ID: {result['vpc']['vpc_id']}")
                     print(f"Database Server: {result['database']['instance_id']} at {result['database']['private_ip']}:8080")
-                    custom_ami_id = os.environ.get('CUSTOM_AMI_ID')
-                    if custom_ami_id and custom_ami_id != 'N/A':
-                        print(f"Custom AMI: {custom_ami_id} (models pre-loaded)")
+                    if 'ami' in result:
+                        print(f"Custom AMI: {result['ami']['ami_id']} (models pre-loaded)")
                     
                     # Note: infrastructure-only mode removed in streamlined architecture
         else:

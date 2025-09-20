@@ -129,16 +129,22 @@ def wait_for_container_instances(cluster, max_wait=60):
     return False
 
 def launch_tasks(cluster, task_def, count):
-    """Launch ECS tasks - they'll queue in PENDING state until instances ready"""
+    """Launch ECS tasks with 1:1 instance constraint - they'll queue in PENDING state until instances ready"""
     if count <= 0:
         return {"launched": 0, "failures": 0, "success": True}
     
     try:
+        logger.info(f"🚀 Launching {count} ECS tasks with distinctInstance constraint (1:1 ratio)")
         response = ecs.run_task(
             cluster=cluster,
             taskDefinition=task_def,
             count=count,
-            launchType='EC2'
+            launchType='EC2',
+            placementConstraints=[
+                {
+                    'type': 'distinctInstance'  # Ensure 1:1 task-to-instance ratio
+                }
+            ]
         )
         
         launched = len(response.get('tasks', []))

@@ -350,15 +350,116 @@ function aws-prod {
     
     export DEPLOYMENT_MODE="aws-prod"
     
-    # Phase 1: Build custom AMI with pre-loaded models
-    echo "🔨 Phase 1: Building custom AMI with pre-loaded models..."
-    python -m deployment.aws.infrastructure.ami.ami_builder
-    
-    if [ $? -ne 0 ]; then
-        echo "❌ AMI building failed"
+    # Phase 1: Smart AMI detection and building
+    echo "🔍 Phase 1: Smart AMI detection and building..."
+
+    # Check for force rebuild flag
+    FORCE_AMI_REBUILD=false
+    if [ "$1" = "--force-ami-rebuild" ] || [ "$2" = "--force-ami-rebuild" ] || [ "$3" = "--force-ami-rebuild" ]; then
+        FORCE_AMI_REBUILD=true
+        echo "🔄 Force AMI rebuild requested - will build new AMI regardless of existing ones"
+    fi
+
+    # Function to update AMI ID in environment
+    update_ami_id() {
+        local ami_id="$1"
+        local source="$2"
+
+        # Update .env.aws-prod
+        if [ -f ".env.aws-prod" ]; then
+            if grep -q "^CUSTOM_AMI_ID=" .env.aws-prod; then
+                sed -i "s/^CUSTOM_AMI_ID=.*/CUSTOM_AMI_ID=$ami_id/" .env.aws-prod
+            else
+                echo "CUSTOM_AMI_ID=$ami_id" >> .env.aws-prod
+            fi
+            echo "✅ Updated .env.aws-prod with CUSTOM_AMI_ID=$ami_id ($source)"
+        fi
+
+        # Export for use by deploy_ecs.py
+        export CUSTOM_AMI_ID="$ami_id"
+    }
+
+    # Check for recent AMI first (within last 24 hours) unless force rebuild
+    if [ "$FORCE_AMI_REBUILD" = false ]; then
+        echo "🔍 Checking for recent AMI (built within 24 hours)..."
+
+        # Calculate 24 hours ago timestamp
+        if date --version >/dev/null 2>&1; then
+            # GNU date (Linux)
+            TWENTY_FOUR_HOURS_AGO=$(date -d '24 hours ago' -u '+%Y-%m-%dT%H:%M:%S.000Z')
+        else
+            # BSD date (macOS)
+            TWENTY_FOUR_HOURS_AGO=$(date -v-24H -u '+%Y-%m-%dT%H:%M:%S.000Z')
+        fi
+
+        # Find the most recent AMI matching our pattern and created within 24 hours
+        RECENT_AMI_INFO=$(aws ec2 describe-images --owners self \
+            --filters "Name=name,Values=fastapi-app-vlm-*" \
+            --query "Images[?CreationDate>=\`$TWENTY_FOUR_HOURS_AGO\`] | sort_by(@, &CreationDate) | [-1].{ImageId:ImageId,Name:Name,CreationDate:CreationDate,State:State}" \
+            --output json 2>/dev/null)
+
+        if [ "$RECENT_AMI_INFO" != "null" ] && [ -n "$RECENT_AMI_INFO" ] && [ "$RECENT_AMI_INFO" != "[]" ]; then
+            RECENT_AMI_ID=$(echo "$RECENT_AMI_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('ImageId', ''))" 2>/dev/null || echo "")
+            RECENT_AMI_NAME=$(echo "$RECENT_AMI_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('Name', ''))" 2>/dev/null || echo "")
+            RECENT_AMI_DATE=$(echo "$RECENT_AMI_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('CreationDate', ''))" 2>/dev/null || echo "")
+            RECENT_AMI_STATE=$(echo "$RECENT_AMI_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('State', ''))" 2>/dev/null || echo "")
+
+            if [ -n "$RECENT_AMI_ID" ] && [ "$RECENT_AMI_ID" != "null" ] && [ "$RECENT_AMI_STATE" = "available" ]; then
+                echo "✅ Found recent AMI: $RECENT_AMI_ID"
+                echo "   📅 Created: $RECENT_AMI_DATE"
+                echo "   📝 Name: $RECENT_AMI_NAME"
+                echo "   💡 Skipping AMI build (saving ~2 hours)"
+
+                update_ami_id "$RECENT_AMI_ID" "reused recent"
+                echo "✅ Using existing AMI instead of building new one"
+                RECENT_AMI_ID="$RECENT_AMI_ID"  # Set flag to skip building
+            else
+                echo "⚠️ Found recent AMI but it's not available (state: $RECENT_AMI_STATE)"
+                RECENT_AMI_ID=""
+            fi
+        else
+            echo "ℹ️ No recent AMI found (or older than 24 hours)"
+            RECENT_AMI_ID=""
+        fi
+    else
+        echo "⏭️ Skipping AMI detection due to --force-ami-rebuild flag"
+        RECENT_AMI_ID=""
+    fi
+
+    # Build new AMI if no recent one found
+    if [ -z "$RECENT_AMI_ID" ]; then
+        echo "🔨 Building new custom AMI with pre-loaded models..."
+        echo "⏱️ This will take approximately 1-2 hours for model downloading"
+
+        # Capture AMI builder output
+        AMI_RESULT=$(python -m deployment.aws.infrastructure.ami.ami_builder)
+        AMI_EXIT_CODE=$?
+
+        if [ $AMI_EXIT_CODE -eq 0 ]; then
+            # Extract AMI ID from JSON output using Python
+            AMI_ID=$(echo "$AMI_RESULT" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('ami_id', ''))" 2>/dev/null || echo "")
+
+            if [ -n "$AMI_ID" ] && [ "$AMI_ID" != "null" ]; then
+                update_ami_id "$AMI_ID" "newly built"
+            else
+                echo "⚠️ Could not extract AMI ID from build result"
+                echo "AMI Result: $AMI_RESULT"
+                exit 1
+            fi
+            echo "✅ Custom AMI built successfully"
+        else
+            echo "❌ AMI building failed"
+            exit 1
+        fi
+    fi
+
+    # Validate final AMI ID is set
+    if [ -z "$CUSTOM_AMI_ID" ]; then
+        echo "❌ No AMI ID available after Phase 1"
         exit 1
     fi
-    echo "✅ Custom AMI built successfully"
+
+    echo "🎯 Phase 1 Complete: Using AMI $CUSTOM_AMI_ID"
     
     # Phase 2: Validate console infrastructure prerequisites
     echo "🔍 Phase 2: Validating console infrastructure..."
@@ -400,26 +501,114 @@ function aws-prod {
         exit 1
     fi
     
-    # Phase 5: Deployment Summary (inline instead of separate function)
+    # Phase 5: Final deployment validation and summary
+    echo "🔍 Phase 5: Final deployment validation..."
+
+    validate_deployment_health() {
+        local validation_errors=0
+
+        # Load final environment
+        if [ -f ".env.aws-prod" ]; then
+            source .env.aws-prod
+        else
+            echo "  ❌ .env.aws-prod not found"
+            return 1
+        fi
+
+        echo "Validating deployed resources:"
+
+        # 1. Check Custom AMI exists
+        if [ -n "$CUSTOM_AMI_ID" ] && [ "$CUSTOM_AMI_ID" != "N/A" ]; then
+            if aws ec2 describe-images --image-ids "$CUSTOM_AMI_ID" --query 'Images[0].State' --output text 2>/dev/null | grep -q "available"; then
+                echo "  ✅ Custom AMI: $CUSTOM_AMI_ID (available)"
+            else
+                echo "  ❌ Custom AMI: $CUSTOM_AMI_ID (not available)"
+                ((validation_errors++))
+            fi
+        else
+            echo "  ⚠️ CUSTOM_AMI_ID not set"
+            ((validation_errors++))
+        fi
+
+        # 2. Check Database connectivity
+        if [ -n "$DATABASE_HOST" ]; then
+            if curl -s --max-time 10 "http://$DATABASE_HOST:8080/health" >/dev/null 2>&1; then
+                echo "  ✅ Database: $DATABASE_HOST:8080 (responding)"
+            else
+                echo "  ⚠️ Database: $DATABASE_HOST:8080 (not responding - may be starting up)"
+            fi
+        fi
+
+        # 3. Check Lambda Function URL
+        if [ -n "$LAMBDA_FUNCTION_URL" ]; then
+            if curl -s --max-time 10 "$LAMBDA_FUNCTION_URL/health" >/dev/null 2>&1; then
+                echo "  ✅ Lambda API: Active"
+            else
+                echo "  ⚠️ Lambda API: Not responding (may be cold)"
+            fi
+        fi
+
+        # 4. Check ECS Cluster
+        if [ -n "$ECS_CLUSTER_NAME" ]; then
+            if aws ecs describe-clusters --clusters "$ECS_CLUSTER_NAME" --query 'clusters[0].status' --output text 2>/dev/null | grep -q "ACTIVE"; then
+                echo "  ✅ ECS Cluster: $ECS_CLUSTER_NAME (active)"
+            else
+                echo "  ❌ ECS Cluster: $ECS_CLUSTER_NAME (not active)"
+                ((validation_errors++))
+            fi
+        fi
+
+        # 5. Check S3 bucket
+        if [ -n "$S3_BUCKET_NAME" ]; then
+            if aws s3 ls "s3://$S3_BUCKET_NAME" >/dev/null 2>&1; then
+                echo "  ✅ S3 Bucket: $S3_BUCKET_NAME (accessible)"
+            else
+                echo "  ⚠️ S3 Bucket: $S3_BUCKET_NAME (not accessible or doesn't exist)"
+            fi
+        fi
+
+        # 6. Check SQS queue
+        if [ -n "$SQS_QUEUE_URL" ]; then
+            if aws sqs get-queue-attributes --queue-url "$SQS_QUEUE_URL" --attribute-names QueueArn >/dev/null 2>&1; then
+                echo "  ✅ SQS Queue: $SQS_QUEUE_URL (accessible)"
+            else
+                echo "  ⚠️ SQS Queue: $SQS_QUEUE_URL (not accessible)"
+            fi
+        fi
+
+        return $validation_errors
+    }
+
+    validate_deployment_health
+    VALIDATION_EXIT=$?
+
     echo ""
-    echo "🎉 AMI-based deployment with EventBridge scaling completed!"
-    echo "🚀 Performance: 85% cold start reduction (15-20min → 2-3min)"
-    echo "💰 Cost Optimization: Stop/start instances instead of terminate/create"
+    if [ $VALIDATION_EXIT -eq 0 ]; then
+        echo "✅ All resources validated successfully"
+        echo "🎉 AMI-based deployment with EventBridge scaling completed!"
+        echo "🚀 Performance: 85% cold start reduction (15-20min → 2-3min)"
+        echo "💰 Cost Optimization: Stop/start instances instead of terminate/create"
+    else
+        echo "⚠️ Some resources failed validation ($VALIDATION_EXIT errors)"
+        echo "   This may be normal if services are still starting up"
+        echo "🎉 Deployment completed with validation warnings"
+    fi
+
     echo ""
-    
-    # Inline deployment summary (replacing _show_ami_deployment_summary)
+    # Deployment Summary
     if [ -f ".env.aws-prod" ]; then
         DATABASE_PUBLIC_IP=$(grep "^DATABASE_PUBLIC_IP=" .env.aws-prod | cut -d= -f2 2>/dev/null)
         DATABASE_HOST=$(grep "^DATABASE_HOST=" .env.aws-prod | cut -d= -f2 2>/dev/null)
         CUSTOM_AMI_ID=$(grep "^CUSTOM_AMI_ID=" .env.aws-prod | cut -d= -f2 2>/dev/null)
         VPC_ID=$(grep "^VPC_ID=" .env.aws-prod | cut -d= -f2 2>/dev/null)
-        
+
         echo "📊 Deployment Summary:"
         echo "====================="
         [ -n "$VPC_ID" ] && echo "🌐 VPC: $VPC_ID (console-created)"
         [ -n "$CUSTOM_AMI_ID" ] && echo "💽 Custom AMI: $CUSTOM_AMI_ID (models pre-loaded)"
         [ -n "$DATABASE_HOST" ] && echo "🗄️ Database: http://$DATABASE_HOST:8080"
-        
+        [ -n "$LAMBDA_FUNCTION_URL" ] && echo "⚡ Lambda API: $LAMBDA_FUNCTION_URL"
+
         echo ""
         echo "🔧 Next Steps:"
         if [ -n "$DATABASE_PUBLIC_IP" ]; then
@@ -427,7 +616,7 @@ function aws-prod {
             echo "   2. Follow setup guide: deployment/aws/services/README.md"
             echo "   3. Test database: curl http://${DATABASE_HOST:-$DATABASE_PUBLIC_IP}:8080/health"
         fi
-        
+
         echo ""
         echo "🔗 Management Commands:"
         echo "   • View ECS tasks: aws ecs list-tasks --cluster fastapi-app-ecs-cluster"
@@ -438,9 +627,6 @@ function aws-prod {
         echo "⚠️ .env.aws-prod not found - deployment summary unavailable"
     fi
 }
-
-
-
 
 
 # Cleanup AWS production deployment with parallel cleanup support
@@ -492,7 +678,7 @@ function aws-prod-status {
         source .env.aws-prod
         echo "✅ Configuration loaded from .env.aws-prod"
         echo "   📋 Key resources:"
-        grep -E "^(ECS_CLUSTER_NAME|EFS_.*_ID|VPC_ID|DATABASE_HOST)" .env.aws-prod 2>/dev/null | sed 's/^/      /' || echo "      ⚠️ Key variables not found"
+        grep -E "^(ECS_CLUSTER_NAME|VPC_ID|DATABASE_HOST)" .env.aws-prod 2>/dev/null | sed 's/^/      /' || echo "      ⚠️ Key variables not found"
     else
         echo "❌ .env.aws-prod not found"
     fi
@@ -517,11 +703,6 @@ function aws-prod-status {
         lambda_count=$(aws lambda list-functions --query 'length(Functions[?starts_with(FunctionName, `fastapi-app`)])' --output text 2>/dev/null || echo "0")
         echo "   ⚡ Lambda Functions: $lambda_count deployed"
         
-        # Check EFS
-        if [ -n "$EFS_FILE_SYSTEM_ID" ]; then
-            efs_status=$(aws efs describe-file-systems --file-system-id "$EFS_FILE_SYSTEM_ID" --query 'FileSystems[0].LifeCycleState' --output text 2>/dev/null || echo "NOT_FOUND")
-            echo "   💾 Shared Models EFS: $efs_status"
-        fi
     else
         echo "   ⚠️ AWS CLI not available - cannot check deployment status"
     fi

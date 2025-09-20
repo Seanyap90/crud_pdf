@@ -73,7 +73,7 @@ API Gateway validation failed for abc123def4: ...
 
 ### Files Modified
 1. `src/files_api/adapters/storage.py` - API Gateway URL detection
-2. `deployment/aws/infrastructure/ecs_task_definitions.py` - ECS environment variable injection
+2. `deployment/aws/infrastructure/ecs.py` - ECS environment variable injection
 3. `deployment/aws/orchestration/deploy_ecs.py` - Deployment integration
 4. `run.sh` - Pre-deployment validation
 

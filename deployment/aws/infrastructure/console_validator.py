@@ -24,7 +24,6 @@ class ConsoleResourceDetector:
         
         # Initialize AWS clients
         self.ec2_client = boto3.client('ec2', region_name=self.region)
-        self.efs_client = boto3.client('efs', region_name=self.region)
         self.s3_client = boto3.client('s3', region_name=self.region)
         self.sqs_client = boto3.client('sqs', region_name=self.region)
         
@@ -50,18 +49,15 @@ class ConsoleResourceDetector:
         try:
             # Validate VPC resources
             vpc_valid = self.validate_vpc_resources(config)
-            
-            # Validate EFS resources
-            efs_valid = self.validate_efs_resources(config)
-            
+
             # Validate storage resources (S3, SQS)
             storage_valid = self.validate_storage_resources(config)
-            
+
             # Validate security groups
             sg_valid = self.validate_security_groups(config)
-            
+
             # Overall validation result
-            all_valid = all([vpc_valid, efs_valid, storage_valid, sg_valid])
+            all_valid = all([vpc_valid, storage_valid, sg_valid])
             
             if all_valid:
                 logger.info("✅ All console prerequisites validated successfully")
@@ -124,48 +120,6 @@ class ConsoleResourceDetector:
             self._add_error(f"VPC validation failed: {e}")
             return False
     
-    def validate_efs_resources(self, config: Dict[str, str]) -> bool:
-        """Validate EFS file system and access point exist."""
-        logger.info("Validating EFS resources...")
-        
-        try:
-            efs_id = config.get('EFS_FILE_SYSTEM_ID')
-            access_point_id = config.get('EFS_ACCESS_POINT_ID')
-            
-            if not efs_id or not access_point_id:
-                self._add_error("Missing EFS_FILE_SYSTEM_ID or EFS_ACCESS_POINT_ID in configuration")
-                return False
-            
-            # Validate EFS file system exists
-            efs_info = self._validate_efs_exists(efs_id)
-            if not efs_info:
-                return False
-            
-            # Validate access point exists
-            ap_info = self._validate_access_point_exists(access_point_id, efs_id)
-            if not ap_info:
-                return False
-            
-            # Validate mount targets exist in the subnet
-            public_subnet_id = config.get('PUBLIC_SUBNET_ID')
-            mount_target_valid = self._validate_mount_targets(efs_id, public_subnet_id)
-            if not mount_target_valid:
-                return False
-            
-            self.validation_results['resources']['efs'] = {
-                'file_system_id': efs_id,
-                'access_point_id': access_point_id,
-                'performance_mode': efs_info['PerformanceMode'],
-                'throughput_mode': efs_info['ThroughputMode'],
-                'access_point_path': ap_info['RootDirectory']['Path']
-            }
-            
-            logger.info(f"✅ EFS resources validated: {efs_id}")
-            return True
-            
-        except ClientError as e:
-            self._add_error(f"EFS validation failed: {e}")
-            return False
     
     def validate_storage_resources(self, config: Dict[str, str]) -> bool:
         """Validate S3 bucket and SQS queue exist."""
@@ -208,12 +162,10 @@ class ConsoleResourceDetector:
         try:
             vpc_id = config.get('VPC_ID')
             database_sg_id = config.get('DATABASE_SG_ID')
-            efs_sg_id = config.get('EFS_SG_ID')
             ecs_workers_sg_id = config.get('ECS_WORKERS_SG_ID')
-            
+
             required_sgs = {
                 'database': database_sg_id,
-                'efs': efs_sg_id,
                 'ecs_workers': ecs_workers_sg_id
             }
             
@@ -360,79 +312,8 @@ class ConsoleResourceDetector:
             self._add_error(f"Route table validation error: {e}")
             return False
     
-    def _validate_efs_exists(self, efs_id: str) -> Optional[Dict[str, Any]]:
-        """Validate EFS file system exists."""
-        try:
-            response = self.efs_client.describe_file_systems(FileSystemId=efs_id)
-            file_systems = response['FileSystems']
-            
-            if not file_systems:
-                self._add_error(f"EFS file system not found: {efs_id}")
-                return None
-            
-            efs = file_systems[0]
-            if efs['LifeCycleState'] != 'available':
-                self._add_error(f"EFS not available: {efs_id} (state: {efs['LifeCycleState']})")
-                return None
-            
-            return efs
-            
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'FileSystemNotFound':
-                self._add_error(f"EFS file system not found: {efs_id}")
-            else:
-                self._add_error(f"EFS validation error: {e}")
-            return None
     
-    def _validate_access_point_exists(self, access_point_id: str, efs_id: str) -> Optional[Dict[str, Any]]:
-        """Validate EFS access point exists."""
-        try:
-            response = self.efs_client.describe_access_points(AccessPointId=access_point_id)
-            access_points = response['AccessPoints']
-            
-            if not access_points:
-                self._add_error(f"EFS access point not found: {access_point_id}")
-                return None
-            
-            access_point = access_points[0]
-            if access_point['FileSystemId'] != efs_id:
-                self._add_error(f"Access point {access_point_id} not for EFS {efs_id}")
-                return None
-            
-            if access_point['LifeCycleState'] != 'available':
-                self._add_error(f"Access point not available: {access_point_id}")
-                return None
-            
-            return access_point
-            
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'AccessPointNotFound':
-                self._add_error(f"EFS access point not found: {access_point_id}")
-            else:
-                self._add_error(f"Access point validation error: {e}")
-            return None
     
-    def _validate_mount_targets(self, efs_id: str, subnet_id: str) -> bool:
-        """Validate EFS mount targets exist in the subnet."""
-        try:
-            response = self.efs_client.describe_mount_targets(FileSystemId=efs_id)
-            mount_targets = response['MountTargets']
-            
-            if not mount_targets:
-                self._add_error(f"No mount targets found for EFS: {efs_id}")
-                return False
-            
-            # Check if there's a mount target in the public subnet
-            for mt in mount_targets:
-                if mt['SubnetId'] == subnet_id and mt['LifeCycleState'] == 'available':
-                    return True
-            
-            self._add_error(f"No available mount target found in subnet {subnet_id} for EFS {efs_id}")
-            return False
-            
-        except ClientError as e:
-            self._add_error(f"Mount target validation error: {e}")
-            return False
     
     def _validate_s3_bucket_exists(self, bucket_name: str) -> bool:
         """Validate S3 bucket exists and is accessible."""

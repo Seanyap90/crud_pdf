@@ -44,7 +44,7 @@ class LambdaScalingDeployer:
         
         # Configuration
         self.app_name = self.settings.app_name or "fastapi-app"
-        self.asg_name = f"{self.app_name}-asg"
+        self.asg_name = f"{self.app_name}-ecs-cluster-gpu-asg"
         
         logger.info(f"Lambda scaling deployer initialized for region: {self.region}")
     
@@ -133,42 +133,55 @@ class LambdaScalingDeployer:
             logger.error(f"Failed to create Lambda role: {e}")
             raise
     
-    def create_lambda_deployment_package(self) -> bytes:
-        """Create deployment package with scaling functions."""
-        # Create in-memory zip file
+    def create_scale_out_package(self) -> bytes:
+        """Create deployment package for scale-out function only."""
         zip_buffer = io.BytesIO()
-        
+
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Use the separate handler files from scaling_lambda directory
-            scaling_lambda_dir = Path(__file__).parent / "scaling_lambda"
-            
+            scaling_lambda_dir = Path(__file__).parent
             scale_out_path = scaling_lambda_dir / "scale_out_handler.py"
-            scale_in_path = scaling_lambda_dir / "scale_in_handler.py"
-            
-            if scale_out_path.exists() and scale_in_path.exists():
-                # Add the individual handler files
-                zip_file.write(scale_out_path, "scale_out_handler.py")
-                zip_file.write(scale_in_path, "scale_in_handler.py")
-                
-                # Create wrapper files for Lambda entry points
-                scale_out_wrapper = '''
-from scale_out_handler import lambda_handler
-'''
-                
-                scale_in_wrapper = '''
-from scale_in_handler import lambda_handler
-'''
-                
-                zip_file.writestr("scale_out.py", scale_out_wrapper)
-                zip_file.writestr("scale_in.py", scale_in_wrapper)
+
+            if scale_out_path.exists():
+                # Add only the scale-out handler with its lambda_handler function
+                zip_file.write(scale_out_path, "lambda_function.py")
             else:
-                raise FileNotFoundError(
-                    f"Required handler files not found: {scale_out_path}, {scale_in_path}"
-                )
-        
+                raise FileNotFoundError(f"Scale-out handler not found: {scale_out_path}")
+
         zip_buffer.seek(0)
         return zip_buffer.read()
-    
+
+    def create_scale_in_package(self) -> bytes:
+        """Create deployment package for scale-in function only."""
+        zip_buffer = io.BytesIO()
+
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            scaling_lambda_dir = Path(__file__).parent
+            scale_in_path = scaling_lambda_dir / "scale_in_handler.py"
+
+            if scale_in_path.exists():
+                # Add only the scale-in handler with its lambda_handler function
+                zip_file.write(scale_in_path, "lambda_function.py")
+            else:
+                raise FileNotFoundError(f"Scale-in handler not found: {scale_in_path}")
+
+        zip_buffer.seek(0)
+        return zip_buffer.read()
+
+    def _get_environment_variables(self, function_name: str) -> Dict[str, str]:
+        """Get environment variables for scaling functions."""
+        base_vars = {
+            'ASG_NAME': self.asg_name,
+            'REGION': self.region,
+            'SQS_QUEUE_URL': self.settings.sqs_queue_url,
+            'ECS_CLUSTER_NAME': f"{self.app_name}-ecs-cluster"
+        }
+
+        # Add ECS_TASK_DEF for scale-out function only
+        if 'scale-out' in function_name:
+            base_vars['ECS_TASK_DEF'] = f"{self.app_name}-vlm-worker-ami"
+
+        return base_vars
+
     def deploy_lambda_function(self, function_name: str, handler: str, role_arn: str, zip_code: bytes) -> Dict[str, Any]:
         """Deploy a Lambda function."""
         try:
@@ -190,10 +203,7 @@ from scale_in_handler import lambda_handler
                     Runtime="python3.11",
                     Timeout=60,
                     Environment={
-                        'Variables': {
-                            'ASG_NAME': self.asg_name,
-                            'REGION': self.region
-                        }
+                        'Variables': self._get_environment_variables(function_name)
                     }
                 )
                 
@@ -214,10 +224,7 @@ from scale_in_handler import lambda_handler
                     Code={'ZipFile': zip_code},
                     Timeout=60,
                     Environment={
-                        'Variables': {
-                            'ASG_NAME': self.asg_name,
-                            'REGION': self.region
-                        }
+                        'Variables': self._get_environment_variables(function_name)
                     },
                     Tags={
                         'Project': self.app_name,
@@ -259,23 +266,24 @@ from scale_in_handler import lambda_handler
                 role_name = f"{self.app_name}-lambda-scaling-role"
                 role_arn = self.create_lambda_execution_role(role_name)
             
-            # Create deployment package
-            zip_code = self.create_lambda_deployment_package()
-            
+            # Create separate deployment packages
+            scale_out_zip = self.create_scale_out_package()
+            scale_in_zip = self.create_scale_in_package()
+
             # Deploy scale-out function
             scale_out_function = self.deploy_lambda_function(
                 function_name=f"{self.app_name}-scale-out",
-                handler="scale_out.lambda_handler",
+                handler="lambda_function.lambda_handler",
                 role_arn=role_arn,
-                zip_code=zip_code
+                zip_code=scale_out_zip
             )
-            
+
             # Deploy scale-in function
             scale_in_function = self.deploy_lambda_function(
                 function_name=f"{self.app_name}-scale-in",
-                handler="scale_in.lambda_handler",
+                handler="lambda_function.lambda_handler",
                 role_arn=role_arn,
-                zip_code=zip_code
+                zip_code=scale_in_zip
             )
             
             result = {

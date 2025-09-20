@@ -128,9 +128,9 @@ class ECSClusterManager:
                 autoScalingGroupProvider={
                     'autoScalingGroupArn': asg['AutoScalingGroupARN'],
                     'managedScaling': {
-                        'status': 'DISABLED'  # Lambda handles scaling via EventBridge triggers
+                        'status': 'DISABLED'  # Explicitly disable ECS managed scaling - Lambda controls all scaling
                     },
-                    'managedTerminationProtection': 'DISABLED'
+                    'managedTerminationProtection': 'DISABLED'  # Allow Lambda to manage instance lifecycle
                 },
                 tags=[
                     {'key': 'Name', 'value': cp_name},
@@ -266,8 +266,10 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                         {
                             'DeviceName': '/dev/xvda',
                             'Ebs': {
-                                'VolumeSize': 50,  # 50GB for Docker images and models
+                                'VolumeSize': 80,   # 80GB for custom AMI with pre-loaded models
                                 'VolumeType': 'gp3',
+                                'Iops': 8000,       # High IOPS for fast model access
+                                'Throughput': 500,  # High throughput for large model files
                                 'DeleteOnTermination': True,
                                 'Encrypted': True
                             }
@@ -519,8 +521,8 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                     }
                 ]
             )
-            logger.info(f"Associated capacity providers with cluster: {capacity_provider_names}")
-            
+            logger.info(f"Associated capacity providers with cluster (Lambda-managed scaling): {capacity_provider_names}")
+
         except ClientError as e:
             logger.error(f"Failed to associate capacity providers: {e}")
             raise
@@ -872,8 +874,9 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
     
     # Task Definition Methods (consolidated from ecs_services.py)
     
-    def create_vlm_worker_task_definition_ami(self, vpc_config: Dict[str, Any], 
-                                            database_host: str = None) -> str:
+    def create_vlm_worker_task_definition_ami(self, vpc_config: Dict[str, Any],
+                                            database_host: str = None,
+                                            lambda_function_url: str = None) -> str:
         """Create AMI-based task definition for VLM workers with host path mounts."""
         family = f"{settings.app_name}-vlm-worker-ami"
         
@@ -924,13 +927,15 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                             {'name': 'HF_HUB_OFFLINE', 'value': '1'},  # Use pre-loaded models only
                             {'name': 'PYTHONPATH', 'value': '/app/src'},
                             {'name': 'CLUSTER_NAME', 'value': self.cluster_name},
-                            {'name': 'AMI_BASED_DEPLOYMENT', 'value': 'true'}  # Flag for AMI deployment
+                            {'name': 'AMI_BASED_DEPLOYMENT', 'value': 'true'},  # Flag for AMI deployment
+                            {'name': 'API_BASE_URL', 'value': lambda_function_url or ''},  # FastAPI backend URL for status updates
+                            {'name': 'LAMBDA_FUNCTION_URL', 'value': lambda_function_url or ''}  # Backward compatibility
                         ],
                         'mountPoints': [
                             {
                                 'sourceVolume': 'vlm-models',
                                 'containerPath': '/app/cache',  # Container path for models
-                                'readOnly': True  # Read-only since models are pre-loaded
+                                'readOnly': False  # Read-write for cache operations and temp files
                             }
                         ],
                         'logConfiguration': {
@@ -941,7 +946,7 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                                 'awslogs-stream-prefix': 'vlm-worker-ami'
                             }
                         },
-                        'command': ['python', '-m', 'vlm_workers.cli', 'worker', '--mode', 'aws-prod']
+                        'command': ["/app/start-worker.sh"]
                     }
                 ],
                 'tags': [
@@ -1058,7 +1063,7 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
     
     def _create_ecs_task_role(self, role_name: str) -> str:
         """Create ECS task role with S3, SQS, and CloudWatch permissions."""
-        
+
         trust_policy = {
             "Version": "2012-10-17",
             "Statement": [
@@ -1069,14 +1074,25 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                 }
             ]
         }
-        
+
         # Create role
         response = self.iam_client.create_role(
             RoleName=role_name,
             AssumeRolePolicyDocument=json.dumps(trust_policy),
             Description="ECS task role for VLM worker application permissions"
         )
-        
+
+        # Get account ID if not available in settings
+        account_id = settings.aws_account_id
+        if not account_id:
+            try:
+                import boto3
+                sts_client = boto3.client('sts', region_name=self.region)
+                account_id = sts_client.get_caller_identity()['Account']
+            except Exception as e:
+                logger.error(f"Failed to get AWS account ID: {e}")
+                raise
+
         # Create and attach custom policy for S3, SQS, CloudWatch
         policy_document = {
             "Version": "2012-10-17",
@@ -1101,7 +1117,7 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                         "sqs:DeleteMessage",
                         "sqs:GetQueueAttributes"
                     ],
-                    "Resource": f"arn:aws:sqs:{self.region}:{settings.aws_account_id}:{settings.sqs_queue_name}"
+                    "Resource": f"arn:aws:sqs:{self.region}:{account_id}:{settings.sqs_queue_name}"
                 },
                 {
                     "Effect": "Allow",
@@ -1112,7 +1128,7 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                 }
             ]
         }
-        
+
         policy_name = f"{role_name}-policy"
         self.iam_client.put_role_policy(
             RoleName=role_name,

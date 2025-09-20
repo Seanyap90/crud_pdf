@@ -75,10 +75,6 @@ class ResourceValidator:
         if not vpc_ok:
             all_limits_ok = False
         
-        # Check EFS limits
-        efs_ok = self._check_efs_limits()
-        if not efs_ok:
-            all_limits_ok = False
         
         return all_limits_ok
     
@@ -205,34 +201,6 @@ class ResourceValidator:
             self.validation_results['warnings'].append(f"Could not check VPC limits: {e}")
             return True
     
-    def _check_efs_limits(self) -> bool:
-        """Check EFS limits."""
-        try:
-            efs_client = boto3.client('efs', region_name=self.settings.aws_region)
-            
-            # Check file system count
-            file_systems = efs_client.describe_file_systems()
-            fs_count = len(file_systems['FileSystems'])
-            
-            self.validation_results['checks']['efs_limits'] = {
-                'status': 'valid',
-                'file_systems': f"{fs_count}/1000"  # Default limit
-            }
-            
-            if fs_count > 900:
-                self.validation_results['warnings'].append(
-                    f"EFS file system count ({fs_count}) approaching limit (1000)"
-                )
-            
-            return True
-            
-        except Exception as e:
-            self.validation_results['checks']['efs_limits'] = {
-                'status': 'error',
-                'error': str(e)
-            }
-            self.validation_results['warnings'].append(f"Could not check EFS limits: {e}")
-            return True
     
     def verify_permissions(self) -> bool:
         """Verify required IAM permissions for deployment."""
@@ -240,7 +208,6 @@ class ResourceValidator:
             ('ecs', ['CreateCluster', 'CreateService', 'RegisterTaskDefinition']),
             ('lambda', ['CreateFunction', 'UpdateFunctionCode', 'CreateEventSourceMapping']),
             ('ec2', ['CreateVpc', 'CreateSubnet', 'CreateSecurityGroup', 'CreateNatGateway']),
-            ('efs', ['CreateFileSystem', 'CreateMountTarget', 'CreateAccessPoint']),
             ('ecr', ['CreateRepository', 'PutImage', 'BatchCheckLayerAvailability']),
             ('s3', ['CreateBucket', 'PutObject', 'GetObject']),
             ('sqs', ['CreateQueue', 'SendMessage', 'ReceiveMessage']),
@@ -429,8 +396,8 @@ class ResourceValidator:
     def _get_console_resource_config(self) -> Optional[Dict[str, str]]:
         """Extract console resource configuration from environment variables."""
         required_env_vars = [
-            'VPC_ID', 'PUBLIC_SUBNET_ID', 'EFS_FILE_SYSTEM_ID', 'EFS_ACCESS_POINT_ID',
-            'S3_BUCKET_NAME', 'SQS_QUEUE_URL', 'DATABASE_SG_ID', 'EFS_SG_ID', 'ECS_WORKERS_SG_ID'
+            'VPC_ID', 'PUBLIC_SUBNET_ID',
+            'S3_BUCKET_NAME', 'SQS_QUEUE_URL', 'DATABASE_SG_ID', 'ECS_WORKERS_SG_ID'
         ]
         
         config = {}
@@ -513,7 +480,7 @@ class ResourceValidator:
                     report.append(f"❌ Credentials: {creds.get('error', 'Invalid')}")
             
             # Service Limits
-            for service in ['ecs_limits', 'lambda_limits', 'vpc_limits', 'efs_limits']:
+            for service in ['ecs_limits', 'lambda_limits', 'vpc_limits']:
                 if service in self.validation_results['checks']:
                     limits = self.validation_results['checks'][service]
                     if limits['status'] == 'valid':

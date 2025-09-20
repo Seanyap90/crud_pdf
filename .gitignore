@@ -55,3 +55,4 @@ __pycache__/
 .env.local-dev
 claude.local2.md
 AMI_INTEGRATION_SUMMARY.md
+docs/GPU_PERFORMANCE_OPTIMIZATION.md
