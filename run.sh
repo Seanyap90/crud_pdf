@@ -426,29 +426,40 @@ function aws-prod {
         RECENT_AMI_ID=""
     fi
 
-    # Build new AMI if no recent one found
+    # Check if manual AMI ID is provided
     if [ -z "$RECENT_AMI_ID" ]; then
-        echo "🔨 Building new custom AMI with pre-loaded models..."
-        echo "⏱️ This will take approximately 1-2 hours for model downloading"
+        echo "📋 No recent AMI found - Manual AMI creation required"
+        echo ""
+        echo "🔧 Manual AMI Creation Process:"
+        echo "   1. Follow the manual AMI build guide: docs/AMI_MANUAL_BUILD_GUIDE.md"
+        echo "   2. Set CUSTOM_AMI_ID in .env.aws-prod file"
+        echo "   3. Re-run deployment: make aws-prod"
+        echo ""
 
-        # Capture AMI builder output
-        AMI_RESULT=$(python -m deployment.aws.infrastructure.ami.ami_builder)
-        AMI_EXIT_CODE=$?
+        # Check if CUSTOM_AMI_ID is manually set in environment
+        MANUAL_AMI_ID=$(grep "^CUSTOM_AMI_ID=" .env.aws-prod 2>/dev/null | cut -d= -f2 2>/dev/null || echo "")
 
-        if [ $AMI_EXIT_CODE -eq 0 ]; then
-            # Extract AMI ID from JSON output using Python
-            AMI_ID=$(echo "$AMI_RESULT" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('ami_id', ''))" 2>/dev/null || echo "")
+        if [ -n "$MANUAL_AMI_ID" ] && [ "$MANUAL_AMI_ID" != "N/A" ]; then
+            echo "🎯 Found manually configured AMI ID: $MANUAL_AMI_ID"
 
-            if [ -n "$AMI_ID" ] && [ "$AMI_ID" != "null" ]; then
-                update_ami_id "$AMI_ID" "newly built"
+            # Validate the AMI exists and is available
+            AMI_STATE=$(aws ec2 describe-images --image-ids "$MANUAL_AMI_ID" --query 'Images[0].State' --output text 2>/dev/null || echo "not-found")
+
+            if [ "$AMI_STATE" = "available" ]; then
+                update_ami_id "$MANUAL_AMI_ID" "manually configured"
+                echo "✅ Manual AMI validation successful"
             else
-                echo "⚠️ Could not extract AMI ID from build result"
-                echo "AMI Result: $AMI_RESULT"
+                echo "❌ Manual AMI validation failed - AMI state: $AMI_STATE"
+                echo "💡 Please verify the AMI ID is correct and available"
                 exit 1
             fi
-            echo "✅ Custom AMI built successfully"
         else
-            echo "❌ AMI building failed"
+            echo "❌ No AMI available for deployment"
+            echo ""
+            echo "🚀 Next Steps:"
+            echo "   • Create custom AMI manually using the guide"
+            echo "   • Update CUSTOM_AMI_ID in .env.aws-prod"
+            echo "   • Restart deployment"
             exit 1
         fi
     fi

@@ -130,7 +130,42 @@ class EnvironmentHelper:
                 infra_vars[key] = value
         
         return infra_vars
-    
+
+    def get_gpu_deployment_config(self) -> Dict[str, str]:
+        """
+        Get GPU-specific deployment configuration variables.
+
+        Returns:
+            Dictionary of GPU-specific variables
+        """
+        gpu_vars = {}
+
+        for key, value in os.environ.items():
+            if any(prefix in key.upper() for prefix in [
+                'MODEL_MEMORY_LIMIT', 'PYTORCH_CUDA_ALLOC_CONF', 'OFFLOAD_TO_CPU',
+                'CACHE_IMPLEMENTATION', 'USE_QUANTIZATION', 'CUDA_VISIBLE_DEVICES'
+            ]):
+                gpu_vars[key] = value
+
+        return gpu_vars
+
+    def export_gpu_variables(self) -> str:
+        """
+        Export GPU-specific environment variables as shell commands.
+
+        Returns:
+            String of export commands for GPU variables
+        """
+        gpu_vars = self.get_gpu_deployment_config()
+        exports = []
+
+        for key, value in gpu_vars.items():
+            # Escape quotes and special characters
+            escaped_value = value.replace('"', '\\"').replace('$', '\\$')
+            exports.append(f'export {key}="{escaped_value}"')
+
+        return '\n'.join(exports)
+
     @classmethod
     def detect_env_file_from_mode(cls, mode: str = None) -> str:
         """
@@ -160,6 +195,7 @@ def main():
     
     parser.add_argument('--env-file', help='Path to .env file to load')
     parser.add_argument('--export', action='store_true', help='Export variables for shell sourcing')
+    parser.add_argument('--export-gpu', action='store_true', help='Export GPU-specific variables for shell sourcing')
     parser.add_argument('--validate-required-vars', help='Comma-separated list of required variables to validate')
     parser.add_argument('--deployment-mode', help='Set deployment mode and load appropriate .env file')
     
@@ -190,10 +226,15 @@ def main():
     # Export variables
     if args.export:
         print(helper.export_to_shell())
-    
+    elif args.export_gpu:
+        print(helper.export_gpu_variables())
+
     # Show deployment mode
-    if not args.export:
+    if not args.export and not args.export_gpu:
         print(f"Deployment Mode: {helper.get_deployment_mode()}")
+        gpu_vars = helper.get_gpu_deployment_config()
+        if gpu_vars:
+            print(f"GPU Variables: {list(gpu_vars.keys())}")
 
 
 if __name__ == '__main__':

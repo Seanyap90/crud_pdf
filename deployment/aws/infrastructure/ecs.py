@@ -157,7 +157,7 @@ class ECSClusterManager:
     def _create_or_get_key_pair(self) -> str:
         """Create or get existing SSH key pair using SSH key manager."""
         try:
-            from deployment.aws.infrastructure.ami.ssh_key_manager import SSHKeyManager
+            from deployment.aws.infrastructure.ssh_key_manager import SSHKeyManager
             
             ssh_manager = SSHKeyManager(region=self.region)
             key_name = ssh_manager.ensure_ssh_key()
@@ -268,8 +268,8 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                             'Ebs': {
                                 'VolumeSize': 80,   # 80GB for custom AMI with pre-loaded models
                                 'VolumeType': 'gp3',
-                                'Iops': 8000,       # High IOPS for fast model access
-                                'Throughput': 500,  # High throughput for large model files
+                                'Iops': 3000,       # High IOPS for fast model access
+                                'Throughput': 125,  # High throughput for large model files
                                 'DeleteOnTermination': True,
                                 'Encrypted': True
                             }
@@ -305,8 +305,8 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                     'Version': '$Latest'
                 },
                 MinSize=0,          # Allow scaling to zero
-                MaxSize=2,          # Max 2 instances (quota limit)
-                DesiredCapacity=2,  # Keep desired at 2 (instances will be stopped/started, not terminated)
+                MaxSize=1,          # Max 2 instances (quota limit)
+                DesiredCapacity=1,  # Keep desired at 2 (instances will be stopped/started, not terminated)
                 VPCZoneIdentifier=','.join(subnet_ids),
                 DefaultCooldown=300,  # 5 minutes cooldown
                 Tags=[
@@ -913,18 +913,29 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                             }
                         ],
                         'environment': [
+                            # Core deployment configuration
                             {'name': 'DEPLOYMENT_MODE', 'value': 'aws-prod'},
                             {'name': 'AWS_REGION', 'value': self.region},
                             {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
                             {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},
                             {'name': 'DATABASE_HOST', 'value': database_host or 'localhost'},
                             {'name': 'DATABASE_PORT', 'value': '8080'},
+
+                            # GPU optimization for Tesla T4 (overrides Dockerfile defaults)
+                            {'name': 'MODEL_MEMORY_LIMIT', 'value': '14GiB'},  # Override Dockerfile 7GiB
+                            {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:1024,garbage_collection_threshold:0.6'},  # Override 128MB chunks
+                            {'name': 'OFFLOAD_TO_CPU', 'value': 'false'},  # Override Dockerfile true
+                            {'name': 'CACHE_IMPLEMENTATION', 'value': 'standard'},  # Override Dockerfile offloaded
+                            {'name': 'USE_QUANTIZATION', 'value': 'false'},  # Disable 4-bit quantization for T4
+
+                            # Model and cache configuration
                             {'name': 'MODEL_CACHE_DIR', 'value': '/app/cache'},
                             {'name': 'CUDA_VISIBLE_DEVICES', 'value': '0'},
-                            {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:256'},
-                            {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache/huggingface/transformers'},
-                            {'name': 'HF_HOME', 'value': '/app/cache/huggingface'},
+                            {'name': 'TRANSFORMERS_CACHE', 'value': '/app/cache'},
+                            {'name': 'HF_HOME', 'value': '/app/cache'},
                             {'name': 'HF_HUB_OFFLINE', 'value': '1'},  # Use pre-loaded models only
+
+                            # Application configuration
                             {'name': 'PYTHONPATH', 'value': '/app/src'},
                             {'name': 'CLUSTER_NAME', 'value': self.cluster_name},
                             {'name': 'AMI_BASED_DEPLOYMENT', 'value': 'true'},  # Flag for AMI deployment
