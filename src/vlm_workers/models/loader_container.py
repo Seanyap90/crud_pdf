@@ -14,7 +14,6 @@ from transformers import (
 from contextlib import contextmanager
 import threading
 from vlm_workers.models.manager import ModelLoaderInterface
-from vlm_workers.gpu.gpu_config import GPUConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +74,6 @@ class ContainerModelLoader(ModelLoaderInterface):
                 cls._instance.rag = None
                 cls._instance.vlm = None
                 cls._instance.processor = None
-
-                # Initialize GPU configuration manager
-                cls._instance.gpu_config = GPUConfigManager()
-
-                # Apply GPU-specific environment overrides
-                cls._instance.gpu_config.apply_environment_overrides()
 
                 # Create directories
                 cls._instance._create_directories()
@@ -215,30 +208,24 @@ class ContainerModelLoader(ModelLoaderInterface):
                     try:
                         logger.info("Attempting to load RAG model from local files...")
 
-                        # Get GPU-optimized configuration
-                        quantization_config = self.gpu_config.get_quantization_config()
-                        model_params = self.gpu_config.get_model_loading_params()
+                        # Create BitsAndBytes config for 4-bit quantization
+                        quantization_config = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_use_double_quant=True,
+                            bnb_4bit_quant_type="nf4",
+                            bnb_4bit_compute_dtype=torch.float16
+                        )
 
-                        # Load with mode-specific configuration
-                        if quantization_config:
-                            # aws-mock with quantization
-                            logger.info("Loading RAG model with quantization for memory-constrained GPU")
-                            self.rag = RAGMultiModalModel.from_pretrained(
-                                "vidore/colpali",
-                                device_map=model_params["device_map"],
-                                torch_dtype=model_params["torch_dtype"],
-                                max_memory=model_params["max_memory"],
-                                quantization_config=quantization_config
-                            )
-                        else:
-                            # aws-prod without quantization
-                            logger.info("Loading RAG model without quantization for high-memory GPU")
-                            self.rag = RAGMultiModalModel.from_pretrained(
-                                "vidore/colpali",
-                                device_map=model_params["device_map"],
-                                torch_dtype=model_params["torch_dtype"],
-                                max_memory=model_params["max_memory"]
-                            )
+                        # Load with RTX 4060 optimized configuration
+                        logger.info("Loading RAG model with quantization for memory-constrained GPU")
+                        self.rag = RAGMultiModalModel.from_pretrained(
+                            "vidore/colpali",
+                            device_map="auto",
+                            torch_dtype=torch.float16,
+                            max_memory={0: os.environ.get('MODEL_MEMORY_LIMIT', '7GiB')},
+                            quantization_config=quantization_config,
+                            local_files_only=True
+                        )
 
                         ContainerModelLoader._is_rag_initialized = True
                         logger.info("RAG model initialized from local files successfully")
@@ -272,37 +259,29 @@ class ContainerModelLoader(ModelLoaderInterface):
                     try:
                         logger.info("Attempting to load VLM model from local files...")
 
-                        # Get GPU-optimized configuration
-                        quantization_config = self.gpu_config.get_quantization_config()
-                        model_params = self.gpu_config.get_model_loading_params()
+                        # Create BitsAndBytes config for 4-bit quantization
+                        bnb_config = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_use_double_quant=True,
+                            bnb_4bit_quant_type="nf4",
+                            bnb_4bit_compute_dtype=torch.float16
+                        )
 
                         processor = AutoProcessor.from_pretrained(
                             "HuggingFaceTB/SmolVLM-Instruct",
                             local_files_only=True
                         )
 
-                        # Load model with mode-specific configuration
-                        if quantization_config:
-                            # aws-mock path (RTX 4060 - use quantization)
-                            logger.info("Loading VLM with quantization for memory-constrained GPU")
-                            vlm = Idefics3ForConditionalGeneration.from_pretrained(
-                                "HuggingFaceTB/SmolVLM-Instruct",
-                                quantization_config=quantization_config,
-                                device_map=model_params["device_map"],
-                                torch_dtype=model_params["torch_dtype"],
-                                max_memory=model_params["max_memory"],
-                                local_files_only=True
-                            )
-                        else:
-                            # aws-prod path (Tesla T4 - no quantization)
-                            logger.info("Loading VLM without quantization for high-memory GPU")
-                            vlm = Idefics3ForConditionalGeneration.from_pretrained(
-                                "HuggingFaceTB/SmolVLM-Instruct",
-                                device_map=model_params["device_map"],
-                                torch_dtype=model_params["torch_dtype"],
-                                max_memory=model_params["max_memory"],
-                                local_files_only=True
-                            )
+                        # Load VLM with RTX 4060 optimized configuration
+                        logger.info("Loading VLM with quantization for memory-constrained GPU")
+                        vlm = Idefics3ForConditionalGeneration.from_pretrained(
+                            "HuggingFaceTB/SmolVLM-Instruct",
+                            quantization_config=bnb_config,
+                            device_map="auto",
+                            torch_dtype=torch.float16,
+                            max_memory={0: os.environ.get('MODEL_MEMORY_LIMIT', '7GiB')},
+                            local_files_only=True
+                        )
                         
                         # Store in both instance and thread-local storage
                         self.vlm = vlm
@@ -411,97 +390,75 @@ class ContainerModelLoader(ModelLoaderInterface):
             return False
 
     def _load_rag_model(self):
-        """Load RAG model with GPU-optimized settings"""
+        """Load RAG model with RTX 4060 optimized settings"""
         logger.info("Loading RAG model from remote...")
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Get GPU-optimized configuration
-        quantization_config = self.gpu_config.get_quantization_config()
-        model_params = self.gpu_config.get_model_loading_params()
-        memory_limit = self.gpu_config.get_memory_config()
-        should_offload = self.gpu_config.should_offload_to_cpu()
-
+        # Get memory limit from environment
+        memory_limit = os.environ.get('MODEL_MEMORY_LIMIT', '7GiB')
         logger.info(f"Using memory limit for RAG model: {memory_limit}")
 
         try:
-            # Load model with mode-specific configuration
-            if should_offload:
+            # Create config with environment-based settings
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+            )
+
+            # Check if offloading is enabled
+            if os.environ.get('OFFLOAD_TO_CPU', 'true').lower() == 'true':
                 logger.info("CPU offloading enabled for RAG model")
                 offload_folder = os.environ.get('CPU_OFFLOAD_FOLDER', 'offload_folder')
 
-                if quantization_config:
-                    # aws-mock with offloading and quantization
-                    self.rag = RAGMultiModalModel.from_pretrained(
-                        "vidore/colpali",
-                        device_map=model_params["device_map"],
-                        torch_dtype=model_params["torch_dtype"],
-                        max_memory=model_params["max_memory"],
-                        quantization_config=quantization_config,
-                        offload_folder=offload_folder,
-                        local_files_only=False
-                    )
-                else:
-                    # aws-prod with offloading but no quantization (rare case)
-                    self.rag = RAGMultiModalModel.from_pretrained(
-                        "vidore/colpali",
-                        device_map=model_params["device_map"],
-                        torch_dtype=model_params["torch_dtype"],
-                        max_memory=model_params["max_memory"],
-                        offload_folder=offload_folder,
-                        local_files_only=False
-                    )
+                self.rag = RAGMultiModalModel.from_pretrained(
+                    "vidore/colpali",
+                    device_map="auto",
+                    torch_dtype=torch.float16,
+                    max_memory={0: memory_limit},
+                    quantization_config=quantization_config,
+                    offload_folder=offload_folder,
+                    local_files_only=False
+                )
             else:
-                if quantization_config:
-                    # aws-mock without offloading but with quantization
-                    self.rag = RAGMultiModalModel.from_pretrained(
-                        "vidore/colpali",
-                        device_map=model_params["device_map"],
-                        torch_dtype=model_params["torch_dtype"],
-                        max_memory=model_params["max_memory"],
-                        quantization_config=quantization_config,
-                        local_files_only=False
-                    )
-                else:
-                    # aws-prod without offloading and no quantization
-                    logger.info("Loading RAG without quantization for high-memory GPU")
-                    self.rag = RAGMultiModalModel.from_pretrained(
-                        "vidore/colpali",
-                        device_map=model_params["device_map"],
-                        torch_dtype=model_params["torch_dtype"],
-                        max_memory=model_params["max_memory"],
-                        local_files_only=False
-                    )
-            
+                self.rag = RAGMultiModalModel.from_pretrained(
+                    "vidore/colpali",
+                    device_map="auto",
+                    torch_dtype=torch.float16,
+                    max_memory={0: memory_limit},
+                    quantization_config=quantization_config,
+                    local_files_only=False
+                )
+
             # Log memory usage
             if torch.cuda.is_available():
                 memory_allocated = torch.cuda.memory_allocated(0) / (1024**3)  # GB
                 memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)    # GB
                 logger.info(f"GPU memory after RAG model loading: Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
-                
+
             self._is_rag_initialized = True
             logger.info("RAG model initialized successfully")
             return self.rag
-            
+
         except Exception as e:
             logger.error(f"Error loading RAG model: {str(e)}")
             logger.error(traceback.format_exc())
             raise
 
     def _load_vlm_and_processor(self):
-        """Load VLM and processor with GPU-optimized settings"""
+        """Load VLM and processor with RTX 4060 optimized settings"""
         logger.info("Loading SmolVLM-Instruct from remote...")
         torch.cuda.empty_cache()
         gc.collect()
 
-        # Get GPU-optimized configuration
-        quantization_config = self.gpu_config.get_quantization_config()
-        model_params = self.gpu_config.get_model_loading_params()
-        memory_limit = self.gpu_config.get_memory_config()
-        cache_impl = self.gpu_config.get_cache_config()
-        should_offload = self.gpu_config.should_offload_to_cpu()
-
+        # Get memory limit from environment
+        memory_limit = os.environ.get('MODEL_MEMORY_LIMIT', '7GiB')
         logger.info(f"Using memory limit for VLM model: {memory_limit}")
+
+        # Get cache implementation from environment
+        cache_impl = os.environ.get('CACHE_IMPLEMENTATION', 'offloaded')
         logger.info(f"Using cache implementation: {cache_impl}")
 
         try:
@@ -511,63 +468,46 @@ class ContainerModelLoader(ModelLoaderInterface):
                 local_files_only=False
             )
 
-            # Load model with mode-specific configuration
-            if should_offload:
+            # Create BitsAndBytes config for 4-bit quantization
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16
+            )
+
+            # Check if offloading is enabled
+            if os.environ.get('OFFLOAD_TO_CPU', 'true').lower() == 'true':
                 logger.info("CPU offloading enabled for VLM model")
                 offload_folder = os.environ.get('CPU_OFFLOAD_FOLDER', 'offload_folder')
 
-                if quantization_config:
-                    # aws-mock with offloading and quantization
-                    vlm = Idefics3ForConditionalGeneration.from_pretrained(
-                        "HuggingFaceTB/SmolVLM-Instruct",
-                        quantization_config=quantization_config,
-                        device_map=model_params["device_map"],
-                        torch_dtype=model_params["torch_dtype"],
-                        max_memory=model_params["max_memory"],
-                        offload_folder=offload_folder,
-                        low_cpu_mem_usage=True,
-                        local_files_only=False
-                    )
-                else:
-                    # aws-prod with offloading but no quantization (rare case)
-                    vlm = Idefics3ForConditionalGeneration.from_pretrained(
-                        "HuggingFaceTB/SmolVLM-Instruct",
-                        device_map=model_params["device_map"],
-                        torch_dtype=model_params["torch_dtype"],
-                        max_memory=model_params["max_memory"],
-                        offload_folder=offload_folder,
-                        low_cpu_mem_usage=True,
-                        local_files_only=False
-                    )
+                vlm = Idefics3ForConditionalGeneration.from_pretrained(
+                    "HuggingFaceTB/SmolVLM-Instruct",
+                    quantization_config=bnb_config,
+                    device_map="auto",
+                    torch_dtype=torch.float16,
+                    max_memory={0: memory_limit},
+                    offload_folder=offload_folder,
+                    low_cpu_mem_usage=True,
+                    local_files_only=False
+                )
             else:
-                if quantization_config:
-                    # aws-mock without offloading but with quantization
-                    vlm = Idefics3ForConditionalGeneration.from_pretrained(
-                        "HuggingFaceTB/SmolVLM-Instruct",
-                        quantization_config=quantization_config,
-                        device_map=model_params["device_map"],
-                        torch_dtype=model_params["torch_dtype"],
-                        max_memory=model_params["max_memory"],
-                        local_files_only=False
-                    )
-                else:
-                    # aws-prod without offloading and no quantization
-                    logger.info("Loading VLM without quantization for high-memory GPU")
-                    vlm = Idefics3ForConditionalGeneration.from_pretrained(
-                        "HuggingFaceTB/SmolVLM-Instruct",
-                        device_map=model_params["device_map"],
-                        torch_dtype=model_params["torch_dtype"],
-                        max_memory=model_params["max_memory"],
-                        local_files_only=False
-                    )
-            
+                vlm = Idefics3ForConditionalGeneration.from_pretrained(
+                    "HuggingFaceTB/SmolVLM-Instruct",
+                    quantization_config=bnb_config,
+                    device_map="auto",
+                    torch_dtype=torch.float16,
+                    max_memory={0: memory_limit},
+                    local_files_only=False
+                )
+
             # Log device placement for debugging
             if hasattr(vlm, 'hf_device_map'):
                 logger.info("Model device map:")
                 for key, device in vlm.hf_device_map.items():
                     if key.count('.') <= 1:  # Only log main modules
                         logger.info(f"  {key}: {device}")
-                        
+
             return vlm, processor
         except Exception as e:
             logger.error(f"Error loading VLM model: {str(e)}")

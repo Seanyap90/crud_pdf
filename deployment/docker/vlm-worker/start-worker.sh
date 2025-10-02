@@ -53,33 +53,25 @@ wait_for_models() {
     return 1
 }
 
-# Initialize GPU configuration and storage adapter
-echo "🔧 Initializing GPU configuration and storage adapter..."
+# Initialize storage adapter
+echo "🔧 Initializing storage adapter..."
 python3 -c "
 import sys
 sys.path.append('/app/src')
 
 from files_api.adapters.storage import init_storage
-from vlm_workers.gpu.gpu_config import GPUConfigManager
 import os
 
-# Initialize GPU configuration first
-print('🎯 Initializing GPU configuration...')
-gpu_config = GPUConfigManager()
-deployment_mode = gpu_config.validate_deployment_mode()
-print(f'✓ GPU configuration initialized for mode: {deployment_mode}')
+# Log GPU configuration from environment variables
+deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
+print(f'🎯 Using deployment mode: {deployment_mode}')
 
-# Apply GPU-specific environment overrides
-gpu_config.apply_environment_overrides()
-print('✓ GPU environment overrides applied')
-
-# Log GPU configuration for debugging
-print(f'GPU Config:')
-print(f'  - Model memory limit: {gpu_config.get_memory_config()}')
-print(f'  - CUDA allocator: {gpu_config.get_cuda_allocator_config()}')
-print(f'  - Cache implementation: {gpu_config.get_cache_config()}')
-print(f'  - CPU offloading: {gpu_config.should_offload_to_cpu()}')
-print(f'  - Use quantization: {gpu_config.config[\"use_quantization\"]}')
+# Log RTX 4060 optimized GPU settings
+print('GPU Config (RTX 4060 optimized):')
+print(f'  - Model memory limit: {os.environ.get(\"MODEL_MEMORY_LIMIT\", \"7GiB\")}')
+print(f'  - CUDA allocator: {os.environ.get(\"PYTORCH_CUDA_ALLOC_CONF\", \"max_split_size_mb:128,garbage_collection_threshold:0.8\")}')
+print(f'  - Cache implementation: {os.environ.get(\"CACHE_IMPLEMENTATION\", \"offloaded\")}')
+print(f'  - CPU offloading: {os.environ.get(\"OFFLOAD_TO_CPU\", \"true\")}')
 
 # Initialize storage adapter
 mode = os.environ.get('QUEUE_TYPE', 'aws-mock')

@@ -921,12 +921,7 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                             {'name': 'DATABASE_HOST', 'value': database_host or 'localhost'},
                             {'name': 'DATABASE_PORT', 'value': '8080'},
 
-                            # GPU optimization for Tesla T4 (overrides Dockerfile defaults)
-                            {'name': 'MODEL_MEMORY_LIMIT', 'value': '14GiB'},  # Override Dockerfile 7GiB
-                            {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:1024,garbage_collection_threshold:0.6'},  # Override 128MB chunks
-                            {'name': 'OFFLOAD_TO_CPU', 'value': 'false'},  # Override Dockerfile true
-                            {'name': 'CACHE_IMPLEMENTATION', 'value': 'standard'},  # Override Dockerfile offloaded
-                            {'name': 'USE_QUANTIZATION', 'value': 'false'},  # Disable 4-bit quantization for T4
+                            # GPU configuration now uses Dockerfile defaults (RTX 4060 optimized)
 
                             # Model and cache configuration
                             {'name': 'MODEL_CACHE_DIR', 'value': '/app/cache'},

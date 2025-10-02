@@ -50,6 +50,7 @@ build
 token.txt
 *.pyc
 __pycache__/
+.env-aws-*
 .env.aws-mock
 .env.aws-prod
 .env.local-dev

@@ -38,7 +38,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Final stage: Runtime environment (worker-focused, no models)
 FROM base AS runtime
 
-# Set CUDA and performance environment variables
+# Set CUDA and performance environment variables (RTX 4060 optimized for all deployments)
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX" \
     OMP_NUM_THREADS=4 \
     LOW_MEMORY=1 \
