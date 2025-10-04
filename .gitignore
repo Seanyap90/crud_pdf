@@ -60,3 +60,6 @@ docs/GPU_PERFORMANCE_OPTIMIZATION.md
 docs/AMI_MANUAL_BUILD_GUIDE.md
 *.pdf
 gpu_config_testing_colab_fixed.ipynb
+archive/*
+deployment/kubernetes/*
+.github/workflows/e2e-test-and-merge.yml

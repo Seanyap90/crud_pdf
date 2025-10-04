@@ -14,6 +14,7 @@ from transformers import (
 from contextlib import contextmanager
 import threading
 from vlm_workers.models.manager import ModelLoaderInterface
+from vlm_workers.gpu.gpu_config import GPUConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +57,11 @@ class ContainerModelLoader(ModelLoaderInterface):
     _lock = threading.RLock()
     _init_lock = threading.RLock()
     _thread_local = threading.local() # Separate lock for initialization
-    
+
     # Track initialization state
     _is_rag_initialized = False
     _is_vlm_initialized = False
-    
+
     # Environment variable to control model loading behavior
     _disable_duplicate_loading = os.environ.get('DISABLE_DUPLICATE_LOADING', 'true').lower() == 'true'
 
@@ -74,6 +75,12 @@ class ContainerModelLoader(ModelLoaderInterface):
                 cls._instance.rag = None
                 cls._instance.vlm = None
                 cls._instance.processor = None
+
+                # Initialize GPU configuration manager
+                deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
+                cls._instance.gpu_config = GPUConfigManager(deployment_mode)
+                cls._instance.gpu_config.apply_environment_overrides()
+                cls._instance.gpu_config.log_gpu_info()
 
                 # Create directories
                 cls._instance._create_directories()
@@ -208,21 +215,16 @@ class ContainerModelLoader(ModelLoaderInterface):
                     try:
                         logger.info("Attempting to load RAG model from local files...")
 
-                        # Create BitsAndBytes config for 4-bit quantization
-                        quantization_config = BitsAndBytesConfig(
-                            load_in_4bit=True,
-                            bnb_4bit_use_double_quant=True,
-                            bnb_4bit_quant_type="nf4",
-                            bnb_4bit_compute_dtype=torch.float16
-                        )
+                        # Get quantization config from GPU config manager
+                        quantization_config = self.gpu_config.get_quantization_config()
 
-                        # Load with RTX 4060 optimized configuration
-                        logger.info("Loading RAG model with quantization for memory-constrained GPU")
+                        # Load with GPU-optimized configuration
+                        logger.info(f"Loading RAG model with config for {self.gpu_config.mode}")
                         self.rag = RAGMultiModalModel.from_pretrained(
                             "vidore/colpali",
-                            device_map="auto",
-                            torch_dtype=torch.float16,
-                            max_memory={0: os.environ.get('MODEL_MEMORY_LIMIT', '7GiB')},
+                            device_map=self.gpu_config.get_device_map(),
+                            torch_dtype=self.gpu_config.get_torch_dtype(),
+                            max_memory=self.gpu_config.get_max_memory(),
                             quantization_config=quantization_config,
                             local_files_only=True
                         )
@@ -259,27 +261,22 @@ class ContainerModelLoader(ModelLoaderInterface):
                     try:
                         logger.info("Attempting to load VLM model from local files...")
 
-                        # Create BitsAndBytes config for 4-bit quantization
-                        bnb_config = BitsAndBytesConfig(
-                            load_in_4bit=True,
-                            bnb_4bit_use_double_quant=True,
-                            bnb_4bit_quant_type="nf4",
-                            bnb_4bit_compute_dtype=torch.float16
-                        )
+                        # Get quantization config from GPU config manager
+                        bnb_config = self.gpu_config.get_quantization_config()
 
                         processor = AutoProcessor.from_pretrained(
                             "HuggingFaceTB/SmolVLM-Instruct",
                             local_files_only=True
                         )
 
-                        # Load VLM with RTX 4060 optimized configuration
-                        logger.info("Loading VLM with quantization for memory-constrained GPU")
+                        # Load VLM with GPU-optimized configuration
+                        logger.info(f"Loading VLM with config for {self.gpu_config.mode}")
                         vlm = Idefics3ForConditionalGeneration.from_pretrained(
                             "HuggingFaceTB/SmolVLM-Instruct",
                             quantization_config=bnb_config,
-                            device_map="auto",
-                            torch_dtype=torch.float16,
-                            max_memory={0: os.environ.get('MODEL_MEMORY_LIMIT', '7GiB')},
+                            device_map=self.gpu_config.get_device_map(),
+                            torch_dtype=self.gpu_config.get_torch_dtype(),
+                            max_memory=self.gpu_config.get_max_memory(),
                             local_files_only=True
                         )
                         
@@ -390,34 +387,29 @@ class ContainerModelLoader(ModelLoaderInterface):
             return False
 
     def _load_rag_model(self):
-        """Load RAG model with RTX 4060 optimized settings"""
+        """Load RAG model with GPU-optimized settings"""
         logger.info("Loading RAG model from remote...")
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Get memory limit from environment
-        memory_limit = os.environ.get('MODEL_MEMORY_LIMIT', '7GiB')
+        # Get config from GPU config manager
+        memory_limit = self.gpu_config.get_memory_config()
         logger.info(f"Using memory limit for RAG model: {memory_limit}")
 
         try:
-            # Create config with environment-based settings
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-            )
+            # Get quantization config from GPU config manager
+            quantization_config = self.gpu_config.get_quantization_config()
 
             # Check if offloading is enabled
-            if os.environ.get('OFFLOAD_TO_CPU', 'true').lower() == 'true':
+            if self.gpu_config.should_offload_to_cpu():
                 logger.info("CPU offloading enabled for RAG model")
                 offload_folder = os.environ.get('CPU_OFFLOAD_FOLDER', 'offload_folder')
 
                 self.rag = RAGMultiModalModel.from_pretrained(
                     "vidore/colpali",
-                    device_map="auto",
-                    torch_dtype=torch.float16,
-                    max_memory={0: memory_limit},
+                    device_map=self.gpu_config.get_device_map(),
+                    torch_dtype=self.gpu_config.get_torch_dtype(),
+                    max_memory=self.gpu_config.get_max_memory(),
                     quantization_config=quantization_config,
                     offload_folder=offload_folder,
                     local_files_only=False
@@ -425,9 +417,9 @@ class ContainerModelLoader(ModelLoaderInterface):
             else:
                 self.rag = RAGMultiModalModel.from_pretrained(
                     "vidore/colpali",
-                    device_map="auto",
-                    torch_dtype=torch.float16,
-                    max_memory={0: memory_limit},
+                    device_map=self.gpu_config.get_device_map(),
+                    torch_dtype=self.gpu_config.get_torch_dtype(),
+                    max_memory=self.gpu_config.get_max_memory(),
                     quantization_config=quantization_config,
                     local_files_only=False
                 )
@@ -448,17 +440,16 @@ class ContainerModelLoader(ModelLoaderInterface):
             raise
 
     def _load_vlm_and_processor(self):
-        """Load VLM and processor with RTX 4060 optimized settings"""
+        """Load VLM and processor with GPU-optimized settings"""
         logger.info("Loading SmolVLM-Instruct from remote...")
         torch.cuda.empty_cache()
         gc.collect()
 
-        # Get memory limit from environment
-        memory_limit = os.environ.get('MODEL_MEMORY_LIMIT', '7GiB')
+        # Get config from GPU config manager
+        memory_limit = self.gpu_config.get_memory_config()
         logger.info(f"Using memory limit for VLM model: {memory_limit}")
 
-        # Get cache implementation from environment
-        cache_impl = os.environ.get('CACHE_IMPLEMENTATION', 'offloaded')
+        cache_impl = self.gpu_config.get_cache_config()
         logger.info(f"Using cache implementation: {cache_impl}")
 
         try:
@@ -468,36 +459,31 @@ class ContainerModelLoader(ModelLoaderInterface):
                 local_files_only=False
             )
 
-            # Create BitsAndBytes config for 4-bit quantization
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16
-            )
+            # Get quantization config from GPU config manager
+            bnb_config = self.gpu_config.get_quantization_config()
 
             # Check if offloading is enabled
-            if os.environ.get('OFFLOAD_TO_CPU', 'true').lower() == 'true':
+            if self.gpu_config.should_offload_to_cpu():
                 logger.info("CPU offloading enabled for VLM model")
                 offload_folder = os.environ.get('CPU_OFFLOAD_FOLDER', 'offload_folder')
 
                 vlm = Idefics3ForConditionalGeneration.from_pretrained(
                     "HuggingFaceTB/SmolVLM-Instruct",
                     quantization_config=bnb_config,
-                    device_map="auto",
-                    torch_dtype=torch.float16,
-                    max_memory={0: memory_limit},
+                    device_map=self.gpu_config.get_device_map(),
+                    torch_dtype=self.gpu_config.get_torch_dtype(),
+                    max_memory=self.gpu_config.get_max_memory(),
                     offload_folder=offload_folder,
-                    low_cpu_mem_usage=True,
+                    low_cpu_mem_usage=self.gpu_config.should_use_low_cpu_mem(),
                     local_files_only=False
                 )
             else:
                 vlm = Idefics3ForConditionalGeneration.from_pretrained(
                     "HuggingFaceTB/SmolVLM-Instruct",
                     quantization_config=bnb_config,
-                    device_map="auto",
-                    torch_dtype=torch.float16,
-                    max_memory={0: memory_limit},
+                    device_map=self.gpu_config.get_device_map(),
+                    torch_dtype=self.gpu_config.get_torch_dtype(),
+                    max_memory=self.gpu_config.get_max_memory(),
                     local_files_only=False
                 )
 

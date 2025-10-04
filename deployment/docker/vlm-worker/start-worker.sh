@@ -53,25 +53,23 @@ wait_for_models() {
     return 1
 }
 
-# Initialize storage adapter
-echo "🔧 Initializing storage adapter..."
+# Initialize storage adapter and log GPU configuration
+echo "🔧 Initializing storage adapter and GPU configuration..."
 python3 -c "
 import sys
 sys.path.append('/app/src')
 
 from files_api.adapters.storage import init_storage
+from vlm_workers.gpu.gpu_config import GPUConfigManager
 import os
 
-# Log GPU configuration from environment variables
+# Initialize GPU config manager and log configuration
 deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
 print(f'🎯 Using deployment mode: {deployment_mode}')
 
-# Log RTX 4060 optimized GPU settings
-print('GPU Config (RTX 4060 optimized):')
-print(f'  - Model memory limit: {os.environ.get(\"MODEL_MEMORY_LIMIT\", \"7GiB\")}')
-print(f'  - CUDA allocator: {os.environ.get(\"PYTORCH_CUDA_ALLOC_CONF\", \"max_split_size_mb:128,garbage_collection_threshold:0.8\")}')
-print(f'  - Cache implementation: {os.environ.get(\"CACHE_IMPLEMENTATION\", \"offloaded\")}')
-print(f'  - CPU offloading: {os.environ.get(\"OFFLOAD_TO_CPU\", \"true\")}')
+# Initialize GPUConfigManager (it will log the full config automatically)
+gpu_config = GPUConfigManager(deployment_mode)
+gpu_config.log_gpu_info()
 
 # Initialize storage adapter
 mode = os.environ.get('QUEUE_TYPE', 'aws-mock')

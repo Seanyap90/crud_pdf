@@ -921,7 +921,11 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                             {'name': 'DATABASE_HOST', 'value': database_host or 'localhost'},
                             {'name': 'DATABASE_PORT', 'value': '8080'},
 
-                            # GPU configuration now uses Dockerfile defaults (RTX 4060 optimized)
+                            # GPU configuration for Tesla T4 16GB (via GPUConfigManager)
+                            {'name': 'MODEL_MEMORY_LIMIT', 'value': '14GiB'},
+                            {'name': 'OFFLOAD_TO_CPU', 'value': 'false'},
+                            {'name': 'CACHE_IMPLEMENTATION', 'value': 'standard'},
+                            {'name': 'PYTORCH_CUDA_ALLOC_CONF', 'value': 'max_split_size_mb:1024,garbage_collection_threshold:0.6'},
 
                             # Model and cache configuration
                             {'name': 'MODEL_CACHE_DIR', 'value': '/app/cache'},

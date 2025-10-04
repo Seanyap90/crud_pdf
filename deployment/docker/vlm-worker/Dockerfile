@@ -38,21 +38,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Final stage: Runtime environment (worker-focused, no models)
 FROM base AS runtime
 
-# Set CUDA and performance environment variables (RTX 4060 optimized for all deployments)
+# Set base CUDA and cache environment variables
+# GPU-specific settings (quantization, memory limits, etc.) are controlled by GPUConfigManager
+# based on DEPLOYMENT_MODE at runtime
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX" \
     OMP_NUM_THREADS=4 \
-    LOW_MEMORY=1 \
-    USE_FLASH_ATTENTION=0 \
     TRANSFORMERS_CACHE="/app/cache" \
     HF_HOME="/app/cache" \
     PYTHONPATH="/app/src:${PYTHONPATH}" \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    CACHE_IMPLEMENTATION=offloaded \
-    MODEL_MEMORY_LIMIT=7GiB \
-    OFFLOAD_TO_CPU=true \
     CPU_OFFLOAD_FOLDER=/app/offload_folder \
-    PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8 \
     MKL_NUM_THREADS=4 \
     HF_HUB_OFFLINE=1
 

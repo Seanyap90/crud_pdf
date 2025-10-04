@@ -41,18 +41,20 @@ services:
       - SQS_QUEUE_NAME=${SQS_QUEUE_NAME:-rag-task-queue}
       - SQS_QUEUE_URL=http://host.docker.internal:5000/queue/${SQS_QUEUE_NAME:-rag-task-queue}
       
-      # Model Configuration (from settings or defaults)
-      - MODEL_MEMORY_LIMIT=${MODEL_MEMORY_LIMIT:-7GiB}
-      - DISABLE_DUPLICATE_LOADING=${DISABLE_DUPLICATE_LOADING:-true}
-      - MAX_CONTENT_LENGTH=256
-      - LOW_MEMORY=true
+      # GPU Configuration for RTX 4060 8GB (via GPUConfigManager)
+      # These settings override .env.aws-mock and ensure RTX 4060 optimization
+      - MODEL_MEMORY_LIMIT=7GiB
       - OFFLOAD_TO_CPU=true
       - CPU_OFFLOAD_FOLDER=/app/offload_folder
       - CACHE_IMPLEMENTATION=offloaded
-      
-      # CUDA optimization
-      - CUDA_VISIBLE_DEVICES=0
       - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8
+
+      # Model Configuration
+      - DISABLE_DUPLICATE_LOADING=${DISABLE_DUPLICATE_LOADING:-true}
+      - MAX_CONTENT_LENGTH=256
+
+      # CUDA device
+      - CUDA_VISIBLE_DEVICES=0
       
       # CPU threading optimization
       - OMP_NUM_THREADS=8
