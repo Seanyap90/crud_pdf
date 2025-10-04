@@ -7,8 +7,9 @@ query performance across vendor invoices, gateways, devices, and measurements.
 
 import sqlite3
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 from .nosql_adapter import NoSQLAdapter
+
 
 logger = logging.getLogger(__name__)
 
@@ -16,38 +17,91 @@ logger = logging.getLogger(__name__)
 class DocumentIndexManager:
     """Manages document indexes for optimal query performance"""
     
-    def __init__(self, db_path: str = "recycling.db"):
-        self.db_path = db_path
+    def __init__(self, connection_string: str = None):
+        self.connection_string = connection_string or self._get_default_connection()
+        
+    def _get_default_connection(self) -> str:
+        """Get default connection string based on deployment mode"""
+        return "recycling.db"  # Always use SQLite
         
     def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection"""
-        return sqlite3.connect(self.db_path)
+        """Get database connection - always SQLite"""
+        return sqlite3.connect(self.connection_string)
     
     def create_all_indexes(self) -> None:
         """Create all document indexes for optimal performance"""
+        conn = None
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
             
-            # Create vendor invoice indexes
-            self._create_invoice_indexes(cursor)
-            
-            # Create IoT indexes
-            self._create_gateway_indexes(cursor)
-            self._create_device_indexes(cursor)
-            self._create_measurement_indexes(cursor)
-            
-            # Create config indexes
-            self._create_config_indexes(cursor)
-            
-            conn.commit()
-            logger.info("All document indexes created successfully")
-            
+            # Check if we're using MongoDB or SQLite
+            if hasattr(conn, 'list_database_names'):  # MongoDB client
+                self._create_mongodb_indexes(conn)
+                logger.info("MongoDB document indexes created successfully")
+            else:  # SQLite connection
+                self._create_sqlite_indexes(conn)
+                logger.info("SQLite document indexes created successfully")
+                
         except Exception as e:
             logger.error(f"Error creating indexes: {e}")
             raise
         finally:
-            conn.close()
+            if conn:
+                conn.close()
+    
+    def _create_mongodb_indexes(self, client) -> None:
+        """Create MongoDB indexes for aws-prod mode"""
+        try:
+            db = client.crud_pdf
+            
+            # Vendor invoice indexes
+            db.vendor_invoices.create_index([("vendor.vendor_id", 1)])
+            db.vendor_invoices.create_index([("date_created", -1)])
+            db.vendor_invoices.create_index([("total_amount", 1)])
+            db.vendor_invoices.create_index([("vendor.vendor_id", 1), ("date_created", -1)])
+            
+            # IoT gateway indexes
+            db.gateways.create_index([("gateway_id", 1)])
+            db.gateways.create_index([("location", 1)])
+            db.gateways.create_index([("status", 1)])
+            
+            # IoT device indexes  
+            db.devices.create_index([("device_id", 1)])
+            db.devices.create_index([("gateway_id", 1)])
+            db.devices.create_index([("device_type", 1)])
+            
+            # Measurement indexes
+            db.measurements.create_index([("device_id", 1)])
+            db.measurements.create_index([("timestamp", -1)])
+            db.measurements.create_index([("measurement_type", 1)])
+            db.measurements.create_index([("device_id", 1), ("timestamp", -1)])
+            
+            # Config indexes
+            db.config.create_index([("config_key", 1)])
+            
+            logger.info("MongoDB indexes created successfully")
+            
+        except Exception as e:
+            logger.error(f"Error creating MongoDB indexes: {e}")
+            raise
+    
+    def _create_sqlite_indexes(self, conn) -> None:
+        """Create SQLite indexes for local-dev/aws-mock modes"""
+        cursor = conn.cursor()
+        
+        # Create vendor invoice indexes
+        self._create_invoice_indexes(cursor)
+        
+        # Create IoT indexes
+        self._create_gateway_indexes(cursor)
+        self._create_device_indexes(cursor)
+        self._create_measurement_indexes(cursor)
+        
+        # Create config indexes
+        self._create_config_indexes(cursor)
+        
+        conn.commit()
+        logger.info("SQLite indexes created successfully")
     
     def _create_invoice_indexes(self, cursor: sqlite3.Cursor) -> None:
         """Create indexes for vendor invoice documents"""

@@ -1,0 +1,813 @@
+"""AWS ECS deployment for VLM+RAG worker with MongoDB and GPU support."""
+import logging
+import json
+import time
+import subprocess
+import argparse
+import boto3
+from typing import Dict, Any, List
+
+# Import settings
+from src.files_api.settings import get_settings
+
+# Import AWS utilities
+from deployment.aws.utils.aws_clients import (
+    get_ecr_client,
+    create_s3_bucket,
+    create_sqs_queue,
+    get_queue_arn
+)
+
+# Import ECS infrastructure components
+from deployment.aws.infrastructure.vpc import VPCNetworkBuilder
+from deployment.aws.infrastructure.ecs import ECSClusterManager
+from deployment.aws.infrastructure.ec2_database import EC2DatabaseManager
+from deployment.aws.infrastructure.console_validator import ConsoleResourceDetector
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Get settings instance
+settings = get_settings()
+
+# Constants from settings
+DEFAULT_REGION = settings.aws_region
+S3_BUCKET_NAME = settings.s3_bucket_name
+SQS_QUEUE_NAME = settings.sqs_queue_name
+ECS_CLUSTER_NAME = f"{settings.app_name.lower().replace(' ', '-')}-ecs-cluster"
+ECR_REPO_NAME = settings.ecr_repo_name
+
+def log_operation(description: str):
+    """Decorator for timing and logging AWS deployment operations."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            logger.info(f"Starting: {description}")
+            start_time = time.time()
+            try:
+                result = func(*args, **kwargs)
+                duration = time.time() - start_time
+                logger.info(f"Completed: {description} in {duration:.2f}s")
+                return result
+            except Exception as e:
+                duration = time.time() - start_time
+                logger.error(f"Failed: {description} after {duration:.2f}s - {str(e)}")
+                raise
+        return wrapper
+    return decorator
+
+
+class ECSDeploymentStrategy:
+    """Base class for ECS deployment strategies."""
+    
+    def __init__(self, mode: str):
+        self.mode = mode
+        self.settings = get_settings()
+        self.deployment_config = {}
+    
+    def setup_clients(self) -> None:
+        """Set up AWS clients."""
+        pass
+    
+    def create_container_config(self, ecr_uri: str) -> Dict[str, Any]:
+        """Create container configuration for ECS tasks."""
+        return {
+            "image": ecr_uri,
+            "essential": True,
+            "environment": self._get_container_environment(),
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-region": self.settings.aws_region,
+                    "awslogs-stream-prefix": "ecs"
+                }
+            }
+        }
+    
+    def _get_container_environment(self) -> List[Dict[str, str]]:
+        """Get environment variables for containers."""
+        return [
+            {"name": "DEPLOYMENT_MODE", "value": self.mode},
+            {"name": "AWS_REGION", "value": self.settings.aws_region},
+            {"name": "S3_BUCKET_NAME", "value": self.settings.s3_bucket_name},
+            {"name": "SQS_QUEUE_URL", "value": self.settings.sqs_queue_url or ""}
+        ]
+
+
+class MockECSStrategy(ECSDeploymentStrategy):
+    """Strategy for aws-mock deployment using existing infrastructure."""
+    
+    def __init__(self):
+        super().__init__("aws-mock")
+    
+    def setup_clients(self) -> None:
+        """Mock deployment uses existing infrastructure - no client setup needed."""
+        logger.info("Mock deployment will use existing aws-mock infrastructure")
+    
+    @log_operation("Mock ECS deployment using existing aws-mock target")
+    def deploy(self) -> Dict[str, Any]:
+        """Create mock AWS resources for ECS simulation."""
+        logger.info("Mock ECS deployment - creating required AWS resources")
+        
+        try:
+            # Create S3 bucket for mock environment
+            bucket_created = create_s3_bucket(S3_BUCKET_NAME)
+            if bucket_created:
+                logger.info(f"Mock S3 bucket created: {S3_BUCKET_NAME}")
+            
+            # Create SQS queue for mock environment
+            queue_url = create_sqs_queue(SQS_QUEUE_NAME)
+            if queue_url:
+                queue_arn = get_queue_arn(queue_url)
+                logger.info(f"Mock SQS queue created: {SQS_QUEUE_NAME} -> {queue_url}")
+                
+                # Set queue URL in settings for worker access
+                settings.sqs_queue_url = queue_url
+                settings.sqs_queue_arn = queue_arn
+            else:
+                raise Exception(f"Failed to create SQS queue: {SQS_QUEUE_NAME}")
+            
+            return {
+                "status": "success",
+                "mode": "mock",
+                "message": "ECS mock mode - AWS resources created",
+                "database": "sqlite3",
+                "infrastructure": "docker-compose via make aws-mock",
+                "s3_bucket": S3_BUCKET_NAME,
+                "sqs_queue_url": queue_url,
+                "sqs_queue_arn": queue_arn
+            }
+            
+        except Exception as e:
+            logger.error(f"Mock deployment failed: {e}")
+            return {
+                "status": "failed",
+                "mode": "mock",
+                "error": str(e)
+            }
+
+class ProductionECSStrategy(ECSDeploymentStrategy):
+    """Strategy for aws-prod deployment using real AWS ECS."""
+    
+    def __init__(self):
+        super().__init__("aws-prod")
+        self.cluster_manager = None
+        self.database_manager = None
+        self.console_validator = None
+        self.deployment_config = {}
+    
+    def validate_gpu_quota(self, region: str) -> bool:
+        """Check if we have sufficient GPU quota before deployment."""
+        try:
+            import boto3
+            client = boto3.client('service-quotas', region_name=region)
+            # Check Spot quota since we're using Spot instances  
+            response = client.get_service_quota(
+                ServiceCode='ec2',
+                QuotaCode='L-3819A6DF'  # All G and VT Spot Instance Requests
+            )
+            
+            current_quota = response['Quota']['Value']
+            required_quota = 8.0  # 2× g4dn.xlarge = 8 vCPUs (adjusted for current quota)
+            
+            if current_quota >= required_quota:
+                logger.info(f"✅ GPU quota sufficient: {current_quota} vCPUs available")
+                return True
+            else:
+                logger.error(f"❌ Insufficient GPU quota: {current_quota} < {required_quota}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to check quota: {e}")
+            return False
+    
+    def setup_clients(self) -> None:
+        """Set up AWS clients for hybrid console+code deployment."""
+        # Initialize infrastructure managers for hybrid approach
+        self.cluster_manager = ECSClusterManager(self.settings.aws_region)  # Consolidated manager from ecs.py
+        self.database_manager = EC2DatabaseManager(self.settings.aws_region)
+        self.console_validator = ConsoleResourceDetector(self.settings.aws_region)
+
+        logger.info("Initialized hybrid console+code infrastructure managers")   
+    
+    def deploy_hybrid_console_code(self) -> Dict[str, Any]:
+        """Deploy using hybrid console+code approach with console validation."""
+        try:
+            logger.info("🔍 Starting hybrid console+code deployment...")
+            
+            # Phase 1: Validate console-created resources
+            logger.info("📋 Phase 1: Console Resource Validation")
+            console_config = self._validate_console_prerequisites()
+            
+            # Phase 2: Create ECS cluster and ensure ECR image
+            logger.info("🏗️ Phase 2: ECS Cluster Setup")
+            validated_resources = console_config['validated_resources']
+            ecs_vpc_config = {
+                'vpc_id': validated_resources['vpc']['vpc_id'],
+                'public_subnet_id': validated_resources['vpc']['public_subnet_id'],
+                'database_security_group_id': console_config['config']['DATABASE_SG_ID'],
+                'ecs_workers_security_group_id': console_config['config']['ECS_WORKERS_SG_ID']
+            }
+            cluster_config = self._setup_ecs_cluster(ecs_vpc_config)
+            
+            # Phase 3: Ensure ECR image exists
+            logger.info("🐳 Phase 3: ECR Image Preparation")
+            if not self._ensure_ecr_repository_and_image():
+                raise Exception("ECR repository and image setup failed")
+            
+            # Phase 4: EC2 Database Instance (automated creation)
+            logger.info("🗄️ Phase 4: EC2 Database Instance Creation")
+            database_config = self._setup_database_infrastructure(ecs_vpc_config)
+            
+            # Phase 4.5: Update .env.aws-prod with DATABASE_HOST for ECS services
+            logger.info("📝 Phase 4.5: Update environment configuration for ECS")
+            if database_config and database_config.get('public_ip'):
+                database_public_ip = database_config['public_ip']
+                self._export_updated_configuration(database_public_ip, ecs_vpc_config, database_config)
+                logger.info(f"Updated .env.aws-prod with DATABASE_HOST={database_public_ip}")
+                # Update console config to use the new database host
+                console_config['config']['DATABASE_HOST'] = database_public_ip
+            else:
+                logger.info("Using existing DATABASE_HOST from .env.aws-prod")
+            
+            # Phase 5: Code-based ECS task definitions deployment
+            logger.info("🚀 Phase 5: Code-based Task Definitions Deployment")  
+            task_config = self._deploy_task_definitions_only(console_config)
+            
+            # Note: Lambda deployment handled by parallel make target (aws-prod-lambda)
+            logger.info("ℹ️  Lambda functions will be deployed in parallel by make aws-prod-lambda")
+            
+            # Deployment Summary
+            hybrid_config = {
+                "status": "success",
+                "mode": "hybrid-console-code", 
+                "region": self.settings.aws_region,
+                "console_resources": console_config,
+                "database": database_config,
+                "tasks": task_config,
+                "deployment_time": time.time()
+            }
+            
+            logger.info("✅ Hybrid console+code deployment completed successfully!")
+            self._print_hybrid_deployment_summary(hybrid_config)
+            return hybrid_config
+            
+        except Exception as e:
+            logger.error(f"❌ Hybrid deployment failed: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "mode": "hybrid-console-code"
+            }
+    
+    def _validate_console_prerequisites(self) -> Dict[str, Any]:
+        """Validate that console-created resources exist and are properly configured."""
+        import os
+        
+        # Get environment variables for console resources
+        console_config = {
+            'VPC_ID': os.getenv('VPC_ID'),
+            'PUBLIC_SUBNET_ID': os.getenv('PUBLIC_SUBNET_ID'),
+            'S3_BUCKET_NAME': os.getenv('S3_BUCKET_NAME'),
+            'SQS_QUEUE_URL': os.getenv('SQS_QUEUE_URL'),
+            'DATABASE_SG_ID': os.getenv('DATABASE_SG_ID'),
+            'ECS_WORKERS_SG_ID': os.getenv('ECS_WORKERS_SG_ID')
+        }
+        
+        # Validate all prerequisites exist
+        if not self.console_validator.validate_all_prerequisites(console_config):
+            raise Exception("Console prerequisites validation failed - check environment variables and AWS resources")
+        
+        # Get validation results with resource details
+        validation_results = self.console_validator.get_validation_results()
+        
+        logger.info("✅ Console prerequisites validated successfully")
+        return {
+            'config': console_config,
+            'validated_resources': validation_results['resources']
+        }
+    
+    def _deploy_task_definitions_only(self, console_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy ECS task definitions using console-created infrastructure."""
+        # Extract validated resources from console config
+        validated_resources = console_config['validated_resources']
+        
+        # Create simplified config for ECS deployment
+        ecs_vpc_config = {
+            'vpc_id': validated_resources['vpc']['vpc_id'],
+            'public_subnet_id': validated_resources['vpc']['public_subnet_id'],
+            'ecs_workers_security_group_id': console_config['config']['ECS_WORKERS_SG_ID']
+        }
+        
+        # AMI-based deployment: models are pre-loaded in AMI
+        ami_config = {'model_path': '/opt/vlm-models'}
+        
+        # Deploy ECS task definitions with database host from console config  
+        database_host = console_config['config'].get('DATABASE_HOST', 'localhost')
+        deployment_result = self.cluster_manager.create_vlm_worker_task_definition_ami(
+            vpc_config=ecs_vpc_config,
+            database_host=database_host
+        )
+        
+        if deployment_result:
+            logger.info("✅ ECS task definitions deployed successfully using console infrastructure")
+            return {
+                'status': 'success',
+                'task_definition_arn': deployment_result,
+                'deployment_type': 'ami-based'
+            }
+        else:
+            raise Exception("ECS task definitions deployment failed")
+       
+    def _print_hybrid_deployment_summary(self, config: Dict[str, Any]) -> None:
+        """Print hybrid deployment summary."""
+        logger.info("=" * 60)
+        logger.info("🎉 HYBRID DEPLOYMENT SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Status: {config['status']}")
+        logger.info(f"Mode: {config['mode']}")
+        logger.info(f"Region: {config['region']}")
+        
+        if 'console_resources' in config:
+            console_resources = config['console_resources']['validated_resources']
+            logger.info(f"Console VPC: {console_resources['vpc']['vpc_id']}")
+            # EFS removed in AMI-based architecture
+            logger.info(f"Console Storage: S3={console_resources['storage']['s3_bucket']}")
+        
+        if 'lambda' in config:
+            lambda_info = config['lambda']
+            logger.info(f"Lambda Function: {lambda_info['function_name']}")
+            if 'function_url' in lambda_info:
+                logger.info(f"Function URL: {lambda_info['function_url']}")
+        
+        logger.info("=" * 60)   
+    
+    @log_operation("EC2 database server setup")
+    def _setup_database_infrastructure(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Set up EC2 SQLite HTTP database server in public subnet (using EC2 boot volume)."""
+        # Use public subnet for database deployment with console-created security group
+        database_config = self.database_manager.create_database_instance(vpc_config)
+        
+        # Wait for manual setup completion if this is a new instance
+        if database_config.get('manual_setup_required'):
+            logger.info("📋 Manual SQLite setup required - see deployment/aws/services/README.md")
+            logger.info(f"🔗 SSH command: {database_config.get('ssh_command', 'N/A')}")
+            
+            # Skip waiting for manual setup since we're deploying task definitions only
+            # ECS tasks won't start immediately, so database setup can be completed later
+            logger.info("⏩ Skipping database setup wait - tasks will be launched by Lambda scaler when needed")
+            logger.info("Complete database setup using the SSH command above before processing documents")
+        
+        logger.info(f"Database server ready: {database_config['instance_id']} at {database_config.get('public_ip', database_config['private_ip'])}")
+        
+        return database_config
+        
+    @log_operation("ECS cluster setup")
+    def _setup_ecs_cluster(self, vpc_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Set up ECS cluster with GPU capacity provider."""
+        cluster_config = self.cluster_manager.create_cluster(
+            vpc_config['vpc_id'],
+            [vpc_config['public_subnet_id']]
+        )
+        
+        logger.info(f"ECS cluster created: {cluster_config['clusterName']}")
+        return self.cluster_manager.get_cluster_info()
+    
+    def _check_image_exists(self, ecr_client) -> bool:
+        """Check if ECR image already exists."""
+        try:
+            response = ecr_client.describe_images(
+                repositoryName=ECR_REPO_NAME,
+                imageIds=[{'imageTag': 'latest'}]
+            )
+            images = response.get('imageDetails', [])
+            if images:
+                image_size_mb = images[0].get('imageSizeInBytes', 0) / (1024 * 1024)
+                logger.info(f"Found existing image: {image_size_mb:.1f} MB, pushed {images[0].get('imagePushedAt', 'unknown time')}")
+                return True
+            return False
+        except ecr_client.exceptions.ImageNotFoundException:
+            logger.info("No existing image found")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check for existing image: {e}")
+            return False    
+
+    def _check_ecr_repository_exists(self, ecr_client) -> bool:
+        """Check if ECR repository exists."""
+        try:
+            ecr_client.describe_repositories(repositoryNames=[ECR_REPO_NAME])
+            logger.info(f"ECR repository '{ECR_REPO_NAME}' exists")
+            return True
+        except ecr_client.exceptions.RepositoryNotFoundException:
+            logger.info(f"ECR repository '{ECR_REPO_NAME}' does not exist - will create")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check ECR repository: {e}")
+            return False
+    
+    def _ensure_ecr_repository_and_image(self) -> bool:
+        """Ensure ECR repository exists and has the required image."""
+        ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+        
+        # Step 1: Check if repository exists
+        if not self._check_ecr_repository_exists(ecr_client):
+            logger.info("Creating ECR repository...")
+            self._create_ecr_repository(ecr_client)
+        
+        # Step 2: Check if image exists in repository
+        if self._check_image_exists(ecr_client):
+            logger.info("✅ ECR image validation successful - using existing image")
+            return True
+        
+        # Step 3: Build and push image if not found
+        logger.info("📦 ECR image not found - building and pushing new image")
+        self._build_and_push_ecr_image()
+        
+        # Step 4: Verify image was pushed successfully
+        if self._check_image_exists(ecr_client):
+            logger.info("✅ ECR image build and push successful")
+            return True
+        else:
+            logger.error("❌ ECR image build/push failed - image still not found")
+            return False
+    
+    def _create_ecr_repository(self, ecr_client) -> None:
+        """Create ECR repository if it doesn't exist."""
+        try:
+            ecr_client.create_repository(
+                repositoryName=ECR_REPO_NAME,
+                imageScanningConfiguration={'scanOnPush': True},
+                tags=[
+                    {'Key': 'Project', 'Value': self.settings.app_name},
+                    {'Key': 'Component', 'Value': 'VLM-Worker'},
+                    {'Key': 'Purpose', 'Value': 'Container-Registry'}
+                ]
+            )
+            logger.info(f"Created ECR repository: {ECR_REPO_NAME}")
+        except ecr_client.exceptions.RepositoryAlreadyExistsException:
+            logger.info(f"ECR repository {ECR_REPO_NAME} already exists")
+        except Exception as e:
+            logger.error(f"Failed to create ECR repository: {e}")
+            raise
+    
+    def _build_and_push_ecr_image(self) -> None:
+        """Build and push Docker image to ECR with proper error handling."""
+        try:
+            # Get ECR login token
+            ecr_client = boto3.client('ecr', region_name=self.settings.aws_region)
+            token_response = ecr_client.get_authorization_token()
+            token_data = token_response['authorizationData'][0]
+            
+            # Find Docker path (VLM worker)
+            docker_image_path = self._find_docker_path()
+            
+            # Build and push image
+            self._build_and_push_image(docker_image_path, token_data)
+            
+        except Exception as e:
+            logger.error(f"ECR build and push failed: {e}")
+            raise
+    
+    def _find_docker_path(self) -> str:
+        """Find the Docker image path for VLM worker."""
+        from pathlib import Path
+        
+        # Look for VLM worker Dockerfile in the correct location
+        project_root = Path(__file__).parent.parent.parent.parent
+        vlm_docker_path = project_root / "deployment" / "docker" / "vlm-worker"
+        
+        if (vlm_docker_path / "Dockerfile").exists():
+            logger.info(f"Found VLM Dockerfile at: {vlm_docker_path}")
+            return str(vlm_docker_path)
+        else:
+            # Fallback: try the old location in case project structure varies
+            fallback_path = project_root / "src" / "files_api" / "vlm"
+            if (fallback_path / "Dockerfile").exists():
+                logger.info(f"Found VLM Dockerfile at fallback location: {fallback_path}")
+                return str(fallback_path)
+            
+            raise Exception(f"VLM Dockerfile not found at: {vlm_docker_path} or {fallback_path}")
+    
+    def _check_image_exists(self, ecr_client) -> bool:
+        """Check if ECR image already exists."""
+        try:
+            response = ecr_client.describe_images(
+                repositoryName=ECR_REPO_NAME,
+                imageIds=[{'imageTag': 'latest'}]
+            )
+            images = response.get('imageDetails', [])
+            if images:
+                image_size_mb = images[0].get('imageSizeInBytes', 0) / (1024 * 1024)
+                logger.info(f"Found existing image: {image_size_mb:.1f} MB, pushed {images[0].get('imagePushedAt', 'unknown time')}")
+                return True
+            return False
+        except ecr_client.exceptions.ImageNotFoundException:
+            logger.info("No existing image found - will build new one")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check for existing image: {e} - will build new one")
+            return False
+    
+    def _build_and_push_image(self, docker_path: str, token_data: Dict[str, Any]) -> None:
+        """Build and push Docker image to ECR."""
+        import base64
+        import subprocess
+        from pathlib import Path
+        
+        # Decode ECR token
+        token = base64.b64decode(token_data['authorizationToken']).decode('utf-8')
+        username, password = token.split(':')
+        
+        # Build ECR URI
+        account_id = token_data['proxyEndpoint'].split('.')[0].split('//')[-1]
+        ecr_uri = f"{account_id}.dkr.ecr.{self.settings.aws_region}.amazonaws.com/{ECR_REPO_NAME}:latest"
+        
+        # Docker login
+        subprocess.run([
+            "docker", "login", "--username", username, "--password-stdin",
+            token_data['proxyEndpoint']
+        ], input=password.encode(), check=True)
+        
+        # Build image from project root
+        project_root = Path(__file__).parent.parent.parent.parent
+        subprocess.run([
+            "docker", "build", "-t", ecr_uri, "-f", f"{docker_path}/Dockerfile", "."
+        ], check=True, cwd=project_root)
+        
+        # Push image
+        subprocess.run([
+            "docker", "push", ecr_uri
+        ], check=True)
+        
+        logger.info(f"Pushed image to ECR: {ecr_uri}")
+    
+    def _export_updated_configuration(self, database_public_ip: str, vpc_config: Dict[str, Any], database_config: Dict[str, Any]) -> None:
+        """Update .env.aws-prod file with database public IP."""
+        try:
+            import os
+            export_file = ".env.aws-prod"
+            
+            # Read existing configuration if it exists
+            config_lines = []
+            if os.path.exists(export_file):
+                with open(export_file, 'r') as f:
+                    config_lines = f.readlines()
+            
+            # Update or add database configuration
+            updated_lines = []
+            database_host_updated = False
+            database_public_ip_updated = False
+            
+            for line in config_lines:
+                if line.startswith('DATABASE_HOST='):
+                    updated_lines.append(f"DATABASE_HOST={database_public_ip}\n")
+                    database_host_updated = True
+                elif line.startswith('DATABASE_PUBLIC_IP='):
+                    updated_lines.append(f"DATABASE_PUBLIC_IP={database_public_ip}\n")
+                    database_public_ip_updated = True
+                else:
+                    updated_lines.append(line)
+            
+            # Add missing configuration
+            if not database_host_updated:
+                updated_lines.append(f"DATABASE_HOST={database_public_ip}\n")
+            if not database_public_ip_updated:
+                updated_lines.append(f"DATABASE_PUBLIC_IP={database_public_ip}\n")
+            
+            # Write updated configuration
+            with open(export_file, 'w') as f:
+                f.writelines(updated_lines)
+            
+            logger.info(f"Updated {export_file} with database public IP: {database_public_ip}")
+            
+        except Exception as e:
+            logger.error(f"Failed to export updated configuration: {e}")
+            raise
+
+
+
+def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> None:
+    """Export infrastructure configuration to environment file for docker-compose."""
+    if result.get("status") != "success":
+        logger.error("Cannot export config from failed deployment")
+        return
+    
+    try:
+        import os
+        config_lines = [
+            "# AWS Infrastructure Configuration for Docker Compose",
+            "# Generated by deploy_ecs.py --infrastructure-only",
+            "",
+            f"# AWS Credentials (from environment)",
+            f"AWS_ACCESS_KEY_ID={os.environ.get('AWS_ACCESS_KEY_ID', '')}",
+            f"AWS_SECRET_ACCESS_KEY={os.environ.get('AWS_SECRET_ACCESS_KEY', '')}",
+            "",
+            f"# Deployment Info",
+            f"APP_NAME=\"{settings.app_name}\"",
+            f"AWS_DEFAULT_REGION={result['region']}",
+            f"AWS_ACCOUNT_ID={settings.account_id}",
+            f"DEPLOYMENT_MODE=aws-prod",
+            "",
+            f"# ECS Configuration",
+            f"ECS_CLUSTER_NAME={result['cluster_name']}",
+            f"ECS_SERVICE_NAME=vlm-worker",
+            "",
+            f"# VPC Configuration (Public Subnet Only Architecture)",
+            f"VPC_ID={result['vpc']['vpc_id']}",
+            f"PUBLIC_SUBNET_ID={result['vpc']['public_subnet_id']}",
+            "",
+            f"# AMI Configuration (Models pre-loaded)",
+            f"CUSTOM_AMI_ID={os.environ.get('CUSTOM_AMI_ID', 'N/A')}",
+            f"MODEL_PATH=/opt/vlm-models",
+            "",
+            f"# S3 and SQS Configuration", 
+            f"S3_BUCKET_NAME={result['s3_bucket']}",
+            f"SQS_QUEUE_NAME={result['sqs_queue']}",
+            f"SQS_QUEUE_URL=https://sqs.{result['region']}.amazonaws.com/{settings.account_id}/{result['sqs_queue']}",
+            "",
+            f"# Database Configuration",
+            f"DATABASE_HOST={result['database'].get('public_ip', result['database']['private_ip'])}",
+            f"DATABASE_PORT=8080",
+            f"DATABASE_PUBLIC_IP={result['database'].get('public_ip', 'N/A')}",
+            f"DATABASE_INSTANCE_ID={result['database']['instance_id']}",
+            "",
+            f"# Docker Compose Configuration",
+            f"COMPOSE_NETWORK_SUBNET=172.20.0.0/16",
+            f"ECR_REPO_NAME={settings.ecr_repo_name}",
+            f"ECR_REGISTRY={settings.ecr_registry}",
+            f"IMAGE_TAG=latest",
+            f"VLM_WORKER_REPLICAS=0",
+            "",
+            f"# CloudWatch Logging",
+            f"CLOUDWATCH_LOG_GROUP=\"/ecs/{settings.app_name}\"",
+            "",
+            f"# Usage:",
+            f"# 1. AMI has pre-loaded models at /opt/vlm-models",
+            f"# 2. Database server is running at: http://{result['database']['private_ip']}:8080",
+            f"# 3. ECS tasks launched by Lambda scaling functions",
+            f"# 4. EventBridge triggers Lambda functions based on SQS queue depth"
+        ]
+        
+        with open(export_file, 'w') as f:
+            f.write('\n'.join(config_lines))
+        
+        logger.info(f"Infrastructure configuration exported to: {export_file}")
+        print(f"\nInfrastructure configuration exported to: {export_file}")
+        print(f"Next steps:")
+        print(f"1. Source the config: source {export_file}")
+        print(f"2. Models are pre-loaded in AMI (no mounting needed)")
+        print(f"3. Run: docker-compose -f src/files_api/docker-compose.aws-prod.yml up")
+        
+    except Exception as e:
+        logger.error(f"Failed to export infrastructure config: {e}")
+        raise
+
+def cleanup_deployment(mode: str = None) -> None:
+    """Clean up ECS deployment resources."""
+    mode = mode or settings.deployment_mode
+    
+    if mode == "aws-mock":
+        logger.info("Cleaning up mock deployment")
+        try:
+            # Use existing aws-mock-down function
+            subprocess.run(["make", "aws-mock-down"], check=True, cwd=".")
+            logger.info("Mock deployment cleaned up using existing aws-mock-down")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Mock cleanup failed: {e}")
+    
+    elif mode == "aws-prod":
+        logger.info("Cleaning up production deployment")
+        try:
+            # Initialize managers for AMI-based cleanup
+            cluster_manager = ECSClusterManager(settings.aws_region)
+            database_manager = EC2DatabaseManager(settings.aws_region)
+            vpc_builder = VPCNetworkBuilder(settings.aws_region)
+            
+            # Clean up in reverse order (no services in AMI approach)
+            logger.info("Phase 1: Cleaning up ECS cluster and task definitions")
+            cluster_manager.cleanup_cluster_resources()
+            
+            logger.info("Phase 2: Cleaning up database infrastructure")
+            database_manager.cleanup_database_instance()
+            
+            logger.info("Phase 3: Cleaning up VPC resources")
+            vpc_builder.cleanup_vpc_resources()
+            
+            logger.info("✅ Production deployment cleaned up successfully")
+        except Exception as e:
+            logger.error(f"Production cleanup failed: {e}")
+            raise
+
+
+def main():
+    """Main deployment entry point."""
+    parser = argparse.ArgumentParser(description="Deploy ECS infrastructure for VLM workers")
+    parser.add_argument("--mode", choices=["aws-mock", "aws-prod"], 
+                       default=settings.deployment_mode,
+                       help="Deployment mode")
+    parser.add_argument("--cleanup", action="store_true", 
+                       help="Clean up deployment instead of deploying")
+    parser.add_argument("--hybrid-console", action="store_true",
+                       help="Deploy using hybrid console+code approach")
+    parser.add_argument("--validate-only", action="store_true",
+                       help="Only validate console infrastructure, don't deploy")
+    
+    args = parser.parse_args()
+    
+    try:
+        if args.cleanup:
+            cleanup_deployment(args.mode)
+            return
+            
+        if args.validate_only:
+            # Use existing resource validator for console infrastructure
+            logger.info("Validating console infrastructure...")
+            import subprocess
+            import sys
+            import os
+            
+            # Debug: Print key environment variables
+            required_vars = ['VPC_ID', 'PUBLIC_SUBNET_ID', 
+                           'S3_BUCKET_NAME', 'SQS_QUEUE_URL', 'DATABASE_SG_ID', 'ECS_WORKERS_SG_ID']
+            print("🔍 Environment variables for validation:")
+            for var in required_vars:
+                value = os.getenv(var, 'NOT_SET')
+                print(f"  {var}={value}")
+            print()
+            
+            # Pass current environment (includes variables from .env.aws-prod)
+            result = subprocess.run([
+                sys.executable, "-m", "deployment.aws.monitoring.resource_validator", 
+                "--check", "console"
+            ], capture_output=True, text=True, env=os.environ.copy())
+            
+            if result.returncode == 0:
+                logger.info("✅ Console infrastructure validation successful!")
+                print(result.stdout)
+            else:
+                logger.error("❌ Console infrastructure validation failed!")
+                print(result.stderr)
+            
+            sys.exit(result.returncode)
+        
+        # Execute deployment with direct strategy instantiation
+        if args.mode == "aws-mock":
+            strategy = MockECSStrategy()
+            strategy.setup_clients()
+            result = strategy.deploy()
+        elif args.mode == "aws-prod":
+            strategy = ProductionECSStrategy()
+            strategy.setup_clients()
+            if args.hybrid_console:
+                logger.info("Using hybrid console+code deployment approach")
+                result = strategy.deploy_hybrid_console_code()
+            else:
+                raise ValueError("aws-prod mode requires --hybrid-console flag")
+        else:
+            raise ValueError(f"Unsupported deployment mode: {args.mode}")
+        
+        # Output deployment summary
+        print(json.dumps(result, indent=2, default=str))
+        
+        if result.get("status") == "success":
+            logger.info("ECS deployment completed successfully!")
+            print(f"\nDeployment Summary:")
+            print(f"Mode: {result.get('mode')}")
+            print(f"Region: {result.get('region')}")
+            print(f"Cluster: {result.get('cluster_name')}")
+            
+            if args.mode == "aws-prod":
+                if result.get('mode') == 'hybrid-console-code':
+                    print(f"Console VPC: {result['console_resources']['validated_resources']['vpc']['vpc_id']}")
+                    # EFS removed in AMI-based architecture
+                    if 'lambda' in result:
+                        print(f"Lambda Function: {result['lambda']['function_name']}")
+                        if 'function_url' in result['lambda']:
+                            print(f"Function URL: {result['lambda']['function_url']}")
+                    else:
+                        print("Lambda deployment: Not included in hybrid deployment (handled separately)")
+                else:
+                    print(f"VPC ID: {result['vpc']['vpc_id']}")
+                    print(f"Database Server: {result['database']['instance_id']} at {result['database']['private_ip']}:8080")
+                    custom_ami_id = os.environ.get('CUSTOM_AMI_ID')
+                    if custom_ami_id and custom_ami_id != 'N/A':
+                        print(f"Custom AMI: {custom_ami_id} (models pre-loaded)")
+                    
+                    # Note: infrastructure-only mode removed in streamlined architecture
+        else:
+            logger.error("ECS deployment failed!")
+            return 1
+            
+    except Exception as e:
+        logger.error(f"Deployment error: {e}")
+        return 1
+    
+    return 0
+
+
+if __name__ == "__main__":
+    exit(main())

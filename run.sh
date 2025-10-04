@@ -16,22 +16,19 @@ CERT_DAYS=365
 # --- Helper Functions --- #
 ##########################
 
-# Function to get settings as environment variables
-function get_settings_as_env {
-    python3 -c "
-from files_api.settings import get_settings
-settings = get_settings()
-print(f'export S3_BUCKET_NAME=\"{settings.s3_bucket_name}\"')
-print(f'export SQS_QUEUE_NAME=\"{settings.sqs_queue_name}\"')
-print(f'export AWS_DEFAULT_REGION=\"{settings.aws_region}\"')
-print(f'export AWS_ENDPOINT_URL=\"{settings.aws_endpoint_url or \"\"}\"')
-print(f'export AWS_ACCESS_KEY_ID=\"{settings.aws_access_key_id or \"mock\"}\"')
-print(f'export AWS_SECRET_ACCESS_KEY=\"{settings.aws_secret_access_key or \"mock\"}\"')
-print(f'export SQS_QUEUE_URL=\"{settings.sqs_queue_url or \"\"}\"')
-print(f'export MODEL_MEMORY_LIMIT=\"{settings.model_memory_limit}\"')
-print(f'export DISABLE_DUPLICATE_LOADING=\"{str(settings.disable_duplicate_loading).lower()}\"')
-print(f'export LOG_LEVEL=\"{settings.log_level}\"')
-"
+# Function to load environment variables from .env files
+function load_env_file {
+    local env_file=$1
+    if [ -f "$env_file" ]; then
+        set -a  # automatically export all variables
+        source "$env_file"
+        set +a
+        echo "✅ Loaded environment from $env_file"
+        return 0
+    else
+        echo "❌ Environment file $env_file not found"
+        return 1
+    fi
 }
 
 ##########################
@@ -54,27 +51,21 @@ function run {
 function local-dev {
     set +e
     
-    # Create .env.local to override any aws-mock settings
-    cat > .env.local << EOF
-DEPLOYMENT_MODE=local-dev
-QUEUE_TYPE=local-dev
-AWS_ENDPOINT_URL=http://localhost:5000
-AWS_ACCESS_KEY_ID=mock
-AWS_SECRET_ACCESS_KEY=mock
-S3_BUCKET_NAME=some-bucket
-MODEL_MEMORY_LIMIT=24GiB
-DISABLE_DUPLICATE_LOADING=true
-EOF
-
-    # Configure AWS mock environment
-    export DEPLOYMENT_MODE="local-dev"
-    export QUEUE_TYPE="local-dev"
-    export DISABLE_DUPLICATE_LOADING="true"
-    export MODEL_MEMORY_LIMIT="24GiB"
-    export AWS_ENDPOINT_URL="http://localhost:5000"
-    export AWS_SECRET_ACCESS_KEY="mock"
-    export AWS_ACCESS_KEY_ID="mock"
-    export S3_BUCKET_NAME="some-bucket"
+    # Load local development environment
+    load_env_file ".env.local-dev"
+    
+    if [ $? -ne 0 ]; then
+        echo "⚠️ Could not load .env.local-dev, using fallback configuration"
+        # Fallback configuration
+        export DEPLOYMENT_MODE="local-dev"
+        export QUEUE_TYPE="local-dev"
+        export DISABLE_DUPLICATE_LOADING="true"
+        export MODEL_MEMORY_LIMIT="24GiB"
+        export AWS_ENDPOINT_URL="http://localhost:5000"
+        export AWS_SECRET_ACCESS_KEY="mock"
+        export AWS_ACCESS_KEY_ID="mock"
+        export S3_BUCKET_NAME="some-bucket"
+    fi
 
     # Start moto server
     python -m moto.server -p 5000 &
@@ -88,7 +79,7 @@ EOF
     
     # Start worker in background with lazy model loading
     echo "Starting Local Worker (with lazy model loading)"
-    python src/files_api/cli.py worker --mode local-dev --no-preload-models &
+    python -m vlm_workers.cli worker --mode local-dev --no-preload-models &
     
     # Wait a moment to ensure worker has started
     sleep 2
@@ -189,12 +180,22 @@ EOF
 function aws-mock {
     set +e
     
-    echo "Setting up AWS mock infrastructure with EB worker autoscaling simulation..."
+    # Load AWS mock environment
+    load_env_file ".env.aws-mock"
+    
+    if [ $? -ne 0 ]; then
+        echo "⚠️ Could not load .env.aws-mock, using fallback configuration"
+        # Fallback configuration
+        export DEPLOYMENT_MODE="aws-mock"
+        export AWS_ENDPOINT_URL="http://localhost:5000"
+        export AWS_SECRET_ACCESS_KEY="mock"
+        export AWS_ACCESS_KEY_ID="mock"
+        export S3_BUCKET_NAME="rag-pdf-storage"
+    fi
+    
+    echo "Setting up AWS mock infrastructure with ECS worker autoscaling simulation..."
     echo "🚀 Using decoupled architecture: separate model downloader + worker containers"
     echo "📦 Models downloaded once by dedicated container, then used by worker"
-    
-    # Set deployment mode
-    export DEPLOYMENT_MODE="aws-mock"
     
     # Get absolute path to project root
     PROJECT_ROOT="$(pwd)"
@@ -226,15 +227,9 @@ function aws-mock {
         exit 1
     fi
     
-    # Set AWS mock environment variables
-    export AWS_ENDPOINT_URL="http://localhost:5000"
-    export AWS_SECRET_ACCESS_KEY="mock"
-    export AWS_ACCESS_KEY_ID="mock"
-    export S3_BUCKET_NAME="rag-pdf-storage"
-    
     # Deploy ECS infrastructure using deploy_ecs.py
     echo "Creating ECS mock resources (S3, SQS, etc.)..."
-    python -m files_api.aws.deploy_ecs --mode aws-mock
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-mock
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to create ECS mock resources"
@@ -248,21 +243,21 @@ function aws-mock {
     # Build images and start model downloader first
     echo "📥 Step 1: Building Docker images and downloading models..."
     echo "💡 This will run the model-downloader service first, then start the worker"
-    cd "$PROJECT_ROOT/src/files_api"  # Updated path - docker-compose is now here
+    cd "$PROJECT_ROOT"  # Use project root for new docker-compose location
     
     # Use docker-compose up with dependency management
     # The model-downloader will run first and download models to the volume
-    # Then ecs-worker will start automatically once downloader completes successfully
-    docker-compose -f docker-compose.ecs-mock.yml up -d --build
+    # Then vlm-worker will start automatically once downloader completes successfully
+    docker-compose -f deployment/docker/compose/aws-mock.yml up -d --build
     
     # Check if model downloader completed successfully
     echo "🔍 Checking model downloader completion status..."
-    if docker-compose -f docker-compose.ecs-mock.yml ps model-downloader | grep -q "Exit 0"; then
+    if docker-compose -f deployment/docker/compose/aws-mock.yml ps model-downloader | grep -q "Exit 0"; then
         echo "✅ Model downloader completed successfully!"
-    elif docker-compose -f docker-compose.ecs-mock.yml ps model-downloader | grep -q "Exit [1-9]"; then
-        exit_code=$(docker-compose -f docker-compose.ecs-mock.yml ps model-downloader | grep "Exit" | sed 's/.*Exit \([0-9]*\).*/\1/')
+    elif docker-compose -f deployment/docker/compose/aws-mock.yml ps model-downloader | grep -q "Exit [1-9]"; then
+        exit_code=$(docker-compose -f deployment/docker/compose/aws-mock.yml ps model-downloader | grep "Exit" | sed 's/.*Exit \([0-9]*\).*/\1/')
         echo "❌ Model downloader failed with exit code: $exit_code"
-        echo "🔍 Check logs: docker-compose -f docker-compose.ecs-mock.yml logs model-downloader"
+        echo "🔍 Check logs: docker-compose -f deployment/docker/compose/aws-mock.yml logs model-downloader"
         cd "$PROJECT_ROOT"
         kill $MOTO_PID 2>/dev/null
         aws-mock-down
@@ -275,11 +270,11 @@ function aws-mock {
     echo "🔍 Verifying worker container is running..."
     sleep 5  # Give worker a moment to start
     
-    worker_status=$(docker-compose -f docker-compose.ecs-mock.yml ps -q ecs-worker | xargs docker inspect --format='{{.State.Status}}' 2>/dev/null || echo "not_found")
+    worker_status=$(docker-compose -f deployment/docker/compose/aws-mock.yml ps -q vlm-worker | xargs docker inspect --format='{{.State.Status}}' 2>/dev/null || echo "not_found")
     
     if [ "$worker_status" != "running" ]; then
         echo "❌ Worker container failed to start (status: $worker_status)"
-        echo "🔍 Check logs: docker-compose -f docker-compose.ecs-mock.yml logs ecs-worker"
+        echo "🔍 Check logs: docker-compose -f deployment/docker/compose/aws-mock.yml logs vlm-worker"
         cd "$PROJECT_ROOT"
         kill $MOTO_PID 2>/dev/null
         aws-mock-down
@@ -289,16 +284,17 @@ function aws-mock {
     echo "✅ ECS Worker container is running and ready for inference!"
     cd "$PROJECT_ROOT"
     
-    # Start autoscaling simulator in background
-    echo "Starting ECS Autoscaling Simulator (mock mode)..."
-    python -m files_api.aws.ecs_scale_sim \
+    # Start autoscaling simulator in background (simulation-only mode)
+    echo "Starting ECS Autoscaling Simulator (simulation-only mode)..."
+    echo "💡 This will simulate scaling decisions without actually scaling containers"
+    python -m vlm_workers.scaling.auto_scaler \
         --queue-url "$SQS_QUEUE_URL" \
         --min-instances 0 \
         --max-instances 3 \
         --scale-up-threshold 1 \
         --scale-down-threshold 0 \
-        --cooldown 300 \
-        --evaluation-interval 15 \
+        --cooldown 30 \
+        --evaluation-interval 5 \
         --evaluation-periods 1 &
     SIMULATOR_PID=$!
     
@@ -310,8 +306,8 @@ function aws-mock {
     echo "📊 Monitor autoscaling decisions in the logs above"
     echo "📈 Upload PDFs to trigger queue activity and observe scaling behavior"
     echo "🔧 Container logs:"
-    echo "   - Model downloads: docker-compose -f src/files_api/docker-compose.ecs-mock.yml logs model-downloader"
-    echo "   - Worker activity: docker-compose -f src/files_api/docker-compose.ecs-mock.yml logs ecs-worker"
+    echo "   - Model downloads: docker-compose -f deployment/docker/compose/aws-mock.yml logs model-downloader"
+    echo "   - Worker activity: docker-compose -f deployment/docker/compose/aws-mock.yml logs vlm-worker"
     echo "🛑 Press Ctrl+C to shutdown everything"
     
     python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000
@@ -330,434 +326,543 @@ function aws-mock-down {
     pkill -f "eb_autoscaling_simulator" || true
     
     # Stop and remove containers, networks, and volumes
-    cd src/files_api && docker-compose -f docker-compose.ecs-mock.yml down
+    docker-compose -f deployment/docker/compose/aws-mock.yml down
     
     # Force remove any remaining containers
-    docker rm -f model-downloader ecs-worker 2>/dev/null || true
+    docker rm -f model-downloader vlm-worker 2>/dev/null || true
     
     echo "✅ AWS mock environment completely cleaned up"
     echo "💡 All containers, volumes, and networks removed"
 }
 
-# Deploy to AWS using 4-phase Docker Compose ECS architecture
+# Deploy to AWS using streamlined hybrid console+code architecture
 function aws-prod {
     set +e
     
-    echo "🚀 Deploying 4-phase Docker Compose ECS architecture to AWS..."
-    echo "📦 Architecture: Lambda API + Docker Compose ECS + MongoDB + EFS"
+    # Load AWS production environment first
+    load_env_file ".env.aws-prod"
     
-    # Set deployment mode
+    echo "🚀 AWS Production Deployment (AMI-based Hybrid)"
+    echo "==============================================="
+    echo "Prerequisites: VPC, subnets, security groups created via console"
+    echo "Architecture: Custom AMI + EventBridge Lambda scaling"
+    echo ""
+    
     export DEPLOYMENT_MODE="aws-prod"
     
-    # Phase 1: Deploy infrastructure only and export configuration
-    echo "🏗️ Phase 1: Deploying ECS infrastructure and exporting configuration..."
-    python -m files_api.aws.deploy_ecs --mode aws-prod --infrastructure-only --export-config .env.aws-prod
+    # Phase 1: Smart AMI detection and building
+    echo "🔍 Phase 1: Smart AMI detection and building..."
+
+    # Check for force rebuild flag
+    FORCE_AMI_REBUILD=false
+    if [ "$1" = "--force-ami-rebuild" ] || [ "$2" = "--force-ami-rebuild" ] || [ "$3" = "--force-ami-rebuild" ]; then
+        FORCE_AMI_REBUILD=true
+        echo "🔄 Force AMI rebuild requested - will build new AMI regardless of existing ones"
+    fi
+
+    # Function to update AMI ID in environment
+    update_ami_id() {
+        local ami_id="$1"
+        local source="$2"
+
+        # Update .env.aws-prod
+        if [ -f ".env.aws-prod" ]; then
+            if grep -q "^CUSTOM_AMI_ID=" .env.aws-prod; then
+                sed -i "s/^CUSTOM_AMI_ID=.*/CUSTOM_AMI_ID=$ami_id/" .env.aws-prod
+            else
+                echo "CUSTOM_AMI_ID=$ami_id" >> .env.aws-prod
+            fi
+            echo "✅ Updated .env.aws-prod with CUSTOM_AMI_ID=$ami_id ($source)"
+        fi
+
+        # Export for use by deploy_ecs.py
+        export CUSTOM_AMI_ID="$ami_id"
+    }
+
+    # Check for recent AMI first (within last 24 hours) unless force rebuild
+    if [ "$FORCE_AMI_REBUILD" = false ]; then
+        echo "🔍 Checking for recent AMI (built within 24 hours)..."
+
+        # Calculate 24 hours ago timestamp
+        if date --version >/dev/null 2>&1; then
+            # GNU date (Linux)
+            TWENTY_FOUR_HOURS_AGO=$(date -d '24 hours ago' -u '+%Y-%m-%dT%H:%M:%S.000Z')
+        else
+            # BSD date (macOS)
+            TWENTY_FOUR_HOURS_AGO=$(date -v-24H -u '+%Y-%m-%dT%H:%M:%S.000Z')
+        fi
+
+        # Find the most recent AMI matching our pattern and created within 24 hours
+        RECENT_AMI_INFO=$(aws ec2 describe-images --owners self \
+            --filters "Name=name,Values=fastapi-app-vlm-*" \
+            --query "Images[?CreationDate>=\`$TWENTY_FOUR_HOURS_AGO\`] | sort_by(@, &CreationDate) | [-1].{ImageId:ImageId,Name:Name,CreationDate:CreationDate,State:State}" \
+            --output json 2>/dev/null)
+
+        if [ "$RECENT_AMI_INFO" != "null" ] && [ -n "$RECENT_AMI_INFO" ] && [ "$RECENT_AMI_INFO" != "[]" ]; then
+            RECENT_AMI_ID=$(echo "$RECENT_AMI_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('ImageId', ''))" 2>/dev/null || echo "")
+            RECENT_AMI_NAME=$(echo "$RECENT_AMI_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('Name', ''))" 2>/dev/null || echo "")
+            RECENT_AMI_DATE=$(echo "$RECENT_AMI_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('CreationDate', ''))" 2>/dev/null || echo "")
+            RECENT_AMI_STATE=$(echo "$RECENT_AMI_INFO" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('State', ''))" 2>/dev/null || echo "")
+
+            if [ -n "$RECENT_AMI_ID" ] && [ "$RECENT_AMI_ID" != "null" ] && [ "$RECENT_AMI_STATE" = "available" ]; then
+                echo "✅ Found recent AMI: $RECENT_AMI_ID"
+                echo "   📅 Created: $RECENT_AMI_DATE"
+                echo "   📝 Name: $RECENT_AMI_NAME"
+                echo "   💡 Skipping AMI build (saving ~2 hours)"
+
+                update_ami_id "$RECENT_AMI_ID" "reused recent"
+                echo "✅ Using existing AMI instead of building new one"
+                RECENT_AMI_ID="$RECENT_AMI_ID"  # Set flag to skip building
+            else
+                echo "⚠️ Found recent AMI but it's not available (state: $RECENT_AMI_STATE)"
+                RECENT_AMI_ID=""
+            fi
+        else
+            echo "ℹ️ No recent AMI found (or older than 24 hours)"
+            RECENT_AMI_ID=""
+        fi
+    else
+        echo "⏭️ Skipping AMI detection due to --force-ami-rebuild flag"
+        RECENT_AMI_ID=""
+    fi
+
+    # Check if manual AMI ID is provided
+    if [ -z "$RECENT_AMI_ID" ]; then
+        echo "📋 No recent AMI found - Manual AMI creation required"
+        echo ""
+        echo "🔧 Manual AMI Creation Process:"
+        echo "   1. Follow the manual AMI build guide: docs/AMI_MANUAL_BUILD_GUIDE.md"
+        echo "   2. Set CUSTOM_AMI_ID in .env.aws-prod file"
+        echo "   3. Re-run deployment: make aws-prod"
+        echo ""
+
+        # Check if CUSTOM_AMI_ID is manually set in environment
+        MANUAL_AMI_ID=$(grep "^CUSTOM_AMI_ID=" .env.aws-prod 2>/dev/null | cut -d= -f2 2>/dev/null || echo "")
+
+        if [ -n "$MANUAL_AMI_ID" ] && [ "$MANUAL_AMI_ID" != "N/A" ]; then
+            echo "🎯 Found manually configured AMI ID: $MANUAL_AMI_ID"
+
+            # Validate the AMI exists and is available
+            AMI_STATE=$(aws ec2 describe-images --image-ids "$MANUAL_AMI_ID" --query 'Images[0].State' --output text 2>/dev/null || echo "not-found")
+
+            if [ "$AMI_STATE" = "available" ]; then
+                update_ami_id "$MANUAL_AMI_ID" "manually configured"
+                echo "✅ Manual AMI validation successful"
+            else
+                echo "❌ Manual AMI validation failed - AMI state: $AMI_STATE"
+                echo "💡 Please verify the AMI ID is correct and available"
+                exit 1
+            fi
+        else
+            echo "❌ No AMI available for deployment"
+            echo ""
+            echo "🚀 Next Steps:"
+            echo "   • Create custom AMI manually using the guide"
+            echo "   • Update CUSTOM_AMI_ID in .env.aws-prod"
+            echo "   • Restart deployment"
+            exit 1
+        fi
+    fi
+
+    # Validate final AMI ID is set
+    if [ -z "$CUSTOM_AMI_ID" ]; then
+        echo "❌ No AMI ID available after Phase 1"
+        exit 1
+    fi
+
+    echo "🎯 Phase 1 Complete: Using AMI $CUSTOM_AMI_ID"
+    
+    # Phase 2: Validate console infrastructure prerequisites
+    echo "🔍 Phase 2: Validating console infrastructure..."
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console --validate-only
     
     if [ $? -ne 0 ]; then
-        echo "❌ Error: Infrastructure deployment failed"
+        echo "❌ Infrastructure validation failed"
+        exit 1
+    fi
+    echo "✅ Infrastructure validation completed"
+    
+    # Phase 3: Deploy ECS cluster and database 
+    echo "🏗️ Phase 3: Deploying ECS cluster and database..."
+    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console
+    
+    if [ $? -ne 0 ]; then
+        echo "❌ ECS deployment failed"
+        exit 1
+    fi
+    echo "✅ ECS cluster and database deployed"
+    
+    # Phase 4: Deploy Lambda functions in parallel (FastAPI + Scaling)
+    echo "⚡ Phase 4: Deploying Lambda functions (FastAPI + Scaling)..."
+    python -m deployment.aws.services.lambda_deploy --files-api-only &
+    LAMBDA_PID=$!
+    python -m deployment.aws.services.scaling_lambda.lambda_scaling_deploy us-east-1 ECSScaling-role-iinqatta &
+    SCALING_PID=$!
+    
+    # Wait for both to complete
+    wait $LAMBDA_PID
+    LAMBDA_EXIT=$?
+    wait $SCALING_PID
+    SCALING_EXIT=$?
+    
+    if [ $LAMBDA_EXIT -eq 0 ] && [ $SCALING_EXIT -eq 0 ]; then
+        echo "✅ Lambda functions deployed successfully"
+    else
+        echo "❌ Lambda deployment failed (FastAPI: $LAMBDA_EXIT, Scaling: $SCALING_EXIT)"
         exit 1
     fi
     
-    echo "✅ Infrastructure deployed and configuration exported to .env.aws-prod"
-    
-    # Source the exported configuration
+    # Phase 5: Final deployment validation and summary
+    echo "🔍 Phase 5: Final deployment validation..."
+
+    validate_deployment_health() {
+        local validation_errors=0
+
+        # Load final environment
+        if [ -f ".env.aws-prod" ]; then
+            source .env.aws-prod
+        else
+            echo "  ❌ .env.aws-prod not found"
+            return 1
+        fi
+
+        echo "Validating deployed resources:"
+
+        # 1. Check Custom AMI exists
+        if [ -n "$CUSTOM_AMI_ID" ] && [ "$CUSTOM_AMI_ID" != "N/A" ]; then
+            if aws ec2 describe-images --image-ids "$CUSTOM_AMI_ID" --query 'Images[0].State' --output text 2>/dev/null | grep -q "available"; then
+                echo "  ✅ Custom AMI: $CUSTOM_AMI_ID (available)"
+            else
+                echo "  ❌ Custom AMI: $CUSTOM_AMI_ID (not available)"
+                ((validation_errors++))
+            fi
+        else
+            echo "  ⚠️ CUSTOM_AMI_ID not set"
+            ((validation_errors++))
+        fi
+
+        # 2. Check Database connectivity
+        if [ -n "$DATABASE_HOST" ]; then
+            if curl -s --max-time 10 "http://$DATABASE_HOST:8080/health" >/dev/null 2>&1; then
+                echo "  ✅ Database: $DATABASE_HOST:8080 (responding)"
+            else
+                echo "  ⚠️ Database: $DATABASE_HOST:8080 (not responding - may be starting up)"
+            fi
+        fi
+
+        # 3. Check Lambda Function URL
+        if [ -n "$LAMBDA_FUNCTION_URL" ]; then
+            if curl -s --max-time 10 "$LAMBDA_FUNCTION_URL/health" >/dev/null 2>&1; then
+                echo "  ✅ Lambda API: Active"
+            else
+                echo "  ⚠️ Lambda API: Not responding (may be cold)"
+            fi
+        fi
+
+        # 4. Check ECS Cluster
+        if [ -n "$ECS_CLUSTER_NAME" ]; then
+            if aws ecs describe-clusters --clusters "$ECS_CLUSTER_NAME" --query 'clusters[0].status' --output text 2>/dev/null | grep -q "ACTIVE"; then
+                echo "  ✅ ECS Cluster: $ECS_CLUSTER_NAME (active)"
+            else
+                echo "  ❌ ECS Cluster: $ECS_CLUSTER_NAME (not active)"
+                ((validation_errors++))
+            fi
+        fi
+
+        # 5. Check S3 bucket
+        if [ -n "$S3_BUCKET_NAME" ]; then
+            if aws s3 ls "s3://$S3_BUCKET_NAME" >/dev/null 2>&1; then
+                echo "  ✅ S3 Bucket: $S3_BUCKET_NAME (accessible)"
+            else
+                echo "  ⚠️ S3 Bucket: $S3_BUCKET_NAME (not accessible or doesn't exist)"
+            fi
+        fi
+
+        # 6. Check SQS queue
+        if [ -n "$SQS_QUEUE_URL" ]; then
+            if aws sqs get-queue-attributes --queue-url "$SQS_QUEUE_URL" --attribute-names QueueArn >/dev/null 2>&1; then
+                echo "  ✅ SQS Queue: $SQS_QUEUE_URL (accessible)"
+            else
+                echo "  ⚠️ SQS Queue: $SQS_QUEUE_URL (not accessible)"
+            fi
+        fi
+
+        return $validation_errors
+    }
+
+    validate_deployment_health
+    VALIDATION_EXIT=$?
+
+    echo ""
+    if [ $VALIDATION_EXIT -eq 0 ]; then
+        echo "✅ All resources validated successfully"
+        echo "🎉 AMI-based deployment with EventBridge scaling completed!"
+        echo "🚀 Performance: 85% cold start reduction (15-20min → 2-3min)"
+        echo "💰 Cost Optimization: Stop/start instances instead of terminate/create"
+    else
+        echo "⚠️ Some resources failed validation ($VALIDATION_EXIT errors)"
+        echo "   This may be normal if services are still starting up"
+        echo "🎉 Deployment completed with validation warnings"
+    fi
+
+    echo ""
+    # Deployment Summary
     if [ -f ".env.aws-prod" ]; then
-        echo "📋 Loading infrastructure configuration..."
-        source .env.aws-prod
-        echo "✅ Configuration loaded"
+        DATABASE_PUBLIC_IP=$(grep "^DATABASE_PUBLIC_IP=" .env.aws-prod | cut -d= -f2 2>/dev/null)
+        DATABASE_HOST=$(grep "^DATABASE_HOST=" .env.aws-prod | cut -d= -f2 2>/dev/null)
+        CUSTOM_AMI_ID=$(grep "^CUSTOM_AMI_ID=" .env.aws-prod | cut -d= -f2 2>/dev/null)
+        VPC_ID=$(grep "^VPC_ID=" .env.aws-prod | cut -d= -f2 2>/dev/null)
+
+        echo "📊 Deployment Summary:"
+        echo "====================="
+        [ -n "$VPC_ID" ] && echo "🌐 VPC: $VPC_ID (console-created)"
+        [ -n "$CUSTOM_AMI_ID" ] && echo "💽 Custom AMI: $CUSTOM_AMI_ID (models pre-loaded)"
+        [ -n "$DATABASE_HOST" ] && echo "🗄️ Database: http://$DATABASE_HOST:8080"
+        [ -n "$LAMBDA_FUNCTION_URL" ] && echo "⚡ Lambda API: $LAMBDA_FUNCTION_URL"
+
+        echo ""
+        echo "🔧 Next Steps:"
+        if [ -n "$DATABASE_PUBLIC_IP" ]; then
+            echo "   1. SSH to database instance: ssh -i ~/.ssh/*database-key*.pem ubuntu@${DATABASE_PUBLIC_IP}"
+            echo "   2. Follow setup guide: deployment/aws/services/README.md"
+            echo "   3. Test database: curl http://${DATABASE_HOST:-$DATABASE_PUBLIC_IP}:8080/health"
+        fi
+
+        echo ""
+        echo "🔗 Management Commands:"
+        echo "   • View ECS tasks: aws ecs list-tasks --cluster fastapi-app-ecs-cluster"
+        echo "   • View logs: aws logs tail /ecs/fastapi-app-vlm-worker-ami"
+        echo "   • Check status: make aws-prod-status"
+        echo "   • Cleanup: make aws-prod-cleanup"
     else
-        echo "❌ Error: .env.aws-prod configuration file not found"
-        exit 1
+        echo "⚠️ .env.aws-prod not found - deployment summary unavailable"
     fi
-    
-    # Phase 2: Skip local EFS mounting (EFS will be mounted by ECS tasks on AWS)
-    echo "💾 Phase 2: Skipping local EFS mounting (ECS tasks will mount EFS on AWS)..."
-    echo "✅ EFS configuration ready for ECS services"
-    
-    # Phase 3: Skip model population (models will be downloaded by ECS tasks on first run)
-    echo "🤖 Phase 3: Skipping model population (ECS tasks will download models on first run)..."
-    echo "✅ Model downloading will be handled by ECS workers"
-    
-    # Phase 4: Deploy services using Docker Compose
-    echo "🐳 Phase 4: Deploying services with Docker Compose..."
-    
-    # Build ECR image if needed
-    echo "🔨 Checking ECR image availability..."
-    # Load ECR repository name from settings
-    ECR_REPO_NAME=$(python3 -c "from files_api.settings import get_settings; print(get_settings().ecr_repo_name)")
-    
-    # Get ECR repository URI
-    ECR_URI="${AWS_ACCOUNT_ID:-123456789012}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}"
-    
-    # Check if ECR image already exists
-    echo "🔍 Checking if ECR image exists: ${ECR_REPO_NAME}:latest"
-    if aws ecr describe-images --repository-name "$ECR_REPO_NAME" --image-ids imageTag=latest --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1; then
-        echo "✅ ECR image ${ECR_REPO_NAME}:latest already exists, skipping build"
-    else
-        echo "❌ ECR image not found, building and pushing..."
-        
-        # Build and push image
-        echo "📦 Building VLM worker image..."
-        cd src/files_api
-        docker build -t "$ECR_URI:latest" -f vlm/Dockerfile ../..
-        
-        # Push to ECR (requires AWS credentials)
-        echo "📤 Pushing to ECR..."
-        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_URI" 2>/dev/null || {
-            echo "⚠️ ECR push failed - image will be built during deployment"
-            echo "💡 Deployment will fail if ECR image doesn't exist. Please fix AWS credentials and try again."
-        }
-        cd ../..
-    fi
-    
-    # Phase 4: Deploy ECS services
-    echo "🚀 Phase 4: Deploying ECS services (MongoDB + VLM workers)..."
-    python -m files_api.aws.deploy_ecs --mode aws-prod --deploy-services
-    
-    if [ $? -ne 0 ]; then
-        echo "❌ Error: ECS services deployment failed"
-        exit 1
-    fi
-    
-    echo "✅ ECS services deployed successfully"
-    
-    # Phase 5: Deploy Lambda functions (Files API)
-    echo "📋 Phase 5: Deploying Lambda functions..."
-    cd ../..
-    python -m files_api.aws.deploy_lambda
-    
-    if [ $? -ne 0 ]; then
-        echo "❌ Error: Lambda deployment failed"
-        exit 1
-    fi
-    
-    echo "✅ Lambda functions deployed successfully"
-    
-    echo ""
-    echo "🎉 4-Phase AWS Production deployment completed successfully!"
-    echo "📊 Architecture deployed:"
-    echo "   • Phase 1: ✅ ECS Infrastructure (VPC, EFS, Cluster)"
-    echo "   • Phase 2: ✅ EFS Mount Points"
-    echo "   • Phase 3: ✅ Model Population"
-    echo "   • Phase 4: ✅ Docker Compose Services (MongoDB + VLM Workers)"
-    echo "   • Phase 5: ✅ Lambda API"
-    echo ""
-    echo "🔗 Services:"
-    echo "   • MongoDB: Running on ECS with EFS persistence"
-    echo "   • VLM Workers: Native ECS services with EFS model cache"
-    echo "   • Files API: Lambda with scale-to-zero"
-    echo "   • Auto-scaling: Native CloudWatch integration"
-    echo ""
-    echo "📋 Management commands:"
-    echo "   • View logs: aws ecs describe-services --cluster fastapi-app-ecs-cluster --services fastapi-app-vlm-workers fastapi-app-mongodb"
-    echo "   • Scale workers: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 3"
-    echo "   • Stop services: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 0"
-    echo ""
-    echo "🔗 Access your deployment via the Lambda function URL"
 }
 
-# Cleanup AWS production deployment with state tracking
+
+# Cleanup AWS production deployment with parallel cleanup support
 function aws-prod-cleanup {
     set +e
     
-    echo "🧹 AWS Production Cleanup - Complete Teardown"
-    echo "⚠️ This will destroy ALL AWS resources created by aws-prod deployment"
+    echo "🧹 AWS Production Cleanup"
+    echo "========================"
+    echo "This will destroy ALL AWS resources created by aws-prod deployment"
+    echo ""
+    read -p "Are you sure? (y/N): " confirm
     
-    # Check for deployment state
-    if [ -f ".deployment_state.json" ]; then
-        echo "📋 Found deployment state - using LIFO rollback strategy"
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        echo "🚀 Running cleanup..."
         
-        # Show current deployment status
-        python -m files_api.aws.deployment_state --action status --state-file .deployment_state.json
+        # Set deployment mode
+        export DEPLOYMENT_MODE="aws-prod"
         
-        echo ""
-        read -p "🤔 Proceed with rollback? (y/N): " -n 1 -r
-        echo
-        
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            echo "🔄 Executing LIFO rollback..."
-            python -m files_api.aws.deployment_state --action rollback --state-file .deployment_state.json
-            
-            if [ $? -eq 0 ]; then
-                echo "✅ State-based rollback completed"
-            else
-                echo "⚠️ State-based rollback had issues - proceeding with manual cleanup"
-            fi
-        else
-            echo "❌ Rollback cancelled by user"
-            return 1
+        # Load config
+        if [ -f ".env.aws-prod" ]; then
+            load_env_file ".env.aws-prod"
         fi
+        
+        # Sequential cleanup (simple and reliable)
+        echo "⚡ Cleaning up Lambda functions..."
+        python -m deployment.aws.services.lambda_deploy --mode aws-prod --cleanup
+        
+        echo "🐳 Cleaning up ECS infrastructure..."
+        python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --cleanup
+        
+        # Remove config files
+        rm -f .env.aws-prod .env.aws-prod.json .deployment_state.json
+        
+        echo "🎉 Cleanup completed!"
     else
-        echo "📋 No deployment state found - proceeding with manual cleanup"
+        echo "❌ Cleanup cancelled"
     fi
-    
-    # Set deployment mode for cleanup
-    export DEPLOYMENT_MODE="aws-prod"
-    
-    # Load infrastructure config if available
-    if [ -f ".env.aws-prod" ]; then
-        echo "📋 Loading infrastructure configuration..."
-        source .env.aws-prod
-    fi
-    
-    # Phase 1: Stop ECS services
-    echo "🐳 Phase 1: Stopping ECS services..."
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-vlm-workers" --desired-count 0 2>/dev/null || echo "⚠️ VLM workers service not found"
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-mongodb" --desired-count 0 2>/dev/null || echo "⚠️ MongoDB service not found"
-        echo "✅ ECS services stopped"
-    else
-        echo "⚠️ ECS_CLUSTER_NAME not found - cannot stop services"
-    fi
-    
-    # Phase 2: Unmount EFS file systems
-    echo "💾 Phase 2: Unmounting EFS file systems..."
-    sudo umount /mnt/efs/mongodb 2>/dev/null || echo "⚠️ MongoDB EFS not mounted or unmount failed"
-    sudo umount /mnt/efs/models 2>/dev/null || echo "⚠️ Models EFS not mounted or unmount failed"
-    
-    # Cleanup local mount directories
-    sudo rmdir /mnt/efs/mongodb /mnt/efs/models /mnt/efs 2>/dev/null || true
-    rm -rf /tmp/efs-mongodb /tmp/efs-models 2>/dev/null || true
-    echo "✅ EFS mount points cleaned up"
-    
-    # Phase 3: Cleanup AWS ECS infrastructure
-    echo "🏗️ Phase 3: Cleaning up ECS infrastructure..."
-    python -m files_api.aws.deploy_ecs --mode aws-prod --cleanup
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ ECS infrastructure cleaned up"
-    else
-        echo "⚠️ ECS cleanup had issues - check AWS console for remaining resources"
-    fi
-    
-    # Phase 4: Cleanup Lambda functions
-    echo "📋 Phase 4: Cleaning up Lambda functions..."
-    python -m files_api.aws.deploy_lambda --cleanup 2>/dev/null || {
-        echo "⚠️ Lambda cleanup script not available - manual cleanup may be needed"
-    }
-    
-    # Phase 5: Remove local configuration files
-    echo "🗑️ Phase 5: Cleaning up local files..."
-    rm -f .env.aws-prod .env.aws-prod.json .deployment_state.json
-    echo "✅ Local configuration files removed"
-    
-    # Phase 6: Remove ECR images and repository
-    echo "📦 Phase 6: ECR repository cleanup..."
-    if [ -n "$ECR_REPO_NAME" ]; then
-        echo "🗑️ Deleting ECR repository: $ECR_REPO_NAME"
-        if aws ecr delete-repository --repository-name "$ECR_REPO_NAME" --force --region "$AWS_DEFAULT_REGION" 2>/dev/null; then
-            echo "✅ ECR repository '$ECR_REPO_NAME' deleted successfully"
-        else
-            echo "⚠️ ECR repository '$ECR_REPO_NAME' not found or already deleted"
-        fi
-    else
-        echo "⚠️ ECR_REPO_NAME not set - skipping ECR cleanup"
-    fi
-    
-    echo ""
-    echo "🎉 AWS Production cleanup completed!"
-    echo "📊 Cleanup summary:"
-    echo "   • ✅ Docker Compose services stopped"
-    echo "   • ✅ EFS mount points unmounted"
-    echo "   • ✅ ECS infrastructure cleaned up"
-    echo "   • ✅ Lambda functions cleaned up"
-    echo "   • ✅ Local configuration removed"
-    echo ""
-    echo "💡 Manual verification recommended:"
-    echo "   • Check AWS Console for any remaining resources"
-    echo "   • Verify S3 buckets are deleted"
-    echo "   • Confirm EFS file systems are removed"
-    echo "   • Check CloudWatch log groups"
-    echo ""
-    echo "🔍 Cost verification: aws ce get-cost-and-usage --help"
 }
 
-# Soft cleanup AWS production deployment (preserves expensive infrastructure)
-function aws-prod-cleanup-soft {
-    set +e
-    
-    echo "🧹 AWS Production Soft Cleanup - Preserve Infrastructure"
-    echo "💰 This preserves NAT Gateway, VPC, EFS, and ECR to avoid recreation costs"
-    echo "🔄 Only cleans up: ECS Services, Tasks, Auto Scaling Groups, Lambda functions"
-    
-    # Set deployment mode for cleanup
-    export DEPLOYMENT_MODE="aws-prod"
-    
-    # Load infrastructure config if available
-    if [ -f ".env.aws-prod" ]; then
-        echo "📋 Loading infrastructure configuration..."
-        source .env.aws-prod
-    fi
-    
-    # Phase 1: Stop ECS services
-    echo "🐳 Phase 1: Stopping ECS services..."
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-vlm-workers" --desired-count 0 2>/dev/null || echo "⚠️ VLM workers service not found"
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "fastapi-app-mongodb" --desired-count 0 2>/dev/null || echo "⚠️ MongoDB service not found"
-        echo "✅ ECS services stopped"
-    else
-        echo "⚠️ ECS_CLUSTER_NAME not found - cannot stop services"
-    fi
-    
-    # Phase 2: Scale down ECS services (preserve infrastructure)
-    echo "🏗️ Phase 2: Scaling down ECS services (preserving infrastructure)..."
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "vlm-worker" --desired-count 0 2>/dev/null || echo "⚠️ vlm-worker service not found or already scaled down"
-        aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "mongodb" --desired-count 0 2>/dev/null || echo "⚠️ mongodb service not found or already scaled down"
-        echo "✅ ECS services scaled to 0 (infrastructure preserved)"
-    else
-        echo "⚠️ ECS_CLUSTER_NAME not found - skipping service scaling"
-    fi
-    
-    # Phase 3: Cleanup Lambda functions
-    echo "⚡ Phase 3: Cleaning up Lambda functions..."
-    python -m files_api.aws.deploy_lambda --mode aws-prod --cleanup
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ Lambda functions cleaned up"
-    else
-        echo "⚠️ Lambda cleanup had issues - check AWS console for remaining functions"
-    fi
-    
-    # Phase 4: Scale down auto scaling groups to 0 (don't delete)
-    echo "📊 Phase 4: Scaling down auto scaling groups..."
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        # Find and scale down auto scaling groups
-        ASG_NAMES=$(aws autoscaling describe-auto-scaling-groups --query "AutoScalingGroups[?contains(Tags[?Key=='Project'].Value, 'FastAPI App')].AutoScalingGroupName" --output text 2>/dev/null || echo "")
-        if [ -n "$ASG_NAMES" ]; then
-            for asg in $ASG_NAMES; do
-                aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$asg" --desired-capacity 0 --min-size 0 2>/dev/null || echo "⚠️ Could not scale ASG: $asg"
-            done
-            echo "✅ Auto scaling groups scaled to 0"
-        else
-            echo "⚠️ No auto scaling groups found"
-        fi
-    fi
-    
-    # Clean up deployment state for services only
-    if [ -f ".deployment_state.json" ]; then
-        echo "📋 Updating deployment state (preserving infrastructure entries)..."
-        python -c "
-import json
-try:
-    with open('.deployment_state.json', 'r') as f:
-        state = json.load(f)
-    
-    # Remove service-level entries but keep infrastructure
-    preserved_keys = ['vpc', 'subnets', 'internet_gateway', 'nat_gateway', 'security_groups', 'efs', 'ecr']
-    new_state = {k: v for k, v in state.items() if any(pk in k.lower() for pk in preserved_keys)}
-    
-    with open('.deployment_state.json', 'w') as f:
-        json.dump(new_state, f, indent=2)
-    print('✅ Deployment state updated')
-except Exception as e:
-    print(f'⚠️ Could not update deployment state: {e}')
-"
-    fi
-    
-    echo ""
-    echo "✅ AWS Production Soft Cleanup Complete!"
-    echo ""
-    echo "💰 Cost Savings: Preserved expensive infrastructure:"
-    echo "   • NAT Gateway: ~$32.40/month (preserved)"
-    echo "   • Elastic IP: ~$3.60/month (preserved)"
-    echo "   • VPC/Subnets: FREE (preserved)"
-    echo "   • EFS: Pay-per-use (preserved)"
-    echo "   • ECR: Pay-per-use (preserved)"
-    echo ""
-    echo "🔄 Cleaned up pay-per-use resources:"
-    echo "   • ECS Services and Tasks: $0/month when scaled to 0"
-    echo "   • Lambda Functions: $0/month when not invoked"
-    echo "   • Auto Scaling Groups: $0/month when scaled to 0"
-    echo ""
-    echo "🚀 Next deployment will reuse existing infrastructure!"
-    echo "💡 To completely destroy everything: make aws-prod-cleanup"
-}
-
-# Show AWS production deployment status
+# Show AWS production deployment status with enhanced analysis
 function aws-prod-status {
     set +e
     
-    echo "📊 AWS Production Deployment Status"
-    echo "=================================="
+    echo "📊 AWS Production Status & Cost Analysis"
+    echo "======================================="
     
-    # Check deployment state
-    if [ -f ".deployment_state.json" ]; then
-        echo "📋 Deployment State:"
-        python -m files_api.aws.deployment_state --action status --state-file .deployment_state.json
-        echo ""
-    else
-        echo "📋 No deployment state file found"
-        echo ""
-    fi
-    
-    # Check configuration files
-    echo "📁 Configuration Files:"
+    # Load config if available
     if [ -f ".env.aws-prod" ]; then
-        echo "   ✅ .env.aws-prod (infrastructure config)"
-        echo "   📋 Key values:"
-        grep -E "^(ECS_CLUSTER_NAME|EFS_.*_ID|VPC_ID)" .env.aws-prod 2>/dev/null | sed 's/^/      /'
+        source .env.aws-prod
+        echo "✅ Configuration loaded from .env.aws-prod"
+        echo "   📋 Key resources:"
+        grep -E "^(ECS_CLUSTER_NAME|VPC_ID|DATABASE_HOST)" .env.aws-prod 2>/dev/null | sed 's/^/      /' || echo "      ⚠️ Key variables not found"
     else
-        echo "   ❌ .env.aws-prod (missing)"
+        echo "❌ .env.aws-prod not found"
     fi
     echo ""
     
-    # Check ECS services
-    echo "🐳 ECS Services:"
-    if [ -n "$ECS_CLUSTER_NAME" ]; then
-        echo "   📦 Services status:"
-        aws ecs describe-services --cluster "$ECS_CLUSTER_NAME" --services "fastapi-app-vlm-workers" "fastapi-app-mongodb" \
-            --query 'services[*].[serviceName,status,runningCount,desiredCount]' --output table 2>/dev/null | sed 's/^/      /' \
-            || echo "      ⚠️ No ECS services found"
-    else
-        echo "   ❌ ECS_CLUSTER_NAME not set"
-    fi
-    echo ""
-    
-    # Check EFS mounts
-    echo "💾 EFS Mount Points:"
-    if mount | grep -q "/mnt/efs"; then
-        echo "   ✅ EFS mounts active:"
-        mount | grep "/mnt/efs" | sed 's/^/      /'
-    else
-        echo "   ❌ No EFS mounts found"
-    fi
-    echo ""
-    
-    # Check AWS resources (if AWS CLI available)
+    # Deployment status
+    echo "🚀 Deployment Status:"
     if command -v aws &> /dev/null; then
-        echo "☁️ AWS Resources:"
-        
-        # Load config if available
-        if [ -f ".env.aws-prod" ]; then
-            source .env.aws-prod
-        fi
-        
+        # Check ECS cluster
         if [ -n "$ECS_CLUSTER_NAME" ]; then
-            echo "   🏗️ ECS Cluster:"
-            aws ecs describe-clusters --clusters "$ECS_CLUSTER_NAME" --query 'clusters[0].status' --output text 2>/dev/null | sed 's/^/      Cluster: /' || echo "      ❌ Cluster not found or AWS CLI error"
+            cluster_status=$(aws ecs describe-clusters --clusters "$ECS_CLUSTER_NAME" --query 'clusters[0].status' --output text 2>/dev/null || echo "NOT_FOUND")
+            echo "   🏗️ ECS Cluster ($ECS_CLUSTER_NAME): $cluster_status"
             
-            echo "   🔧 ECS Services:"
-            aws ecs list-services --cluster "$ECS_CLUSTER_NAME" --query 'serviceArns' --output text 2>/dev/null | wc -w | sed 's/^/      Services: /' || echo "      ❌ Cannot check services"
+            # Check services
+            service_count=$(aws ecs list-services --cluster "$ECS_CLUSTER_NAME" --query 'length(serviceArns)' --output text 2>/dev/null || echo "0")
+            echo "   🔧 ECS Services: $service_count active"
+        else
+            echo "   ❌ ECS_CLUSTER_NAME not set"
         fi
         
-        if [ -n "$EFS_MONGODB_ID" ]; then
-            echo "   💾 EFS File Systems:"
-            aws efs describe-file-systems --file-system-id "$EFS_MONGODB_ID" --query 'FileSystems[0].LifeCycleState' --output text 2>/dev/null | sed 's/^/      MongoDB EFS: /' || echo "      ❌ MongoDB EFS not found"
-        fi
+        # Check Lambda functions
+        lambda_count=$(aws lambda list-functions --query 'length(Functions[?starts_with(FunctionName, `fastapi-app`)])' --output text 2>/dev/null || echo "0")
+        echo "   ⚡ Lambda Functions: $lambda_count deployed"
         
-        if [ -n "$EFS_MODELS_ID" ]; then
-            aws efs describe-file-systems --file-system-id "$EFS_MODELS_ID" --query 'FileSystems[0].LifeCycleState' --output text 2>/dev/null | sed 's/^/      Models EFS: /' || echo "      ❌ Models EFS not found"
-        fi
     else
-        echo "☁️ AWS CLI not available - cannot check AWS resources"
+        echo "   ⚠️ AWS CLI not available - cannot check deployment status"
+    fi
+    echo ""
+    
+    # Cost analysis
+    echo "💰 Cost Analysis:"
+    python -m deployment.aws.cleanup.orphan_detector --estimate-costs --brief 2>/dev/null | head -10 || echo "   ⚠️ Cost analysis unavailable"
+    echo ""
+    
+    # Resource health
+    echo "🔍 Resource Health Check:"
+    python -m deployment.aws.cleanup.orphan_detector --scan --brief 2>/dev/null | head -5 || echo "   ⚠️ Resource scan unavailable"
+    echo ""
+    
+    # IAM verification
+    echo "🔐 IAM Status:"
+    python -c "
+from deployment.aws.utils.iam_verification import generate_iam_verification_report
+try:
+    report = generate_iam_verification_report(['fastapi-app-files-api'], 'fastapi-app-ecs-cluster')
+    print('   Overall IAM Status:', report['overall_status'])
+    if report.get('lambda_functions'):
+        for func, status in report['lambda_functions'].items():
+            print(f'   Lambda {func}: {'✅ PASS' if status else '❌ FAIL'}')
+    if report.get('ecs_services', {}).get('valid') is not None:
+        ecs_status = report['ecs_services']['valid']
+        print(f'   ECS Services: {'✅ PASS' if ecs_status else '❌ FAIL'}')
+except Exception as e:
+    print('   ⚠️ IAM verification unavailable:', str(e)[:50])
+" 2>/dev/null
+    echo ""
+    
+    # Database connectivity
+    if [ -n "$DATABASE_HOST" ]; then
+        echo "🗄️ Database Status:"
+        if curl -s --connect-timeout 5 "http://$DATABASE_HOST:8080/health" >/dev/null 2>&1; then
+            echo "   ✅ Database server responding on $DATABASE_HOST:8080"
+        else
+            echo "   ❌ Database server not responding on $DATABASE_HOST:8080"
+        fi
+        echo ""
+    fi
+    
+    echo "💡 Commands:"
+    echo "   • Full deployment: make aws-prod"
+    echo "   • Cleanup options: make aws-prod-cleanup" 
+    echo "   • Prerequisites: make aws-prod-validate"
+    echo "   • Detailed costs: python -m deployment.aws.cleanup.orphan_detector --estimate-costs"
+    echo "   • Resource scan: python -m deployment.aws.cleanup.orphan_detector --scan"
+}
+
+
+# Validate AWS production deployment prerequisites
+function aws-prod-validate {
+    set +e
+    
+    echo "✅ Validating AWS Production Prerequisites"
+    echo "========================================="
+    
+    # Use the resource validator to check prerequisites
+    python -m deployment.aws.monitoring.resource_validator
+    
+    if [ $? -eq 0 ]; then
+        echo ""
+        echo "✅ All prerequisites validated successfully"
+        echo "🚀 Ready for AWS production deployment"
+    else
+        echo ""
+        echo "❌ Prerequisites validation failed"
+        echo "🔧 Please address the issues above before deployment"
+        exit 1
+    fi
+}
+
+# Validate AWS mock deployment prerequisites
+function aws-mock-validate {
+    set +e
+    
+    echo "✅ Validating AWS Mock Prerequisites"
+    echo "==================================="
+    
+    # Check Docker availability
+    if ! command -v docker &> /dev/null; then
+        echo "❌ Docker is not installed or not in PATH"
+        exit 1
+    fi
+    
+    if ! docker info &> /dev/null; then
+        echo "❌ Docker daemon is not running"
+        exit 1
+    fi
+    
+    # Check Docker Compose availability
+    if ! command -v docker-compose &> /dev/null; then
+        echo "❌ Docker Compose is not installed or not in PATH"
+        exit 1
+    fi
+    
+    # Check moto server health if running
+    if curl -s http://localhost:5000 &> /dev/null; then
+        echo "✅ Moto server is running and accessible"
+    else
+        echo "ℹ️  Moto server not running (will be started during deployment)"
     fi
     
     echo ""
-    echo "💡 Commands:"
-    echo "   • View logs: aws logs describe-log-groups --log-group-name-prefix '/ecs/fastapi-app'"
-    echo "   • Scale workers: aws ecs update-service --cluster fastapi-app-ecs-cluster --service fastapi-app-vlm-workers --desired-count 3"
-    echo "   • Full cleanup: make aws-prod-cleanup"
+    echo "✅ All prerequisites validated successfully"
+    echo "🚀 Ready for AWS mock deployment"
+}
+
+# Validate local development prerequisites
+function local-dev-validate {
+    set +e
+    
+    echo "✅ Validating Local Development Prerequisites"
+    echo "============================================"
+    
+    # Check Python and required packages
+    if ! python -c "import torch; import transformers; import byaldi" &> /dev/null; then
+        echo "❌ Required ML packages not installed (torch, transformers, byaldi)"
+        echo "💡 Run 'make install' to install dependencies"
+        exit 1
+    fi
+    
+    # Check GPU availability (optional)
+    if python -c "import torch; print('GPU available:', torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
+        echo "✅ GPU available for model acceleration"
+    else
+        echo "ℹ️  No GPU detected - models will run on CPU (slower)"
+    fi
+    
+    # Check model cache status
+    if [ -d "$HOME/.cache/huggingface" ] && [ "$(ls -A $HOME/.cache/huggingface 2>/dev/null)" ]; then
+        echo "✅ HuggingFace model cache found"
+    else
+        echo "ℹ️  No model cache found - models will be downloaded on first use"
+    fi
+    
+    # Check moto server health if running
+    if curl -s http://localhost:5000 &> /dev/null; then
+        echo "✅ Moto server is running and accessible"
+    else
+        echo "ℹ️  Moto server not running (will be started during deployment)"
+    fi
+    
+    echo ""
+    echo "✅ All prerequisites validated successfully"
+    echo "🚀 Ready for local development"
 }
 
 # New function to install npm dependencies

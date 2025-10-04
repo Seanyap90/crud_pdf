@@ -12,40 +12,34 @@ logger = logging.getLogger(__name__)
 _nosql_adapter = None
 
 def get_nosql_adapter(db_path: str = "recycling.db"):
-    """Get or create NoSQL adapter instance (MongoDB or SQLite based on environment)"""
+    """Final version with multi-writer solution"""
     import os
     
-    # Check if MongoDB URI is configured
-    mongodb_uri = os.getenv('MONGODB_URI')
-    
-    if mongodb_uri:
-        # Use MongoDB adapter for aws_prod
-        try:
-            from .mongo_adapter import MongoAdapter
-            logger.info("Using MongoDB adapter")
-            return MongoAdapter(mongodb_uri)
-        except ImportError as e:
-            logger.error(f"MongoDB adapter not available: {e}")
-            logger.info("Falling back to SQLite adapter")
-        except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
-            logger.info("Falling back to SQLite adapter")
-    
-    # Default to SQLite adapter
-    global _nosql_adapter
-    if _nosql_adapter is None or _nosql_adapter.db_path != db_path:
-        _nosql_adapter = NoSQLAdapter(db_path)
-        logger.info("Using SQLite adapter")
-    return _nosql_adapter
+    if os.getenv('DEPLOYMENT_MODE') == 'aws-prod':
+        from .sqlite_http_adapter import SQLiteHTTPAdapter
+        return SQLiteHTTPAdapter(
+            host=os.getenv('DATABASE_HOST'),
+            port=int(os.getenv('DATABASE_PORT', '8080'))
+        )
+    else:
+        return NoSQLAdapter(db_path)
 
 def init_db(db_path: str = "recycling.db") -> None:
     """Initialize database with all required tables and NoSQL collections."""
+    import os
+    
+    # Initialize NoSQL collections first
+    adapter = get_nosql_adapter(db_path)
+    adapter.init_collections()
+    
+    # Skip traditional SQL operations in aws-prod mode (uses HTTP adapter)
+    if os.getenv('DEPLOYMENT_MODE') == 'aws-prod':
+        logger.info("aws-prod mode: skipping local SQL operations (using SQLite HTTP adapter)")
+        return
+    
+    # Initialize document indexes and SQL tables for local development
     conn = None
     try:
-        # Initialize NoSQL collections first
-        adapter = get_nosql_adapter(db_path)
-        adapter.init_collections()
-        
         # Initialize document indexes for performance
         from .indexes import DocumentIndexManager
         index_manager = DocumentIndexManager(db_path)

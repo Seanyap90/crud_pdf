@@ -14,6 +14,9 @@ import type {
 } from '../types/invoice';
 
 // Base API URL
+// Production API Gateway URL
+// const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://57aqn14xqk.execute-api.us-east-1.amazonaws.com/dev';
+// Local development URL (commented out)
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 /**

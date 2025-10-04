@@ -9,7 +9,9 @@ from files_api.errors import (
     handle_broad_exceptions,
     handle_pydantic_validation_errors,
 )
-from files_api.routes import ROUTER
+from files_api.routers.files import router as files_router
+from files_api.routers.invoices import router as invoices_router
+from files_api.routers.health import router as health_router
 from files_api.settings import Settings
 from fastapi import Depends
 from database.local import init_db
@@ -43,19 +45,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         generate_unique_id_function=custom_generate_unique_id,
     )
 
-    # Add CORS middleware with expanded settings to work with frontend
+    # Add CORS middleware with expanded settings to work with frontend and API Gateway
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],  # Allow your frontend
+        allow_origins=[
+            "http://localhost:3000",  # Local frontend development
+            "https://localhost:3000",  # HTTPS local development
+            "*"  # Allow all origins for API Gateway (since requests come through AWS)
+        ],
         allow_credentials=True,
         allow_methods=["*"],  # Allow all methods
         allow_headers=["*"],  # Allow all headers
     )
     app.state.settings = settings
-    logger.info("creating db")
+    logger.info("Initializing database (mode-aware)")
+    # Database initialization is already mode-aware via get_nosql_adapter() in database/local.py
+    # In aws-prod mode, it will use MongoDB if MONGODB_URI is set
+    # In local-dev/aws-mock modes, it will use SQLite
     init_db()
 
-    app.include_router(ROUTER)
+    app.include_router(files_router, prefix="/v1", tags=["files"])
+    app.include_router(invoices_router, prefix="/v1", tags=["invoices"])
+    app.include_router(health_router, tags=["health"])
 
     app.add_exception_handler(
         exc_class_or_status_code=pydantic.ValidationError,

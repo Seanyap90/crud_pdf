@@ -33,7 +33,7 @@ from files_api.schemas import (
     InvoiceResultUpdate
 )
 from files_api.settings import Settings
-from files_api.db_layer import get_invoice_service, get_category_service
+from files_api.services.database import get_invoice_service, get_category_service
 from files_api.msg_queue import QueueFactory
 
 ROUTER = APIRouter(tags=["Files"])
@@ -345,6 +345,15 @@ async def update_invoice_status_internal(
         return {"success": True, "invoice_id": invoice_id, "status": status_update.status}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@ROUTER.patch("/v1/invoices/{invoice_id}/status", tags=["Internal"])
+async def patch_invoice_status_internal(
+    invoice_id: int,
+    status_update: InvoiceStatusUpdate
+) -> dict:
+    """Internal endpoint for worker to update invoice status (PATCH method)."""
+    # Use the same logic as PUT method
+    return await update_invoice_status_internal(invoice_id, status_update)
 
 @ROUTER.put("/v1/invoices/{invoice_id}/result", tags=["Internal"])
 async def update_invoice_result_internal(

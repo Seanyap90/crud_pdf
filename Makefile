@@ -32,13 +32,24 @@ aws-prod:
 aws-prod-cleanup:
 	bash run.sh aws-prod-cleanup
 
-# Soft cleanup AWS production deployment (preserves NAT Gateway, VPC, EFS, ECR)
-aws-prod-cleanup-soft:
-	bash run.sh aws-prod-cleanup-soft
-
-# Show AWS production deployment status
+# Show AWS production deployment status with costs and health checks
 aws-prod-status:
 	bash run.sh aws-prod-status
+
+# Validate AWS production deployment prerequisites
+aws-prod-validate:
+	bash run.sh aws-prod-validate
+
+# Note: Previously separate targets like aws-prod-infra, aws-prod-lambda, aws-prod-ecs, 
+# aws-prod-ami, and aws-prod-lambda-scaling have been consolidated into the main aws-prod target
+
+# Validate AWS mock deployment prerequisites
+aws-mock-validate:
+	bash run.sh aws-mock-validate
+
+# Validate local development prerequisites
+local-dev-validate:
+	bash run.sh local-dev-validate
 
 iot-backend-start:
 	bash run.sh iot-backend-start

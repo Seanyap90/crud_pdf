@@ -43,7 +43,22 @@ export const StatusList: React.FC = () => {
 
   useEffect(() => {
     fetchInvoices();
-  }, []);
+    
+    // Set up smart polling - only poll when there are processing invoices
+    const pollInterval = setInterval(() => {
+      // Only poll if there are invoices in processing or pending state
+      const hasActiveInvoices = data.some(invoice => 
+        invoice.extraction_status === 'processing' || invoice.extraction_status === 'pending'
+      );
+      
+      if (hasActiveInvoices) {
+        fetchInvoices();
+      }
+    }, 2000); // Poll every 2 seconds when needed
+    
+    // Cleanup interval on component unmount
+    return () => clearInterval(pollInterval);
+  }, []); // Run only once on component mount
 
   const getStatusColor = (status: string) => {
     switch (status) {

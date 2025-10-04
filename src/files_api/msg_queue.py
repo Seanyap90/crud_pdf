@@ -95,14 +95,22 @@ class SQSQueue(BaseQueue):
         # Get settings
         settings = get_settings()
         
-        # Create SQS client with settings
-        self.sqs = boto3.client(
-            "sqs",
-            endpoint_url=settings.aws_endpoint_url,
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region
-        )
+        # Create SQS client - use execution role in aws-prod mode
+        if settings.deployment_mode == "aws-prod":
+            # In Lambda, use execution role (no explicit credentials)
+            self.sqs = boto3.client(
+                "sqs",
+                region_name=settings.aws_region
+            )
+        else:
+            # In local/mock modes, use explicit credentials
+            self.sqs = boto3.client(
+                "sqs",
+                endpoint_url=settings.aws_endpoint_url,
+                aws_access_key_id=settings.aws_access_key_id,
+                aws_secret_access_key=settings.aws_secret_access_key,
+                region_name=settings.aws_region
+            )
         
         self.queue_url = settings.sqs_queue_url
         
