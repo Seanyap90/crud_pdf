@@ -17,7 +17,9 @@ Key features:
 
 ## Architecture
 
-<!-- Insert architecture diagram here -->
+
+<img width="807" height="1042" alt="DataReconcile_vlm_rag_iot-files_api drawio" src="https://github.com/user-attachments/assets/27a5f184-05ec-45a8-ad88-143647d90793" />
+
 
 ## How to Run
 
