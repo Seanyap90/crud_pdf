@@ -6,117 +6,70 @@ This is a multi-service enterprise application with three main components:
 - **Files API**: Document processing with VLM (Vision Language Model) and RAG capabilities
 - **IoT Management**: Gateway and device management with event sourcing
 - **Frontend Clients**: React/Next.js applications for user interfaces
+- **Infrastructure/Deployment**: AWS-based deployment management for scalable application hosting
 
 ## Architecture
-
-### Component-Based Architecture
-
-The application is organized into three distinct components for clean separation of concerns:
-
-```
-src/
-├── files_api/          # 🚀 API Component (Lambda-Ready)
-│   ├── routers/        # API endpoints
-│   ├── services/       # Business logic
-│   ├── adapters/       # Storage/Queue abstractions
-│   └── config/         # Configuration management
-│
-├── vlm_workers/        # 🤖 Worker Component (Container-Ready)
-│   ├── models/         # Model management
-│   ├── processing/     # Processing utilities
-│   └── scaling/        # Auto-scaling management
-│
-├── iot/                # 🌐 IoT Component
-│   ├── db_layer/       # IoT services
-│   ├── worker/         # IoT workers
-│   └── gateway/        # Go-based gateway
-│
-└── deployment/         # 🏗️ Infrastructure Component (Deployment-Only)
-    ├── aws/            # AWS deployment
-    └── docker/         # Container definitions
-```
 
 ### Current Overall Architecture
 
 <img width="800" alt="image" src="https://github.com/user-attachments/assets/26aeca1e-22d4-46d6-bb59-03e5edfe7419" />
 
-### Deployment of Colpali and SmolVLM for processing file uploads for specific data
+### Component-Based Architecture
 
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/25551947-253b-4e10-a0d1-74dd6df1cc71" />
+The application is organized into distinct components for clean separation of concerns:
+
+```
+src/
+├── files_api/          # 🚀 API Component (Lambda-Ready)
+│   ├── routers/        # API endpoints (files, invoices, health)
+│   ├── services/       # Business logic and database services
+│   ├── adapters/       # Storage and queue abstractions
+│   ├── s3/             # S3 operations (read, write, delete, event notifications)
+│   └── schemas.py      # Data models and validation
+│
+├── vlm_workers/        # 🤖 Worker Component (ECS-Ready)
+│   ├── models/         # VLM model management and loaders
+│   ├── processing/     # Invoice parsing and document processing
+│   ├── gpu/            # GPU configuration for model inference
+│   └── worker.py       # Main worker logic for processing tasks
+│
+├── iot/                # 🌐 IoT Component
+│   ├── db_layer/       # IoT database services (gateway, device, measurement, config)
+│   ├── worker/         # MQTT workers and state machines
+│   ├── gateway/        # Go-based IoT gateway service
+│   ├── rules_engine/   # Go-based rules processing engine
+│   └── mosquitto/      # MQTT broker configuration
+│
+├── database/           # 💾 Shared Database Layer
+│   ├── local.py        # Local SQLite database operations
+│   ├── sqlite_http_adapter.py  # HTTP adapter for remote SQLite on EC2
+│   ├── event_store.py  # Event sourcing implementation
+│   └── indexes.py      # Database indexing utilities
+│
+└── deployment/         # 🏗️ Infrastructure Component
+    ├── aws/            # AWS infrastructure (Lambda, ECS, EC2, API Gateway, etc.)
+    ├── docker/         # Container definitions and compose files
+    └── kubernetes/     # Kubernetes manifests
+```
 
 ## Tech Stack
 
 - **Backend**: Python 3.7+, FastAPI, Pydantic
 - **Frontend**: Next.js, React, TypeScript, Tailwind CSS
-- **Database**: SQLite (local), MongoDB (NoSQL adapter), Event Store
+- **Database**: SQLite (local and EC2), Event Store
 - **ML/AI**: PyTorch, Transformers, Byaldi (ColPali), SmolVLM
-- **Infrastructure**: AWS (Lambda, ECS, S3, SQS), Docker
+- **Infrastructure**: AWS (Lambda, ECS, S3, SQS, EC2, ASG, API Gateway), Docker
 - **IoT**: MQTT, Go-based gateway services
 
 ## How to Run
 
-### Installation
+For detailed instructions on running the application, please refer to:
+- **Files API**: See `src/files_api/README.md`
+- **IoT Services**: See `src/iot/README.md`
 
-```bash
-# Install Python dependencies
-make install
-# or
-pip install -e ".[dev]"
+## Latest Relevant Articles
 
-# Install frontend dependencies
-make npm-install
-```
-
-### Deployment Modes
-
-The application supports three deployment modes:
-
-#### 1. Local Development (Recommended)
-```bash
-# Start both frontend and backend
-make dev
-
-# Or individually:
-make local-dev  # Backend with mocked AWS
-cd client && npm run dev  # Frontend
-```
-
-#### 2. AWS Mock (Docker Simulation)
-```bash
-# Test AWS deployment locally
-make aws-mock
-
-# Cleanup
-make aws-mock-down
-```
-
-#### 3. AWS Production
-```bash
-# Deploy to real AWS
-make aws-prod
-
-# Cleanup
-make aws-prod-cleanup
-```
-
-### Operational Commands
-
-```bash
-# Validation
-make local-dev-validate    # Check local prerequisites
-make aws-mock-validate     # Check Docker prerequisites  
-make aws-prod-validate     # Check AWS prerequisites
-
-# Monitoring
-make aws-prod-status       # Check deployment status
-make aws-prod-costs        # Analyze costs
-make aws-prod-orphans      # Scan for orphaned resources
-
-# Testing
-make test                  # Run test suite
-make test-quick           # Quick tests only
-make lint                 # Code quality checks
-```
+<!-- Add links to relevant articles, blog posts, or documentation here -->
 
 ## Preview
 
