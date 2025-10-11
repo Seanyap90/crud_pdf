@@ -269,7 +269,7 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                                 'VolumeSize': 80,   # 80GB for custom AMI with pre-loaded models
                                 'VolumeType': 'gp3',
                                 'Iops': 3000,       # High IOPS for fast model access
-                                'Throughput': 125,  # High throughput for large model files
+                                'Throughput': 500,  # High throughput for large model files
                                 'DeleteOnTermination': True,
                                 'Encrypted': True
                             }

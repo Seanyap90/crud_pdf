@@ -63,3 +63,4 @@ gpu_config_testing_colab_fixed.ipynb
 archive/*
 deployment/kubernetes/*
 .github/workflows/e2e-test-and-merge.yml
+docs/RAG-VLM-Pipeline-Review.md
