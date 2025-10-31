@@ -1,6 +1,6 @@
 *.node
-/client/node_modules/
-/client/.next/
+/files-api-client/node_modules/
+/files-api-client/.next/
 /recycling.db
 /temp_pdfs
 /node_modules

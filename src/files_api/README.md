@@ -79,7 +79,7 @@ make aws-prod
 Open another terminal in the same directory as the codebase:
 
 ```bash
-cd client
+cd files-api-client
 npm run dev
 ```
 

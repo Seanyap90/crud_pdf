@@ -8,7 +8,7 @@ set -e
 
 THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 MINIMUM_TEST_COVERAGE_PERCENT=0
-FRONTEND_DIR="$THIS_DIR/../client" # Adjust if your frontend is in a different location
+FRONTEND_DIR="$THIS_DIR/../files-api-client" # Adjust if your frontend is in a different location
 CERT_DIR="./certificates"
 CERT_DAYS=365
 
