@@ -15,7 +15,7 @@ def get_nosql_adapter(db_path: str = "recycling.db"):
     """Final version with multi-writer solution"""
     import os
     
-    if os.getenv('DEPLOYMENT_MODE') == 'aws-prod':
+    if os.getenv('DEPLOYMENT_MODE') == 'deploy-aws':
         from .sqlite_http_adapter import SQLiteHTTPAdapter
         return SQLiteHTTPAdapter(
             host=os.getenv('DATABASE_HOST'),
@@ -32,9 +32,9 @@ def init_db(db_path: str = "recycling.db") -> None:
     adapter = get_nosql_adapter(db_path)
     adapter.init_collections()
     
-    # Skip traditional SQL operations in aws-prod mode (uses HTTP adapter)
-    if os.getenv('DEPLOYMENT_MODE') == 'aws-prod':
-        logger.info("aws-prod mode: skipping local SQL operations (using SQLite HTTP adapter)")
+    # Skip traditional SQL operations in deploy-aws mode (uses HTTP adapter)
+    if os.getenv('DEPLOYMENT_MODE') == 'deploy-aws':
+        logger.info("deploy-aws mode: skipping local SQL operations (using SQLite HTTP adapter)")
         return
     
     # Initialize document indexes and SQL tables for local development

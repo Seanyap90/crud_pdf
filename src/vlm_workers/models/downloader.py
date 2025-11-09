@@ -2,7 +2,7 @@
 """
 Model downloader for VLM+RAG pipeline.
 Downloads required models to a shared cache directory.
-Supports both Docker volumes (aws-mock) and EFS mounts (aws-prod).
+Supports both Docker volumes (deploy-aws-local) and EFS mounts (deploy-aws).
 """
 
 import os

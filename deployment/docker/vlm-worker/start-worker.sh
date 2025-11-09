@@ -64,7 +64,7 @@ from vlm_workers.gpu.gpu_config import GPUConfigManager
 import os
 
 # Initialize GPU config manager and log configuration
-deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
+deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'deploy-aws-local')
 print(f'🎯 Using deployment mode: {deployment_mode}')
 
 # Initialize GPUConfigManager (it will log the full config automatically)
@@ -72,7 +72,7 @@ gpu_config = GPUConfigManager(deployment_mode)
 gpu_config.log_gpu_info()
 
 # Initialize storage adapter
-mode = os.environ.get('QUEUE_TYPE', 'aws-mock')
+mode = os.environ.get('QUEUE_TYPE', 'deploy-aws-local')
 print(f'Initializing storage in {mode} mode...')
 init_storage(mode)
 print('✓ Storage adapter initialized')

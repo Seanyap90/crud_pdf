@@ -77,7 +77,7 @@ class ContainerModelLoader(ModelLoaderInterface):
                 cls._instance.processor = None
 
                 # Initialize GPU configuration manager
-                deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
+                deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'deploy-aws-local')
                 cls._instance.gpu_config = GPUConfigManager(deployment_mode)
                 cls._instance.gpu_config.apply_environment_overrides()
                 cls._instance.gpu_config.log_gpu_info()
@@ -104,22 +104,22 @@ class ContainerModelLoader(ModelLoaderInterface):
     
     def _get_cache_directory(self) -> str:
         """Get cache directory - consistent path for both deployment modes."""
-        deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
+        deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'deploy-aws-local')
         
-        # Use consistent /app/cache path for both aws-mock and aws-prod
+        # Use consistent /app/cache path for both deploy-aws-local and deploy-aws
         cache_dir = os.environ.get('TRANSFORMERS_CACHE', '/app/cache')
         
-        if deployment_mode == 'aws-prod':
-            # For aws-prod, validate EFS mount is available
+        if deployment_mode == 'deploy-aws':
+            # For deploy-aws, validate EFS mount is available
             if self._validate_efs_mount(cache_dir):
-                logger.info(f"ECS aws-prod: Using EFS cache directory: {cache_dir}")
+                logger.info(f"ECS deploy-aws: Using EFS cache directory: {cache_dir}")
                 return cache_dir
             else:
                 logger.warning("EFS mount not available, falling back to default cache")
                 return '/app/cache'
         else:
-            # For aws-mock, use Docker volume mount (models pre-downloaded by download_models.py)
-            logger.info(f"ECS aws-mock: Using Docker volume cache directory: {cache_dir}")
+            # For deploy-aws-local, use Docker volume mount (models pre-downloaded by download_models.py)
+            logger.info(f"ECS deploy-aws-local: Using Docker volume cache directory: {cache_dir}")
             return cache_dir
     
     def _validate_efs_mount(self, cache_path: str) -> bool:
@@ -160,7 +160,7 @@ class ContainerModelLoader(ModelLoaderInterface):
     
     def _log_environment(self):
         """Log environment configuration for debugging."""
-        deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
+        deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'deploy-aws-local')
         cache_dir = self._get_cache_directory()
         
         logger.info(f"DEPLOYMENT_MODE: {deployment_mode}")
@@ -172,11 +172,11 @@ class ContainerModelLoader(ModelLoaderInterface):
         logger.info(f"Resolved cache directory: {cache_dir}")
         
         # Log storage configuration based on deployment mode
-        if deployment_mode == 'aws-prod':
-            logger.info("ECS aws-prod storage:")
+        if deployment_mode == 'deploy-aws':
+            logger.info("ECS deploy-aws storage:")
             logger.info(f"  EFS mount: /app/cache (contains all models)")
         else:
-            logger.info("ECS aws-mock storage:")
+            logger.info("ECS deploy-aws-local storage:")
             logger.info(f"  Docker volume: /app/cache (pre-populated by download_models.py)")
         
         try:
@@ -233,7 +233,7 @@ class ContainerModelLoader(ModelLoaderInterface):
                         logger.info("RAG model initialized from local files successfully")
                     except Exception as local_error:
                         logger.warning(f"Could not load RAG model from local files: {str(local_error)}")
-                        # Check if we're in offline mode (aws-prod with EFS)
+                        # Check if we're in offline mode (deploy-aws with EFS)
                         if os.environ.get('HF_HUB_OFFLINE', '0') == '1':
                             logger.error("HF_HUB_OFFLINE=1 but local model loading failed")
                             raise local_error
@@ -290,7 +290,7 @@ class ContainerModelLoader(ModelLoaderInterface):
                         logger.info("VLM model initialized from local files successfully")
                     except Exception as local_error:
                         logger.warning(f"Could not load VLM model from local files: {str(local_error)}")
-                        # Check if we're in offline mode (aws-prod with EFS)
+                        # Check if we're in offline mode (deploy-aws with EFS)
                         if os.environ.get('HF_HUB_OFFLINE', '0') == '1':
                             logger.error("HF_HUB_OFFLINE=1 but local model loading failed")
                             raise local_error
@@ -553,9 +553,9 @@ class ContainerModelLoader(ModelLoaderInterface):
                 logger.error(f"SmolVLM model not found in cache: {smolvlm_path}")
                 return False
             
-            # Additional validation for EFS mounts in aws-prod mode
-            deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
-            if deployment_mode == 'aws-prod':
+            # Additional validation for EFS mounts in deploy-aws mode
+            deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'deploy-aws-local')
+            if deployment_mode == 'deploy-aws':
                 return self._validate_efs_mount(cache_dir)
             
             logger.info("Environment validation passed")

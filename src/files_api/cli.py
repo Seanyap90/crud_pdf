@@ -37,8 +37,8 @@ def show_config():
               default="all",
               help="Which Lambda function to deploy")
 @click.option("--mode", 
-              type=click.Choice(["aws-prod"]), 
-              default="aws-prod",
+              type=click.Choice(["deploy-aws"]), 
+              default="deploy-aws",
               help="Deployment mode")
 def lambda_deploy(app, mode):
     """Deploy Lambda functions to AWS"""

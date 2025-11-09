@@ -102,8 +102,8 @@ class SQSQueue(BaseQueue):
         # Get settings
         settings = get_settings()
         
-        # Create SQS client - use execution role in aws-prod mode
-        if settings.deployment_mode == "aws-prod":
+        # Create SQS client - use execution role in deploy-aws mode
+        if settings.deployment_mode == "deploy-aws":
             # In Lambda, use execution role (no explicit credentials)
             self.sqs = boto3.client(
                 "sqs",
@@ -166,8 +166,8 @@ class QueueFactory:
         
         queue_classes = {
             "local-dev": LocalQueue,
-            "aws-mock": SQSQueue,
-            "aws-prod": SQSQueue,
+            "deploy-aws-local": SQSQueue,
+            "deploy-aws": SQSQueue,
         }
         
         deployment_mode = settings.deployment_mode

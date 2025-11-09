@@ -98,16 +98,16 @@ class ECSDeploymentStrategy:
 
 
 class MockECSStrategy(ECSDeploymentStrategy):
-    """Strategy for aws-mock deployment using existing infrastructure."""
+    """Strategy for deploy-aws-local deployment using existing infrastructure."""
     
     def __init__(self):
-        super().__init__("aws-mock")
+        super().__init__("deploy-aws-local")
     
     def setup_clients(self) -> None:
         """Mock deployment uses existing infrastructure - no client setup needed."""
-        logger.info("Mock deployment will use existing aws-mock infrastructure")
+        logger.info("Mock deployment will use existing deploy-aws-local infrastructure")
     
-    @log_operation("Mock ECS deployment using existing aws-mock target")
+    @log_operation("Mock ECS deployment using existing deploy-aws-local target")
     def deploy(self) -> Dict[str, Any]:
         """Create mock AWS resources for ECS simulation."""
         logger.info("Mock ECS deployment - creating required AWS resources")
@@ -135,7 +135,7 @@ class MockECSStrategy(ECSDeploymentStrategy):
                 "mode": "mock",
                 "message": "ECS mock mode - AWS resources created",
                 "database": "sqlite3",
-                "infrastructure": "docker-compose via make aws-mock",
+                "infrastructure": "docker-compose via make deploy-aws-local",
                 "s3_bucket": S3_BUCKET_NAME,
                 "sqs_queue_url": queue_url,
                 "sqs_queue_arn": queue_arn
@@ -150,10 +150,10 @@ class MockECSStrategy(ECSDeploymentStrategy):
             }
 
 class ProductionECSStrategy(ECSDeploymentStrategy):
-    """Strategy for aws-prod deployment using real AWS ECS."""
+    """Strategy for deploy-aws deployment using real AWS ECS."""
     
     def __init__(self):
-        super().__init__("aws-prod")
+        super().__init__("deploy-aws")
         self.cluster_manager = None
         self.database_manager = None
         self.console_validator = None
@@ -222,23 +222,23 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
             logger.info("🗄️ Phase 4: EC2 Database Instance Creation")
             database_config = self._setup_database_infrastructure(ecs_vpc_config)
             
-            # Phase 4.5: Update .env.aws-prod with DATABASE_HOST for ECS services
+            # Phase 4.5: Update .env.deploy-aws with DATABASE_HOST for ECS services
             logger.info("📝 Phase 4.5: Update environment configuration for ECS")
             if database_config and database_config.get('public_ip'):
                 database_public_ip = database_config['public_ip']
                 self._export_updated_configuration(database_public_ip, ecs_vpc_config, database_config)
-                logger.info(f"Updated .env.aws-prod with DATABASE_HOST={database_public_ip}")
+                logger.info(f"Updated .env.deploy-aws with DATABASE_HOST={database_public_ip}")
                 # Update console config to use the new database host
                 console_config['config']['DATABASE_HOST'] = database_public_ip
             else:
-                logger.info("Using existing DATABASE_HOST from .env.aws-prod")
+                logger.info("Using existing DATABASE_HOST from .env.deploy-aws")
             
             # Phase 5: Code-based ECS task definitions deployment
             logger.info("🚀 Phase 5: Code-based Task Definitions Deployment")  
             task_config = self._deploy_task_definitions_only(console_config)
             
-            # Note: Lambda deployment handled by parallel make target (aws-prod-lambda)
-            logger.info("ℹ️  Lambda functions will be deployed in parallel by make aws-prod-lambda")
+            # Note: Lambda deployment handled by parallel make target (deploy-aws-lambda)
+            logger.info("ℹ️  Lambda functions will be deployed in parallel by make deploy-aws-lambda")
             
             # Deployment Summary
             hybrid_config = {
@@ -546,10 +546,10 @@ class ProductionECSStrategy(ECSDeploymentStrategy):
         logger.info(f"Pushed image to ECR: {ecr_uri}")
     
     def _export_updated_configuration(self, database_public_ip: str, vpc_config: Dict[str, Any], database_config: Dict[str, Any]) -> None:
-        """Update .env.aws-prod file with database public IP."""
+        """Update .env.deploy-aws file with database public IP."""
         try:
             import os
-            export_file = ".env.aws-prod"
+            export_file = ".env.deploy-aws"
             
             # Read existing configuration if it exists
             config_lines = []
@@ -610,7 +610,7 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
             f"APP_NAME=\"{settings.app_name}\"",
             f"AWS_DEFAULT_REGION={result['region']}",
             f"AWS_ACCOUNT_ID={settings.account_id}",
-            f"DEPLOYMENT_MODE=aws-prod",
+            f"DEPLOYMENT_MODE=deploy-aws",
             "",
             f"# ECS Configuration",
             f"ECS_CLUSTER_NAME={result['cluster_name']}",
@@ -660,7 +660,7 @@ def export_infrastructure_config(result: Dict[str, Any], export_file: str) -> No
         print(f"Next steps:")
         print(f"1. Source the config: source {export_file}")
         print(f"2. Models are pre-loaded in AMI (no mounting needed)")
-        print(f"3. Run: docker-compose -f src/files_api/docker-compose.aws-prod.yml up")
+        print(f"3. Run: docker-compose -f src/files_api/docker-compose.deploy-aws.yml up")
         
     except Exception as e:
         logger.error(f"Failed to export infrastructure config: {e}")
@@ -670,16 +670,16 @@ def cleanup_deployment(mode: str = None) -> None:
     """Clean up ECS deployment resources."""
     mode = mode or settings.deployment_mode
     
-    if mode == "aws-mock":
+    if mode == "deploy-aws-local":
         logger.info("Cleaning up mock deployment")
         try:
-            # Use existing aws-mock-down function
-            subprocess.run(["make", "aws-mock-down"], check=True, cwd=".")
-            logger.info("Mock deployment cleaned up using existing aws-mock-down")
+            # Use existing deploy-aws-local-down function
+            subprocess.run(["make", "deploy-aws-local-down"], check=True, cwd=".")
+            logger.info("Mock deployment cleaned up using existing deploy-aws-local-down")
         except subprocess.CalledProcessError as e:
             logger.warning(f"Mock cleanup failed: {e}")
     
-    elif mode == "aws-prod":
+    elif mode == "deploy-aws":
         logger.info("Cleaning up production deployment")
         try:
             # Initialize managers for AMI-based cleanup
@@ -706,7 +706,7 @@ def cleanup_deployment(mode: str = None) -> None:
 def main():
     """Main deployment entry point."""
     parser = argparse.ArgumentParser(description="Deploy ECS infrastructure for VLM workers")
-    parser.add_argument("--mode", choices=["aws-mock", "aws-prod"], 
+    parser.add_argument("--mode", choices=["deploy-aws-local", "deploy-aws"], 
                        default=settings.deployment_mode,
                        help="Deployment mode")
     parser.add_argument("--cleanup", action="store_true", 
@@ -739,7 +739,7 @@ def main():
                 print(f"  {var}={value}")
             print()
             
-            # Pass current environment (includes variables from .env.aws-prod)
+            # Pass current environment (includes variables from .env.deploy-aws)
             result = subprocess.run([
                 sys.executable, "-m", "deployment.aws.monitoring.resource_validator", 
                 "--check", "console"
@@ -755,18 +755,18 @@ def main():
             sys.exit(result.returncode)
         
         # Execute deployment with direct strategy instantiation
-        if args.mode == "aws-mock":
+        if args.mode == "deploy-aws-local":
             strategy = MockECSStrategy()
             strategy.setup_clients()
             result = strategy.deploy()
-        elif args.mode == "aws-prod":
+        elif args.mode == "deploy-aws":
             strategy = ProductionECSStrategy()
             strategy.setup_clients()
             if args.hybrid_console:
                 logger.info("Using hybrid console+code deployment approach")
                 result = strategy.deploy_hybrid_console_code()
             else:
-                raise ValueError("aws-prod mode requires --hybrid-console flag")
+                raise ValueError("deploy-aws mode requires --hybrid-console flag")
         else:
             raise ValueError(f"Unsupported deployment mode: {args.mode}")
         
@@ -780,7 +780,7 @@ def main():
             print(f"Region: {result.get('region')}")
             print(f"Cluster: {result.get('cluster_name')}")
             
-            if args.mode == "aws-prod":
+            if args.mode == "deploy-aws":
                 if result.get('mode') == 'hybrid-console-code':
                     print(f"Console VPC: {result['console_resources']['validated_resources']['vpc']['vpc_id']}")
                     # EFS removed in AMI-based architecture

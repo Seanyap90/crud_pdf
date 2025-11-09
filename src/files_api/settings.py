@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # Deployment Mode
     deployment_mode: str = Field(
         default="local-dev",
-        description="Deployment mode: local-dev, aws-mock, or aws-prod"
+        description="Deployment mode: local-dev, deploy-aws-local, or deploy-aws"
     )
     
     # AWS Core Settings
@@ -142,7 +142,7 @@ class Settings(BaseSettings):
             # Map old values to new ones
             mode_mapping = {
                 "local-mock": "local-dev",
-                "cloud": "aws-prod",
+                "cloud": "deploy-aws",
                 "QUEUE_TYPE": "deployment_mode"  # If someone passes the env var name
             }
             return mode_mapping.get(v, v)
@@ -151,7 +151,7 @@ class Settings(BaseSettings):
     @validator('deployment_mode')
     def validate_deployment_mode(cls, v):
         """Validate deployment mode is one of the allowed values."""
-        valid_modes = ["local-dev", "aws-mock", "aws-prod"]
+        valid_modes = ["local-dev", "deploy-aws-local", "deploy-aws"]
         if v not in valid_modes:
             raise ValueError(f"Invalid deployment_mode: {v}. Must be one of {valid_modes}")
         return v
@@ -161,7 +161,7 @@ class Settings(BaseSettings):
         """Auto-set endpoint URL based on deployment mode if not explicitly provided."""
         if v is None and 'deployment_mode' in values:
             mode = values['deployment_mode']
-            if mode in ["local-dev", "aws-mock"]:
+            if mode in ["local-dev", "deploy-aws-local"]:
                 return "http://localhost:5000"
         return v
     
@@ -170,9 +170,9 @@ class Settings(BaseSettings):
         """Auto-set mock credentials for local modes if not provided."""
         if v is None and 'deployment_mode' in values:
             mode = values['deployment_mode']
-            if mode in ["local-dev", "aws-mock"]:
+            if mode in ["local-dev", "deploy-aws-local"]:
                 return "mock"
-            elif mode == "aws-prod":
+            elif mode == "deploy-aws":
                 # In production, return None to let IAM execution role handle auth
                 return None
         return v
@@ -184,7 +184,7 @@ class Settings(BaseSettings):
             return self.aws_account_id
         
         # Auto-detect account ID for production modes
-        if self.deployment_mode in ["aws-prod"]:
+        if self.deployment_mode in ["deploy-aws"]:
             try:
                 # Try to use centralized client manager for mock/dev modes
                 try:
@@ -229,11 +229,11 @@ class Settings(BaseSettings):
             mode = values['deployment_mode']
             queue_name = values['sqs_queue_name']
             
-            if mode in ["local-dev", "aws-mock"]:
+            if mode in ["local-dev", "deploy-aws-local"]:
                 endpoint = values.get('aws_endpoint_url', 'http://localhost:5000')
                 # For moto, use a simplified format without account number
                 return f"{endpoint}/queue/{queue_name}"
-            # For aws-prod, the URL will be set after queue creation
+            # For deploy-aws, the URL will be set after queue creation
         return v
 
     def export_environment_variables(self) -> None:
@@ -253,13 +253,13 @@ class Settings(BaseSettings):
         }
         
         # Only set AWS credentials and endpoint for local/mock modes
-        if self.deployment_mode in ['local-dev', 'aws-mock']:
+        if self.deployment_mode in ['local-dev', 'deploy-aws-local']:
             env_vars.update({
                 'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
                 'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
                 'AWS_SECRET_ACCESS_KEY': self.aws_secret_access_key or 'mock',
             })
-        # For aws-prod, let Lambda execution role handle credentials automatically
+        # For deploy-aws, let Lambda execution role handle credentials automatically
         
         for key, value in env_vars.items():
             if value:  # Only set non-empty values
@@ -283,7 +283,7 @@ class Settings(BaseSettings):
         }
         
         # Only include AWS credentials for local/mock modes
-        if self.deployment_mode in ['local-dev', 'aws-mock']:
+        if self.deployment_mode in ['local-dev', 'deploy-aws-local']:
             env_dict.update({
                 'AWS_ENDPOINT_URL': self.aws_endpoint_url or '',
                 'AWS_ACCESS_KEY_ID': self.aws_access_key_id or 'mock',
@@ -294,7 +294,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         case_sensitive=False,
-        env_file=(".env", ".env.local-dev", ".env.aws-mock", ".env.aws-prod"),  # Support new env files
+        env_file=(".env", ".env.local-dev", ".env.deploy-aws-local", ".env.deploy-aws"),  # Support new env files
         env_file_encoding="utf-8",
         extra="allow",  # Allow extra fields for backwards compatibility
         # Allow reading from environment variables with different names
@@ -332,7 +332,7 @@ def get_settings_with_env_helper(env_file: str = None) -> Settings:
     variables are properly loaded.
     
     Args:
-        env_file: Path to .env file (e.g., '.env.aws-prod')
+        env_file: Path to .env file (e.g., '.env.deploy-aws')
         
     Returns:
         Settings instance with loaded environment

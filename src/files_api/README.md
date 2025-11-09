@@ -12,8 +12,8 @@ Key features:
 - **Database**: SQLite on EC2 for structured data storage
 
 **Tested Configurations:**
-- **Local (aws-mock)**: Intel i7, 32GB RAM, NVIDIA RTX 4060 8GB VRAM
-- **AWS (aws-prod)**: g4dn.xlarge EC2 instance (4 vCPU, 16GB RAM, Tesla T4 16GB VRAM)
+- **Local (deploy-aws-local)**: Intel i7, 32GB RAM, NVIDIA RTX 4060 8GB VRAM
+- **AWS (deploy-aws)**: g4dn.xlarge EC2 instance (4 vCPU, 16GB RAM, Tesla T4 16GB VRAM)
 
 ## Architecture
 
@@ -23,15 +23,15 @@ Key features:
 
 ## How to Run
 
-### Local Development (aws-mock)
+### Local Development (deploy-aws-local)
 
 Run the application locally with Docker to simulate the AWS environment:
 
 ```bash
-make aws-mock
+make deploy-aws-local
 ```
 
-#### Prerequisites (aws-mock)
+#### Prerequisites (deploy-aws-local)
 
 1. **Python Dependencies**: Install required packages
    ```bash
@@ -44,19 +44,19 @@ make aws-mock
    - Ensure Docker Compose is available: `docker-compose --version`
 
 
-### AWS Production Deployment (aws-prod)
+### AWS Production Deployment (deploy-aws)
 
 Deploy the application to AWS:
 
 ```bash
-make aws-prod
+make deploy-aws
 ```
 
-#### Prerequisites (aws-prod)
+#### Prerequisites (deploy-aws)
 
-1. **Docker Images in ECR**: Push images created from aws-mock to Amazon ECR
+1. **Docker Images in ECR**: Push images created from deploy-aws-local to Amazon ECR
    ```bash
-   # After running make aws-mock, tag and push images
+   # After running make deploy-aws-local, tag and push images
    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
    docker tag rag-worker:latest <account-id>.dkr.ecr.us-east-1.amazonaws.com/rag-worker:latest
    docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/rag-worker:latest
@@ -72,7 +72,7 @@ make aws-prod
    - VPC and subnets
    - Security groups
    - IAM roles
-   - Run validation: `make aws-prod-validate`
+   - Run validation: `make deploy-aws-validate`
 
 ### Starting the Frontend
 

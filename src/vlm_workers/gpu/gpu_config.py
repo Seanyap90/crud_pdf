@@ -2,8 +2,8 @@
 GPU Configuration Management for VLM Workers
 
 This module provides GPU-aware configuration for VLM workers based on deployment mode:
-- aws-mock: RTX 4060 8GB optimization (quantization enabled)
-- aws-prod: Tesla T4 16GB optimization (quantization enabled with full GPU)
+- deploy-aws-local: RTX 4060 8GB optimization (quantization enabled)
+- deploy-aws: Tesla T4 16GB optimization (quantization enabled with full GPU)
 """
 
 import os
@@ -24,13 +24,13 @@ def get_gpu_optimized_config(deployment_mode: str) -> Dict[str, Any]:
     Get GPU-optimized configuration based on deployment mode.
 
     Args:
-        deployment_mode: 'aws-mock' for RTX 4060 or 'aws-prod' for Tesla T4
+        deployment_mode: 'deploy-aws-local' for RTX 4060 or 'deploy-aws' for Tesla T4
 
     Returns:
         Dictionary with GPU optimization settings
     """
     configs = {
-        'aws-mock': {
+        'deploy-aws-local': {
             # RTX 4060 8GB - Memory constrained, use quantization with CPU offload
             'use_quantization': True,
             'model_memory_limit': '7GiB',
@@ -42,7 +42,7 @@ def get_gpu_optimized_config(deployment_mode: str) -> Dict[str, Any]:
             'max_memory': {0: '7GiB'},
             'low_cpu_mem_usage': True
         },
-        'aws-prod': {
+        'deploy-aws': {
             # Tesla T4 16GB - Memory abundant, use quantization on full GPU
             'use_quantization': True,  # ✅ Changed from False to True
             'model_memory_limit': '14GiB',
@@ -56,8 +56,8 @@ def get_gpu_optimized_config(deployment_mode: str) -> Dict[str, Any]:
         }
     }
 
-    # Default to aws-mock configuration if mode not recognized
-    config = configs.get(deployment_mode, configs['aws-mock'])
+    # Default to deploy-aws-local configuration if mode not recognized
+    config = configs.get(deployment_mode, configs['deploy-aws-local'])
 
     logger.info(f"Using GPU configuration for {deployment_mode}: {config}")
     return config
@@ -73,7 +73,7 @@ class GPUConfigManager:
         Args:
             deployment_mode: Deployment mode, defaults to DEPLOYMENT_MODE env var
         """
-        self.mode = deployment_mode or os.environ.get('DEPLOYMENT_MODE', 'aws-mock')
+        self.mode = deployment_mode or os.environ.get('DEPLOYMENT_MODE', 'deploy-aws-local')
         self.config = get_gpu_optimized_config(self.mode)
 
         logger.info(f"Initialized GPUConfigManager for mode: {self.mode}")
@@ -236,14 +236,14 @@ class GPUConfigManager:
         Returns:
             Validated deployment mode
         """
-        valid_modes = ['aws-mock', 'aws-prod']
+        valid_modes = ['deploy-aws-local', 'deploy-aws']
 
         if self.mode not in valid_modes:
             logger.warning(
-                "Invalid deployment mode '%s', falling back to 'aws-mock'. "
+                "Invalid deployment mode '%s', falling back to 'deploy-aws-local'. "
                 "Valid modes: %s", self.mode, valid_modes
             )
-            self.mode = 'aws-mock'
+            self.mode = 'deploy-aws-local'
             self.config = get_gpu_optimized_config(self.mode)
 
         return self.mode

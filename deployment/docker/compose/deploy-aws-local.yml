@@ -25,8 +25,8 @@ services:
       dockerfile: deployment/docker/vlm-worker/Dockerfile
     environment:
       # Core deployment configuration
-      - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-aws-mock}
-      - QUEUE_TYPE=${DEPLOYMENT_MODE:-aws-mock} 
+      - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-deploy-aws-local}
+      - QUEUE_TYPE=${DEPLOYMENT_MODE:-deploy-aws-local} 
       
       # AWS Configuration (from environment or defaults)
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
@@ -42,7 +42,7 @@ services:
       - SQS_QUEUE_URL=http://host.docker.internal:5000/queue/${SQS_QUEUE_NAME:-rag-task-queue}
       
       # GPU Configuration for RTX 4060 8GB (via GPUConfigManager)
-      # These settings override .env.aws-mock and ensure RTX 4060 optimization
+      # These settings override .env.deploy-aws-local and ensure RTX 4060 optimization
       - MODEL_MEMORY_LIMIT=7GiB
       - OFFLOAD_TO_CPU=true
       - CPU_OFFLOAD_FOLDER=/app/offload_folder
@@ -131,4 +131,4 @@ networks:
     driver: bridge
 
 # To simulate VLM worker auto-scaling locally, you can scale the worker:
-# docker-compose -f aws-mock.yml up --scale vlm-worker=3
+# docker-compose -f deploy-aws-local.yml up --scale vlm-worker=3

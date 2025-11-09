@@ -25,7 +25,7 @@ gateway-config-structure-2.yaml
 src/files_api/sample
 .env.aws
 .env.local
-.env.aws-prod
+.env.deploy-aws
 /rag_offload
 /storage
 /src/files_api/s3/__pycache__/*
@@ -51,8 +51,8 @@ token.txt
 *.pyc
 __pycache__/
 .env-aws-*
-.env.aws-mock
-.env.aws-prod
+.env.deploy-aws-local
+.env.deploy-aws
 .env.local-dev
 claude.local2.md
 AMI_INTEGRATION_SUMMARY.md

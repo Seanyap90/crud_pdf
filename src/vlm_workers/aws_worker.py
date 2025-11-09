@@ -137,40 +137,40 @@ class LoggingObserver(WorkerObserver):
 class AWSWorker(Worker):
     """AWS-specific worker implementation with enhanced monitoring and ECS integration."""
     
-    def __init__(self, queue, observers: Optional[List[WorkerObserver]] = None, mode: str = "aws-prod"):
+    def __init__(self, queue, observers: Optional[List[WorkerObserver]] = None, mode: str = "deploy-aws"):
         """Initialize AWS worker with queue and observers.
-        
+
         Args:
             queue: Queue handler for receiving tasks
             observers: Optional list of observers for monitoring
-            mode: Deployment mode (aws-mock, aws-prod)
+            mode: Deployment mode (deploy-aws-local, deploy-aws)
         """
         super().__init__(queue)
         self.mode = mode
-        
+
         # Initialize observers based on mode (simplified - no task manager in AMI approach)
-        if mode == "aws-mock":
+        if mode == "deploy-aws-local":
             self.observers = observers or [LoggingObserver()]
-        else:  # aws-prod
+        else:  # deploy-aws
             # Only CloudWatch and Logging observers for AMI-based deployment
             base_observers = [LoggingObserver(), CloudWatchObserver()]
             self.observers = observers or base_observers
-        
+
         # Log initialization
         logger.info(f"AWS Worker initialized with enhanced monitoring (mode: {mode})")
-        if mode == "aws-prod":
+        if mode == "deploy-aws":
             logger.info("AMI-based deployment - scaling handled by EventBridge Lambda functions")
-        
+
         # Track continuous error count for health monitoring
         self.consecutive_errors = 0
         self.max_consecutive_errors = 5  # Threshold for health status
-        
+
         # Schedule periodic health check reporting
         self.last_health_report = 0
         self.health_report_interval = 300  # 5 minutes
-        
+
         # ECS-specific configuration
-        self.enable_scale_to_zero = (mode == "aws-prod")
+        self.enable_scale_to_zero = (mode == "deploy-aws")
         self.idle_check_interval = 30  # Check for scale-to-zero every 30 seconds
         self.last_idle_check = 0
     

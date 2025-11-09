@@ -2,7 +2,7 @@
 Environment Helper for AWS Deployment
 
 This module provides a centralized way to manage environment variables across 
-different deployment modes (local-dev, aws-mock, aws-prod). It loads .env files
+different deployment modes (local-dev, deploy-aws-local, deploy-aws). It loads .env files
 and provides validation and export capabilities.
 
 Key features:
@@ -64,7 +64,7 @@ class EnvironmentHelper:
         Get the current deployment mode.
         
         Returns:
-            Deployment mode string (local-dev, aws-mock, aws-prod)
+            Deployment mode string (local-dev, deploy-aws-local, deploy-aws)
         """
         return os.getenv('DEPLOYMENT_MODE', 'local-dev')
     
@@ -182,8 +182,8 @@ class EnvironmentHelper:
         
         env_file_map = {
             'local-dev': '.env.local-dev',
-            'aws-mock': '.env.aws-mock', 
-            'aws-prod': '.env.aws-prod'
+            'deploy-aws-local': '.env.deploy-aws-local', 
+            'deploy-aws': '.env.deploy-aws'
         }
         
         return env_file_map.get(mode, '.env.local-dev')

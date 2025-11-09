@@ -46,7 +46,7 @@ class AWSClientManager:
         
         # Check for AWS profile in environment (for SSO)
         aws_profile = os.environ.get('AWS_PROFILE')
-        if aws_profile and self.mode == 'aws-prod':
+        if aws_profile and self.mode == 'deploy-aws':
             # Use session with profile for SSO
             try:
                 session = boto3.Session(profile_name=aws_profile)
@@ -65,7 +65,7 @@ class AWSClientManager:
             client_kwargs['aws_secret_access_key'] = self.settings.aws_secret_access_key
         
         # Add endpoint URL for local/mock modes
-        if self.endpoint_url and self.mode in ['local-dev', 'aws-mock']:
+        if self.endpoint_url and self.mode in ['local-dev', 'deploy-aws-local']:
             client_kwargs['endpoint_url'] = self.endpoint_url
         
         try:
@@ -186,7 +186,7 @@ def create_s3_bucket(bucket_name: str = None) -> bool:
         
         # No existing bucket found, create a new one
         # For mock environments, use exact bucket name without timestamp
-        if settings.deployment_mode == 'aws-mock':
+        if settings.deployment_mode == 'deploy-aws-local':
             new_bucket_name = base_bucket_name
         else:
             # For production, use timestamp to ensure uniqueness
@@ -266,7 +266,7 @@ def create_sqs_queue(queue_name: str = None, attributes: Optional[Dict[str, str]
             logger.info(f"Created SQS queue: {queue_name} ({queue_url})")
             
             # For mock mode, adjust the URL format if needed
-            if settings.deployment_mode == 'aws-mock':
+            if settings.deployment_mode == 'deploy-aws-local':
                 # Keep the original URL from moto, it will be normalized elsewhere
                 pass
             

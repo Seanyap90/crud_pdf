@@ -22,7 +22,7 @@ def cli():
 
 @cli.command()
 @click.option("--mode", 
-              type=click.Choice(["local-dev", "aws-mock", "aws-prod"]), 
+              type=click.Choice(["local-dev", "deploy-aws-local", "deploy-aws"]), 
               default="local-dev",
               help="Deployment mode")
 @click.option("--preload-models/--no-preload-models", default=False, 
@@ -77,7 +77,7 @@ def worker(mode, preload_models):
             print(f"Warning: VLM model loading failed: {e}")
     
     # Create worker based on deployment mode
-    if mode == "aws-prod":
+    if mode == "deploy-aws":
         from vlm_workers.aws_worker import AWSWorker
         worker_instance = AWSWorker(queue, mode=mode)
         print(f"AWS Worker initialized for {settings.deployment_mode} mode (AMI-based)")
@@ -191,14 +191,14 @@ def show_scaling_info():
     
     print(f"🔧 Scaling Information ({settings.deployment_mode} mode)")
     
-    if settings.deployment_mode == "aws-mock":
+    if settings.deployment_mode == "deploy-aws-local":
         print("📋 AWS Mock Mode:")
         print("  • Uses Docker Compose for local development")
         print("  • No auto-scaling capability (single GPU constraint)")
         print("  • Use 'docker-compose up' to start services")
         print("  • Use 'docker-compose logs' to view logs")
     
-    elif settings.deployment_mode == "aws-prod":
+    elif settings.deployment_mode == "deploy-aws":
         print("📋 AWS Production Mode:")
         print("  • Uses AMI-based ECS tasks with EventBridge scaling")
         print("  • Scaling controlled by Lambda functions (external)")

@@ -89,9 +89,9 @@ def determine_scaling(total_messages: int, visible: int, in_flight: int,
 
     # Messages exist
     if total_messages > 0:
-        # No workers running - start at least 1 worker
+        # No workers running - start workers based on message count
         if running_tasks == 0:
-            needed_workers = min(1, max_instances)  # Start with 1 worker
+            needed_workers = min(total_messages, max_instances)  # Start workers based on message count
             logger.info(f"   🚀 No workers running - starting {needed_workers} worker(s)")
             return needed_workers, needed_workers, "scale_up"
 
