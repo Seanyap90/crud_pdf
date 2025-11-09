@@ -15,7 +15,7 @@ import type {
 
 // Base API URL
 // Production API Gateway URL
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://jbmiwd4wt7.execute-api.us-east-1.amazonaws.com/dev';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '<API_GATEWAY_URL>';
 // Local development URL (commented out)
 // const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
