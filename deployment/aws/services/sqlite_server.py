@@ -233,7 +233,7 @@ if __name__ == '__main__':
     # Parse command line arguments
     import argparse
     parser = argparse.ArgumentParser(description='SQLite HTTP Server')
-    parser.add_argument('--db-path', default='/mnt/efs/database/recycling.db',
+    parser.add_argument('--db-path', default='/var/lib/sqlite-server/recycling.db',
                        help='Path to SQLite database file')
     parser.add_argument('--port', type=int, default=8080,
                        help='Port to run server on')
