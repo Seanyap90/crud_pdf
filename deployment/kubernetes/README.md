@@ -6,12 +6,12 @@ This directory contains placeholder configurations for future Kubernetes deploym
 
 ## Architecture Approach
 
-The Kubernetes deployment will mirror the **aws-mock** volume sharing pattern using persistent volumes, rather than the AMI-based approach used in aws-prod.
+The Kubernetes deployment will mirror the **deploy-aws-local** volume sharing pattern using persistent volumes, rather than the AMI-based approach used in deploy-aws.
 
 ### Volume Strategy
 
 ```yaml
-# Similar to aws-mock Docker Compose pattern
+# Similar to deploy-aws-local Docker Compose pattern
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -30,7 +30,7 @@ spec:
 1. **Model Downloader Job**: One-time job to download models to persistent volume
 2. **VLM Worker Deployment**: Multiple replicas sharing the same persistent volume
 
-This follows the same pattern as aws-mock:
+This follows the same pattern as deploy-aws-local:
 - `model-downloader` → Downloads models once
 - `vlm-worker` → Uses cached models with `HF_HUB_OFFLINE=1`
 
@@ -39,8 +39,8 @@ This follows the same pattern as aws-mock:
 | Mode | Model Storage | Volume Type | Scaling |
 |------|--------------|-------------|---------|
 | **local-dev** | Local cache | Local directory | Single instance |
-| **aws-mock** | Docker volume | Docker volume | Docker Compose |
-| **aws-prod** | AMI host path | Host path mount | EventBridge Lambda |
+| **deploy-aws-local** | Docker volume | Docker volume | Docker Compose |
+| **deploy-aws** | AMI host path | Host path mount | EventBridge Lambda |
 | **kubernetes** | Persistent volume | PVC (ReadWriteMany) | HPA/VPA |
 
 ## Future Implementation
@@ -55,7 +55,7 @@ When implementing Kubernetes deployment:
 2. **Configuration**
    - ConfigMaps for environment variables
    - Secrets for sensitive data (S3 credentials, etc.)
-   - Similar environment variables as aws-mock
+   - Similar environment variables as deploy-aws-local
 
 3. **Scaling**
    - HorizontalPodAutoscaler based on SQS queue depth
@@ -87,6 +87,6 @@ deployment/kubernetes/
 ## Notes
 
 - This is a **placeholder** directory for future Kubernetes support
-- The implementation will reuse Docker images from the aws-mock build process
-- Volume sharing strategy mirrors successful aws-mock pattern
+- The implementation will reuse Docker images from the deploy-aws-local build process
+- Volume sharing strategy mirrors successful deploy-aws-local pattern
 - AMI approach is AWS-specific and not applicable to Kubernetes

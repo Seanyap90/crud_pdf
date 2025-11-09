@@ -375,7 +375,7 @@ class LambdaDeployer:
                     Layers=[layer_info['layer_version_arn']],
                     Environment={
                         'Variables': {
-                            'DEPLOYMENT_MODE': 'aws-prod',
+                            'DEPLOYMENT_MODE': 'deploy-aws',
                             'S3_BUCKET_NAME': s3_bucket,
                             'SQS_QUEUE_URL': sqs_queue_url,
                             'DATABASE_HOST': database_host or '',
@@ -415,7 +415,7 @@ class LambdaDeployer:
             # Cleanup
             os.remove(deployment_zip)
             
-            # Create Function URL if VPC config is provided (for aws-prod mode)
+            # Create Function URL if VPC config is provided (for deploy-aws mode)
             if vpc_config:
                 function_url = self.create_lambda_function_url(function_name)
                 function_info['function_url'] = function_url
@@ -481,7 +481,7 @@ class LambdaDeployer:
                     Layers=[layer_info['layer_version_arn']],
                     Environment={
                         'Variables': {
-                            'DEPLOYMENT_MODE': 'aws-prod',
+                            'DEPLOYMENT_MODE': 'deploy-aws',
                             'S3_BUCKET_NAME': s3_bucket,
                             'SQS_QUEUE_URL': sqs_queue_url,
                             'DATABASE_HOST': database_host or '',
@@ -519,7 +519,7 @@ class LambdaDeployer:
             logger.info(f"✅ Lambda deployed without VPC - eliminating NAT Gateway costs")
             logger.info(f"🔗 Direct access URL: {function_url}")
             
-            # Update .env.aws-prod with Lambda Function URL for ECS tasks
+            # Update .env.deploy-aws with Lambda Function URL for ECS tasks
             self._update_env_file_with_lambda_url(function_url)
             
             # Perform post-deployment IAM verification
@@ -578,7 +578,7 @@ class LambdaDeployer:
                     Layers=[layer_info['layer_version_arn']],
                     Environment={
                         'Variables': {
-                            'DEPLOYMENT_MODE': 'aws-prod',
+                            'DEPLOYMENT_MODE': 'deploy-aws',
                             'DATABASE_PATH': '/tmp/recycling.db'  # SQLite for IoT
                         }
                     },
@@ -646,8 +646,8 @@ class LambdaDeployer:
             raise
     
     def _update_env_file_with_lambda_url(self, function_url: str) -> None:
-        """Update .env.aws-prod file with Lambda Function URL for ECS tasks."""
-        env_file = ".env.aws-prod"
+        """Update .env.deploy-aws file with Lambda Function URL for ECS tasks."""
+        env_file = ".env.deploy-aws"
         
         try:
             # Read existing content
@@ -944,7 +944,7 @@ lambda_handler = handler
                 MemorySize=LAMBDA_MEMORY,
                 Environment={
                     'Variables': {
-                        'DEPLOYMENT_MODE': 'aws-prod',
+                        'DEPLOYMENT_MODE': 'deploy-aws',
                         'S3_BUCKET_NAME': settings.s3_bucket_name,
                         'SQS_QUEUE_URL': settings.sqs_queue_url or '',
                         'DATABASE_HOST': database_host or '',

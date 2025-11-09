@@ -228,10 +228,10 @@ aws ec2 describe-images \
 ### 5.1 Update Environment Configuration
 
 ```bash
-# In your local project directory, update .env.aws-prod
+# In your local project directory, update .env.deploy-aws
 # Replace AMI_ID_HERE with your actual AMI ID
 
-echo "CUSTOM_AMI_ID=ami-xxxxxxxxx" >> .env.aws-prod
+echo "CUSTOM_AMI_ID=ami-xxxxxxxxx" >> .env.deploy-aws
 ```
 
 ### 5.2 Verify AMI Configuration
@@ -255,7 +255,7 @@ aws ec2 terminate-instances --instance-ids $INSTANCE_ID
 
 ```bash
 # Test deployment with new AMI
-make aws-prod
+make deploy-aws
 ```
 
 ## Troubleshooting
@@ -294,7 +294,7 @@ After deployment, verify Tesla T4 optimization:
 aws logs describe-log-groups --log-group-name-prefix "/ecs/fastapi-app-vlm-worker-ami"
 
 # Look for these log entries:
-# ✓ GPU configuration initialized for mode: aws-prod
+# ✓ GPU configuration initialized for mode: deploy-aws
 # - Model memory limit: 14GiB
 # - Use quantization: false
 ```

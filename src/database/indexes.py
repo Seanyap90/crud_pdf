@@ -50,7 +50,7 @@ class DocumentIndexManager:
                 conn.close()
     
     def _create_mongodb_indexes(self, client) -> None:
-        """Create MongoDB indexes for aws-prod mode"""
+        """Create MongoDB indexes for deploy-aws mode"""
         try:
             db = client.crud_pdf
             
@@ -86,7 +86,7 @@ class DocumentIndexManager:
             raise
     
     def _create_sqlite_indexes(self, conn) -> None:
-        """Create SQLite indexes for local-dev/aws-mock modes"""
+        """Create SQLite indexes for local-dev/deploy-aws-local modes"""
         cursor = conn.cursor()
         
         # Create vendor invoice indexes

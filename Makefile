@@ -13,39 +13,39 @@ run:
 local-dev:
 	bash run.sh local-dev
 
-# Test AWS ECS deployment locally with mock environment
-aws-mock:
-	bash run.sh aws-mock
+# Test AWS ECS deployment locally with local environment
+deploy-aws-local:
+	bash run.sh deploy-aws-local
 
-# Shutdown AWS mock
-aws-mock-down:
-	bash run.sh aws-mock-down
+# Shutdown AWS local deployment
+deploy-aws-local-down:
+	bash run.sh deploy-aws-local-down
 
 clean-model-cache:
 	bash run.sh clean-model-cache
 
-# Deploy to real AWS
-aws-prod:
-	bash run.sh aws-prod
+# Deploy to AWS production
+deploy-aws:
+	bash run.sh deploy-aws
 
-# Cleanup AWS production deployment
-aws-prod-cleanup:
-	bash run.sh aws-prod-cleanup
+# Cleanup AWS deployment
+deploy-aws-cleanup:
+	bash run.sh deploy-aws-cleanup
 
-# Show AWS production deployment status with costs and health checks
-aws-prod-status:
-	bash run.sh aws-prod-status
+# Show AWS deployment status with costs and health checks
+deploy-aws-status:
+	bash run.sh deploy-aws-status
 
-# Validate AWS production deployment prerequisites
-aws-prod-validate:
-	bash run.sh aws-prod-validate
+# Validate AWS deployment prerequisites
+deploy-aws-validate:
+	bash run.sh deploy-aws-validate
 
-# Note: Previously separate targets like aws-prod-infra, aws-prod-lambda, aws-prod-ecs, 
-# aws-prod-ami, and aws-prod-lambda-scaling have been consolidated into the main aws-prod target
+# Note: Previously separate targets like deploy-aws-infra, deploy-aws-lambda, deploy-aws-ecs,
+# deploy-aws-ami, and deploy-aws-lambda-scaling have been consolidated into the main deploy-aws target
 
-# Validate AWS mock deployment prerequisites
-aws-mock-validate:
-	bash run.sh aws-mock-validate
+# Validate AWS local deployment prerequisites
+deploy-aws-local-validate:
+	bash run.sh deploy-aws-local-validate
 
 # Validate local development prerequisites
 local-dev-validate:

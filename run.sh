@@ -8,7 +8,7 @@ set -e
 
 THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 MINIMUM_TEST_COVERAGE_PERCENT=0
-FRONTEND_DIR="$THIS_DIR/../client" # Adjust if your frontend is in a different location
+FRONTEND_DIR="$THIS_DIR/../files-api-client" # Adjust if your frontend is in a different location
 CERT_DIR="./certificates"
 CERT_DAYS=365
 
@@ -174,19 +174,19 @@ function local-dev {
 #     # If FastAPI exits, clean up
 #     echo "FastAPI server exited, cleaning up environment"
 #     kill $MOTO_PID $SIMULATOR_PID 2>/dev/null
-#     aws-mock-down
+#     deploy-aws-local-down
 # }
 
-function aws-mock {
+function deploy-aws-local {
     set +e
-    
-    # Load AWS mock environment
-    load_env_file ".env.aws-mock"
-    
+
+    # Load AWS local environment
+    load_env_file ".env.deploy-aws-local"
+
     if [ $? -ne 0 ]; then
-        echo "⚠️ Could not load .env.aws-mock, using fallback configuration"
+        echo "⚠️ Could not load .env.deploy-aws-local, using fallback configuration"
         # Fallback configuration
-        export DEPLOYMENT_MODE="aws-mock"
+        export DEPLOYMENT_MODE="deploy-aws-local"
         export AWS_ENDPOINT_URL="http://localhost:5000"
         export AWS_SECRET_ACCESS_KEY="mock"
         export AWS_ACCESS_KEY_ID="mock"
@@ -228,8 +228,8 @@ function aws-mock {
     fi
     
     # Deploy ECS infrastructure using deploy_ecs.py
-    echo "Creating ECS mock resources (S3, SQS, etc.)..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-mock
+    echo "Creating ECS local resources (S3, SQS, etc.)..."
+    python -m deployment.aws.orchestration.deploy_ecs --mode deploy-aws-local
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to create ECS mock resources"
@@ -248,19 +248,19 @@ function aws-mock {
     # Use docker-compose up with dependency management
     # The model-downloader will run first and download models to the volume
     # Then vlm-worker will start automatically once downloader completes successfully
-    docker-compose -f deployment/docker/compose/aws-mock.yml up -d --build
-    
+    docker-compose -f deployment/docker/compose/deploy-aws-local.yml up -d --build
+
     # Check if model downloader completed successfully
     echo "🔍 Checking model downloader completion status..."
-    if docker-compose -f deployment/docker/compose/aws-mock.yml ps model-downloader | grep -q "Exit 0"; then
+    if docker-compose -f deployment/docker/compose/deploy-aws-local.yml ps model-downloader | grep -q "Exit 0"; then
         echo "✅ Model downloader completed successfully!"
-    elif docker-compose -f deployment/docker/compose/aws-mock.yml ps model-downloader | grep -q "Exit [1-9]"; then
-        exit_code=$(docker-compose -f deployment/docker/compose/aws-mock.yml ps model-downloader | grep "Exit" | sed 's/.*Exit \([0-9]*\).*/\1/')
+    elif docker-compose -f deployment/docker/compose/deploy-aws-local.yml ps model-downloader | grep -q "Exit [1-9]"; then
+        exit_code=$(docker-compose -f deployment/docker/compose/deploy-aws-local.yml ps model-downloader | grep "Exit" | sed 's/.*Exit \([0-9]*\).*/\1/')
         echo "❌ Model downloader failed with exit code: $exit_code"
-        echo "🔍 Check logs: docker-compose -f deployment/docker/compose/aws-mock.yml logs model-downloader"
+        echo "🔍 Check logs: docker-compose -f deployment/docker/compose/deploy-aws-local.yml logs model-downloader"
         cd "$PROJECT_ROOT"
         kill $MOTO_PID 2>/dev/null
-        aws-mock-down
+        deploy-aws-local-down
         exit 1
     else
         echo "⚠️  Model downloader status unclear, but continuing..."
@@ -269,15 +269,15 @@ function aws-mock {
     # Verify worker container is running
     echo "🔍 Verifying worker container is running..."
     sleep 5  # Give worker a moment to start
-    
-    worker_status=$(docker-compose -f deployment/docker/compose/aws-mock.yml ps -q vlm-worker | xargs docker inspect --format='{{.State.Status}}' 2>/dev/null || echo "not_found")
-    
+
+    worker_status=$(docker-compose -f deployment/docker/compose/deploy-aws-local.yml ps -q vlm-worker | xargs docker inspect --format='{{.State.Status}}' 2>/dev/null || echo "not_found")
+
     if [ "$worker_status" != "running" ]; then
         echo "❌ Worker container failed to start (status: $worker_status)"
-        echo "🔍 Check logs: docker-compose -f deployment/docker/compose/aws-mock.yml logs vlm-worker"
+        echo "🔍 Check logs: docker-compose -f deployment/docker/compose/deploy-aws-local.yml logs vlm-worker"
         cd "$PROJECT_ROOT"
         kill $MOTO_PID 2>/dev/null
-        aws-mock-down
+        deploy-aws-local-down
         exit 1
     fi
     
@@ -299,48 +299,48 @@ function aws-mock {
     SIMULATOR_PID=$!
     
     # Enhanced trap to kill all processes
-    trap 'echo "Shutting down ECS mock environment..."; kill $MOTO_PID $SIMULATOR_PID 2>/dev/null; aws-mock-down; exit 0' INT
-    
+    trap 'echo "Shutting down ECS local environment..."; kill $MOTO_PID $SIMULATOR_PID 2>/dev/null; deploy-aws-local-down; exit 0' INT
+
     # Start FastAPI with uvicorn
     echo "Starting FastAPI application..."
     echo "📊 Monitor autoscaling decisions in the logs above"
     echo "📈 Upload PDFs to trigger queue activity and observe scaling behavior"
     echo "🔧 Container logs:"
-    echo "   - Model downloads: docker-compose -f deployment/docker/compose/aws-mock.yml logs model-downloader"
-    echo "   - Worker activity: docker-compose -f deployment/docker/compose/aws-mock.yml logs vlm-worker"
+    echo "   - Model downloads: docker-compose -f deployment/docker/compose/deploy-aws-local.yml logs model-downloader"
+    echo "   - Worker activity: docker-compose -f deployment/docker/compose/deploy-aws-local.yml logs vlm-worker"
     echo "🛑 Press Ctrl+C to shutdown everything"
-    
+
     python -m uvicorn files_api.main:create_app --reload --host 0.0.0.0 --port 8000
-    
+
     # If FastAPI exits, clean up
     echo "FastAPI server exited, cleaning up environment"
     kill $MOTO_PID $SIMULATOR_PID 2>/dev/null
-    aws-mock-down
+    deploy-aws-local-down
 }
 
-function aws-mock-down {
-    echo "Shutting down AWS mock environment..."
+function deploy-aws-local-down {
+    echo "Shutting down AWS local environment..."
     
     # Kill any running processes
     pkill -f "python -m moto.server" || true
     pkill -f "eb_autoscaling_simulator" || true
     
     # Stop and remove containers, networks, and volumes
-    docker-compose -f deployment/docker/compose/aws-mock.yml down
-    
+    docker-compose -f deployment/docker/compose/deploy-aws-local.yml down
+
     # Force remove any remaining containers
     docker rm -f model-downloader vlm-worker 2>/dev/null || true
-    
-    echo "✅ AWS mock environment completely cleaned up"
+
+    echo "✅ AWS local environment completely cleaned up"
     echo "💡 All containers, volumes, and networks removed"
 }
 
 # Deploy to AWS using streamlined hybrid console+code architecture
-function aws-prod {
+function deploy-aws {
     set +e
-    
+
     # Load AWS production environment first
-    load_env_file ".env.aws-prod"
+    load_env_file ".env.deploy-aws"
     
     echo "🚀 AWS Production Deployment (AMI-based Hybrid)"
     echo "==============================================="
@@ -348,8 +348,8 @@ function aws-prod {
     echo "Architecture: Custom AMI + EventBridge Lambda scaling"
     echo ""
     
-    export DEPLOYMENT_MODE="aws-prod"
-    
+    export DEPLOYMENT_MODE="deploy-aws"
+
     # Phase 1: Smart AMI detection and building
     echo "🔍 Phase 1: Smart AMI detection and building..."
 
@@ -365,14 +365,14 @@ function aws-prod {
         local ami_id="$1"
         local source="$2"
 
-        # Update .env.aws-prod
-        if [ -f ".env.aws-prod" ]; then
-            if grep -q "^CUSTOM_AMI_ID=" .env.aws-prod; then
-                sed -i "s/^CUSTOM_AMI_ID=.*/CUSTOM_AMI_ID=$ami_id/" .env.aws-prod
+        # Update .env.deploy-aws
+        if [ -f ".env.deploy-aws" ]; then
+            if grep -q "^CUSTOM_AMI_ID=" .env.deploy-aws; then
+                sed -i "s/^CUSTOM_AMI_ID=.*/CUSTOM_AMI_ID=$ami_id/" .env.deploy-aws
             else
-                echo "CUSTOM_AMI_ID=$ami_id" >> .env.aws-prod
+                echo "CUSTOM_AMI_ID=$ami_id" >> .env.deploy-aws
             fi
-            echo "✅ Updated .env.aws-prod with CUSTOM_AMI_ID=$ami_id ($source)"
+            echo "✅ Updated .env.deploy-aws with CUSTOM_AMI_ID=$ami_id ($source)"
         fi
 
         # Export for use by deploy_ecs.py
@@ -432,12 +432,12 @@ function aws-prod {
         echo ""
         echo "🔧 Manual AMI Creation Process:"
         echo "   1. Follow the manual AMI build guide: docs/AMI_MANUAL_BUILD_GUIDE.md"
-        echo "   2. Set CUSTOM_AMI_ID in .env.aws-prod file"
-        echo "   3. Re-run deployment: make aws-prod"
+        echo "   2. Set CUSTOM_AMI_ID in .env.deploy-aws file"
+        echo "   3. Re-run deployment: make deploy-aws"
         echo ""
 
         # Check if CUSTOM_AMI_ID is manually set in environment
-        MANUAL_AMI_ID=$(grep "^CUSTOM_AMI_ID=" .env.aws-prod 2>/dev/null | cut -d= -f2 2>/dev/null || echo "")
+        MANUAL_AMI_ID=$(grep "^CUSTOM_AMI_ID=" .env.deploy-aws 2>/dev/null | cut -d= -f2 2>/dev/null || echo "")
 
         if [ -n "$MANUAL_AMI_ID" ] && [ "$MANUAL_AMI_ID" != "N/A" ]; then
             echo "🎯 Found manually configured AMI ID: $MANUAL_AMI_ID"
@@ -458,7 +458,7 @@ function aws-prod {
             echo ""
             echo "🚀 Next Steps:"
             echo "   • Create custom AMI manually using the guide"
-            echo "   • Update CUSTOM_AMI_ID in .env.aws-prod"
+            echo "   • Update CUSTOM_AMI_ID in .env.deploy-aws"
             echo "   • Restart deployment"
             exit 1
         fi
@@ -474,17 +474,17 @@ function aws-prod {
     
     # Phase 2: Validate console infrastructure prerequisites
     echo "🔍 Phase 2: Validating console infrastructure..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console --validate-only
-    
+    python -m deployment.aws.orchestration.deploy_ecs --mode deploy-aws --hybrid-console --validate-only
+
     if [ $? -ne 0 ]; then
         echo "❌ Infrastructure validation failed"
         exit 1
     fi
     echo "✅ Infrastructure validation completed"
-    
-    # Phase 3: Deploy ECS cluster and database 
+
+    # Phase 3: Deploy ECS cluster and database
     echo "🏗️ Phase 3: Deploying ECS cluster and database..."
-    python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --hybrid-console
+    python -m deployment.aws.orchestration.deploy_ecs --mode deploy-aws --hybrid-console
     
     if [ $? -ne 0 ]; then
         echo "❌ ECS deployment failed"
@@ -519,10 +519,10 @@ function aws-prod {
         local validation_errors=0
 
         # Load final environment
-        if [ -f ".env.aws-prod" ]; then
-            source .env.aws-prod
+        if [ -f ".env.deploy-aws" ]; then
+            source .env.deploy-aws
         else
-            echo "  ❌ .env.aws-prod not found"
+            echo "  ❌ .env.deploy-aws not found"
             return 1
         fi
 
@@ -607,11 +607,11 @@ function aws-prod {
 
     echo ""
     # Deployment Summary
-    if [ -f ".env.aws-prod" ]; then
-        DATABASE_PUBLIC_IP=$(grep "^DATABASE_PUBLIC_IP=" .env.aws-prod | cut -d= -f2 2>/dev/null)
-        DATABASE_HOST=$(grep "^DATABASE_HOST=" .env.aws-prod | cut -d= -f2 2>/dev/null)
-        CUSTOM_AMI_ID=$(grep "^CUSTOM_AMI_ID=" .env.aws-prod | cut -d= -f2 2>/dev/null)
-        VPC_ID=$(grep "^VPC_ID=" .env.aws-prod | cut -d= -f2 2>/dev/null)
+    if [ -f ".env.deploy-aws" ]; then
+        DATABASE_PUBLIC_IP=$(grep "^DATABASE_PUBLIC_IP=" .env.deploy-aws | cut -d= -f2 2>/dev/null)
+        DATABASE_HOST=$(grep "^DATABASE_HOST=" .env.deploy-aws | cut -d= -f2 2>/dev/null)
+        CUSTOM_AMI_ID=$(grep "^CUSTOM_AMI_ID=" .env.deploy-aws | cut -d= -f2 2>/dev/null)
+        VPC_ID=$(grep "^VPC_ID=" .env.deploy-aws | cut -d= -f2 2>/dev/null)
 
         echo "📊 Deployment Summary:"
         echo "====================="
@@ -632,44 +632,44 @@ function aws-prod {
         echo "🔗 Management Commands:"
         echo "   • View ECS tasks: aws ecs list-tasks --cluster fastapi-app-ecs-cluster"
         echo "   • View logs: aws logs tail /ecs/fastapi-app-vlm-worker-ami"
-        echo "   • Check status: make aws-prod-status"
-        echo "   • Cleanup: make aws-prod-cleanup"
+        echo "   • Check status: make deploy-aws-status"
+        echo "   • Cleanup: make deploy-aws-cleanup"
     else
-        echo "⚠️ .env.aws-prod not found - deployment summary unavailable"
+        echo "⚠️ .env.deploy-aws not found - deployment summary unavailable"
     fi
 }
 
 
 # Cleanup AWS production deployment with parallel cleanup support
-function aws-prod-cleanup {
+function deploy-aws-cleanup {
     set +e
-    
+
     echo "🧹 AWS Production Cleanup"
     echo "========================"
-    echo "This will destroy ALL AWS resources created by aws-prod deployment"
+    echo "This will destroy ALL AWS resources created by deploy-aws deployment"
     echo ""
     read -p "Are you sure? (y/N): " confirm
-    
+
     if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
         echo "🚀 Running cleanup..."
-        
+
         # Set deployment mode
-        export DEPLOYMENT_MODE="aws-prod"
-        
+        export DEPLOYMENT_MODE="deploy-aws"
+
         # Load config
-        if [ -f ".env.aws-prod" ]; then
-            load_env_file ".env.aws-prod"
+        if [ -f ".env.deploy-aws" ]; then
+            load_env_file ".env.deploy-aws"
         fi
-        
+
         # Sequential cleanup (simple and reliable)
         echo "⚡ Cleaning up Lambda functions..."
-        python -m deployment.aws.services.lambda_deploy --mode aws-prod --cleanup
-        
+        python -m deployment.aws.services.lambda_deploy --mode deploy-aws --cleanup
+
         echo "🐳 Cleaning up ECS infrastructure..."
-        python -m deployment.aws.orchestration.deploy_ecs --mode aws-prod --cleanup
-        
+        python -m deployment.aws.orchestration.deploy_ecs --mode deploy-aws --cleanup
+
         # Remove config files
-        rm -f .env.aws-prod .env.aws-prod.json .deployment_state.json
+        rm -f .env.deploy-aws .env.deploy-aws.json .deployment_state.json
         
         echo "🎉 Cleanup completed!"
     else
@@ -678,20 +678,20 @@ function aws-prod-cleanup {
 }
 
 # Show AWS production deployment status with enhanced analysis
-function aws-prod-status {
+function deploy-aws-status {
     set +e
-    
+
     echo "📊 AWS Production Status & Cost Analysis"
     echo "======================================="
-    
+
     # Load config if available
-    if [ -f ".env.aws-prod" ]; then
-        source .env.aws-prod
-        echo "✅ Configuration loaded from .env.aws-prod"
+    if [ -f ".env.deploy-aws" ]; then
+        source .env.deploy-aws
+        echo "✅ Configuration loaded from .env.deploy-aws"
         echo "   📋 Key resources:"
-        grep -E "^(ECS_CLUSTER_NAME|VPC_ID|DATABASE_HOST)" .env.aws-prod 2>/dev/null | sed 's/^/      /' || echo "      ⚠️ Key variables not found"
+        grep -E "^(ECS_CLUSTER_NAME|VPC_ID|DATABASE_HOST)" .env.deploy-aws 2>/dev/null | sed 's/^/      /' || echo "      ⚠️ Key variables not found"
     else
-        echo "❌ .env.aws-prod not found"
+        echo "❌ .env.deploy-aws not found"
     fi
     echo ""
     
@@ -759,24 +759,24 @@ except Exception as e:
     fi
     
     echo "💡 Commands:"
-    echo "   • Full deployment: make aws-prod"
-    echo "   • Cleanup options: make aws-prod-cleanup" 
-    echo "   • Prerequisites: make aws-prod-validate"
+    echo "   • Full deployment: make deploy-aws"
+    echo "   • Cleanup options: make deploy-aws-cleanup"
+    echo "   • Prerequisites: make deploy-aws-validate"
     echo "   • Detailed costs: python -m deployment.aws.cleanup.orphan_detector --estimate-costs"
     echo "   • Resource scan: python -m deployment.aws.cleanup.orphan_detector --scan"
 }
 
 
 # Validate AWS production deployment prerequisites
-function aws-prod-validate {
+function deploy-aws-validate {
     set +e
-    
+
     echo "✅ Validating AWS Production Prerequisites"
     echo "========================================="
-    
+
     # Use the resource validator to check prerequisites
     python -m deployment.aws.monitoring.resource_validator
-    
+
     if [ $? -eq 0 ]; then
         echo ""
         echo "✅ All prerequisites validated successfully"
@@ -789,12 +789,12 @@ function aws-prod-validate {
     fi
 }
 
-# Validate AWS mock deployment prerequisites
-function aws-mock-validate {
+# Validate AWS local deployment prerequisites
+function deploy-aws-local-validate {
     set +e
-    
-    echo "✅ Validating AWS Mock Prerequisites"
-    echo "==================================="
+
+    echo "✅ Validating AWS Local Prerequisites"
+    echo "===================================="
     
     # Check Docker availability
     if ! command -v docker &> /dev/null; then

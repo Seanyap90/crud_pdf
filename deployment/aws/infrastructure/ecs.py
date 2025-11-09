@@ -29,7 +29,7 @@ class ECSClusterManager:
         
     def create_cluster(self, vpc_id: str, subnet_ids: List[str]) -> Dict[str, Any]:
         """Create ECS cluster with GPU capacity provider."""
-        # Use environment variables if not provided (for .env.aws-prod integration)
+        # Use environment variables if not provided (for .env.deploy-aws integration)
         if not vpc_id:
             vpc_id = os.getenv('VPC_ID')
             if not vpc_id:
@@ -269,7 +269,7 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                                 'VolumeSize': 80,   # 80GB for custom AMI with pre-loaded models
                                 'VolumeType': 'gp3',
                                 'Iops': 3000,       # High IOPS for fast model access
-                                'Throughput': 125,  # High throughput for large model files
+                                'Throughput': 500,  # High throughput for large model files
                                 'DeleteOnTermination': True,
                                 'Encrypted': True
                             }
@@ -914,7 +914,7 @@ echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
                         ],
                         'environment': [
                             # Core deployment configuration
-                            {'name': 'DEPLOYMENT_MODE', 'value': 'aws-prod'},
+                            {'name': 'DEPLOYMENT_MODE', 'value': 'deploy-aws'},
                             {'name': 'AWS_REGION', 'value': self.region},
                             {'name': 'SQS_QUEUE_URL', 'value': settings.sqs_queue_url},
                             {'name': 'S3_BUCKET_NAME', 'value': settings.s3_bucket_name},

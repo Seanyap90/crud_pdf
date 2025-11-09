@@ -30,23 +30,23 @@ def init_storage(mode=None):
     # Get API base URL for HTTP calls - mode-aware with API Gateway support
     if _MODE == 'local-dev':
         default_api_url = 'http://localhost:8000'
-    elif _MODE == 'aws-mock':
+    elif _MODE == 'deploy-aws-local':
         default_api_url = 'http://host.docker.internal:8000'
-    elif _MODE == 'aws-prod':
-        # For aws-prod, expect API_GATEWAY_URL to be set by deployment
+    elif _MODE == 'deploy-aws':
+        # For deploy-aws, expect API_GATEWAY_URL to be set by deployment
         api_gateway_url = os.environ.get('API_GATEWAY_URL')
         if api_gateway_url:
             default_api_url = api_gateway_url
             logger.info(f"Using API Gateway URL: {api_gateway_url}")
         else:
-            logger.warning("API_GATEWAY_URL not set for aws-prod mode, falling back to default")
+            logger.warning("API_GATEWAY_URL not set for deploy-aws mode, falling back to default")
             default_api_url = 'https://api-gateway-placeholder.execute-api.us-east-1.amazonaws.com'
     else:
         default_api_url = 'http://host.docker.internal:8000'
     
     _API_BASE_URL = os.environ.get('API_BASE_URL', default_api_url)
     
-    if _MODE in ['aws-mock', 'aws-prod']:
+    if _MODE in ['deploy-aws-local', 'deploy-aws']:
         # Initialize S3 client
         _S3_CLIENT = boto3.client(
             's3',
@@ -71,7 +71,7 @@ def download_file(file_path: str, local_path: str) -> str:
     if _MODE is None:
         init_storage()
         
-    if _MODE in ['aws-mock', 'aws-prod']:
+    if _MODE in ['deploy-aws-local', 'deploy-aws']:
         try:
             if not _BUCKET_NAME:
                 raise ValueError("S3 bucket name is not set")
@@ -99,7 +99,7 @@ def upload_file(local_path: str, file_path: str, content_type: Optional[str] = N
     if _MODE is None:
         init_storage()
         
-    if _MODE in ['aws-mock', 'aws-prod']:
+    if _MODE in ['deploy-aws-local', 'deploy-aws']:
         try:
             with open(local_path, 'rb') as file_data:
                 _S3_CLIENT.put_object(
@@ -122,7 +122,7 @@ def file_exists(file_path: str) -> bool:
     if _MODE is None:
         init_storage()
         
-    if _MODE in ['aws-mock', 'aws-prod']:
+    if _MODE in ['deploy-aws-local', 'deploy-aws']:
         try:
             _S3_CLIENT.head_object(Bucket=_BUCKET_NAME, Key=file_path)
             return True

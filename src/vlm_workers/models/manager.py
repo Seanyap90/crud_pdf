@@ -3,8 +3,8 @@ Unified model loading interface for VLM workers.
 
 Provides a consistent interface for model loading across different deployment modes:
 - local-dev: Direct GPU access from local HuggingFace cache
-- aws-mock: Docker volume mounts with container model loading
-- aws-prod: EFS mounts with offline model loading
+- deploy-aws-local: Docker volume mounts with container model loading
+- deploy-aws: EFS mounts with offline model loading
 """
 
 from abc import ABC, abstractmethod
@@ -56,7 +56,7 @@ class ModelManager:
                 self._loader = LocalModelLoader()
                 logger.info("Using LocalModelLoader for local-dev mode")
             else:
-                # Both aws-mock and aws-prod use container-based loading
+                # Both deploy-aws-local and deploy-aws use container-based loading
                 from vlm_workers.models.loader_container import ContainerModelLoader
                 self._loader = ContainerModelLoader()
                 logger.info(f"Using ContainerModelLoader for {self.settings.deployment_mode} mode")
