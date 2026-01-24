@@ -64,3 +64,6 @@ archive/*
 deployment/kubernetes/*
 .github/workflows/e2e-test-and-merge.yml
 docs/RAG-VLM-Pipeline-Review.md
+src/iot/*.md
+deployment/*.md
+AWS_IOT_CONFIG_UPDATE_CONSOLE_PLAN.md

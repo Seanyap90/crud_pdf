@@ -112,13 +112,14 @@ const (
     CertPath          = "/app/certificates/cert.pem"
     KeyPath           = "/app/certificates/key.pem"
     CheckInterval     = 5 * time.Second
-    HeartbeatInterval = 30 * time.Second
+    HeartbeatInterval = 120 * time.Second
 )
 
 // Global variables
 var (
     gatewayID       string
     brokerAddress   string
+    mqttProtocol    string = "tcp"          // MQTT protocol (tcp, ssl, tls)
     mqttClient      mqtt.Client
     eventChan       chan Event = make(chan Event, 100) // Buffered channel for events
     hasCertificates bool = false
@@ -234,8 +235,25 @@ func setupBrokerAddress() {
             log.Printf("Successfully resolved hostname %s to IPs: %v", hostname, ips)
         }
     }
-    
+
     log.Printf("Final MQTT broker address: %s", brokerAddress)
+
+    // Determine MQTT protocol (tcp, ssl, or tls)
+    envProtocol := os.Getenv("MQTT_PROTOCOL")
+    if envProtocol != "" {
+        // Use explicitly specified protocol
+        mqttProtocol = envProtocol
+        log.Printf("Using MQTT protocol from environment: %s", mqttProtocol)
+    } else {
+        // Auto-detect: use ssl if we have certificates, tcp otherwise
+        if hasCertificates {
+            mqttProtocol = "ssl"
+            log.Printf("Certificates detected, using SSL/TLS protocol")
+        } else {
+            mqttProtocol = "tcp"
+            log.Printf("No certificates detected, using TCP protocol")
+        }
+    }
 }
 
 // checkTCPConnectivity tries to establish a TCP connection to verify the address is reachable
@@ -326,31 +344,74 @@ func heartbeatTimer() {
     }
 }
 
-// requestConfig sends a request for the latest configuration
+// handleShadowDelta processes shadow delta messages from AWS IoT
+func handleShadowDelta(msg mqtt.Message) {
+    // Parse shadow delta
+    var shadowDelta map[string]interface{}
+    if err := json.Unmarshal(msg.Payload(), &shadowDelta); err != nil {
+        log.Printf("Error parsing shadow delta: %v", err)
+        return
+    }
+
+    log.Printf("Shadow delta received: %s", string(msg.Payload()))
+
+    // Extract state from delta
+    state, ok := shadowDelta["state"].(map[string]interface{})
+    if !ok {
+        log.Printf("No state in shadow delta")
+        return
+    }
+
+    // Check for config_version (which contains the update_id)
+    if configVersion, ok := state["config_version"].(string); ok && configVersion != "" {
+        log.Printf("New config version detected in shadow: %s", configVersion)
+        currentUpdateID = configVersion
+
+        // Send config request with the update_id
+        requestConfigWithUpdateID(configVersion)
+    }
+}
+
+// requestConfig sends a request for the latest configuration (without update_id)
 func requestConfig() {
+    requestConfigWithUpdateID("")
+}
+
+// requestConfigWithUpdateID sends a request for configuration with optional update_id
+func requestConfigWithUpdateID(updateID string) {
     if !isMqttConnected || mqttClient == nil {
         log.Printf("Cannot request config: MQTT not connected")
         return
     }
-    
-    topic := fmt.Sprintf("gateway/%s/request_config", gatewayID)
+
+    topic := fmt.Sprintf("gateway/%s/config/request", gatewayID)
     payload := map[string]interface{}{
         "timestamp": time.Now().Format(time.RFC3339),
     }
-    
+
+    // Add update_id if provided
+    if updateID != "" {
+        payload["update_id"] = updateID
+        log.Printf("Config request includes update_id: %s", updateID)
+    }
+
     jsonData, err := json.Marshal(payload)
     if err != nil {
         log.Printf("Error marshaling config request: %v", err)
         return
     }
-    
+
     token := mqttClient.Publish(topic, 0, false, jsonData)
     token.Wait()
-    
+
     if token.Error() != nil {
         log.Printf("Error requesting config: %v", token.Error())
     } else {
-        log.Printf("Configuration request sent to topic: %s", topic)
+        if updateID != "" {
+            log.Printf("Configuration request sent to topic: %s with update_id: %s", topic, updateID)
+        } else {
+            log.Printf("Configuration request sent to topic: %s (no update_id)", topic)
+        }
     }
 }
 
@@ -373,7 +434,7 @@ func storeConfig(yamlConfig string) {
     
     // Initialize update_id as empty
     updateID := ""
-    
+
     // First check if this is a JSON payload with yaml_config and update_id
     var configData map[string]interface{}
     if err := json.Unmarshal([]byte(yamlConfig), &configData); err == nil {
@@ -382,9 +443,62 @@ func storeConfig(yamlConfig string) {
             updateID = id
             currentUpdateID = id
             log.Printf("Extracted update_id from config: %s", updateID)
-            
-            // If we found yaml_config in JSON, use that instead
-            if cfg, ok := configData["yaml_config"].(string); ok && cfg != "" {
+
+            // AWS Implementation: Check for presigned S3 URL
+            if cfgURL, ok := configData["config_url"].(string); ok && cfgURL != "" {
+                log.Printf("AWS Implementation: Downloading config from S3 presigned URL")
+                log.Printf("S3 URL: %s", cfgURL)
+                resp, err := http.Get(cfgURL)
+                if err != nil {
+                    log.Printf("Error downloading config from S3: %v", err)
+                    return
+                }
+                defer resp.Body.Close()
+
+                if resp.StatusCode != 200 {
+                    respBody, _ := ioutil.ReadAll(resp.Body)
+                    log.Printf("Error downloading config: HTTP %d", resp.StatusCode)
+                    log.Printf("S3 Response: %s", string(respBody))
+                    return
+                }
+
+                content, err := ioutil.ReadAll(resp.Body)
+                if err != nil {
+                    log.Printf("Error reading S3 response: %v", err)
+                    return
+                }
+                yamlConfig = string(content)
+                log.Printf("Downloaded config from S3, size: %d bytes", len(yamlConfig))
+                log.Printf("First 100 chars of downloaded YAML: %s", yamlConfig[:min(100, len(yamlConfig))])
+
+                // If S3 stored the JSON representation of the string (including quotes),
+                // unmarshal it as JSON to get the actual YAML content
+                // IMPORTANT: Do this BEFORE unescaping newlines, because json.Unmarshal needs
+                // escape sequences to still be in their escaped form (\n not actual newlines)
+                if strings.HasPrefix(yamlConfig, "\"") && strings.HasSuffix(yamlConfig, "\"") {
+                    log.Printf("Detected JSON-encoded string in S3 content (has quotes), unescaping as JSON")
+                    var unquoted string
+                    if err := json.Unmarshal([]byte(yamlConfig), &unquoted); err == nil {
+                        yamlConfig = unquoted
+                        log.Printf("Successfully unquoted JSON string, new size: %d bytes", len(yamlConfig))
+                        log.Printf("First 100 chars after unquoting: %s", yamlConfig[:min(100, len(yamlConfig))])
+                    } else {
+                        log.Printf("Warning: Failed to unescape JSON string: %v", err)
+                    }
+                }
+
+                // Handle potential double-encoding: if newlines are escaped as literal \n, unescape them
+                // This ensures compatibility with both raw YAML and JSON-encoded YAML from Step Functions
+                if strings.Contains(yamlConfig, "\\n") && !strings.Contains(yamlConfig, "\n") {
+                    log.Printf("Detected escaped newlines in S3 content, converting to actual newlines")
+                    yamlConfig = strings.ReplaceAll(yamlConfig, "\\n", "\n")
+                    yamlConfig = strings.ReplaceAll(yamlConfig, "\\t", "\t")
+                    yamlConfig = strings.ReplaceAll(yamlConfig, "\\r", "\r")
+                    log.Printf("After unescaping, size: %d bytes", len(yamlConfig))
+                }
+            } else if cfg, ok := configData["yaml_config"].(string); ok && cfg != "" {
+                // Local Implementation: Extract YAML from JSON wrapper
+                log.Printf("Local Implementation: Using yaml_config from JSON wrapper")
                 yamlConfig = cfg
                 log.Printf("Extracted yaml_config from JSON wrapper")
             }
@@ -400,8 +514,10 @@ func storeConfig(yamlConfig string) {
     if endDeviceManager != nil {
         // Parse the configuration to apply to devices
         var configMap map[string]interface{}
+        log.Printf("Attempting to parse YAML, length: %d, first 50 chars: %s", len(yamlConfig), yamlConfig[:min(50, len(yamlConfig))])
         if err := yaml.Unmarshal([]byte(yamlConfig), &configMap); err != nil {
             log.Printf("Error parsing configuration YAML: %v", err)
+            log.Printf("Full YAML content for debugging: %s", yamlConfig)
             return
         }
         
@@ -1390,7 +1506,6 @@ func mainEventLoop() {
             // Send connected status along with certificate info
             sendStatusUpdate("connected", "Connected to MQTT broker", map[string]interface{}{
                 "certificate_status": "installed",
-                "status": "online",
             })
 
             // Initialize device manager if not already done
@@ -1542,8 +1657,20 @@ func setupMQTTClient() {
     
     // Setup MQTT options
     opts := mqtt.NewClientOptions()
-    opts.AddBroker(fmt.Sprintf("tcp://%s", brokerAddress))
+    opts.AddBroker(fmt.Sprintf("%s://%s", mqttProtocol, brokerAddress))
     opts.SetClientID(gatewayID)
+
+    // Add Last Will and Testament
+    lwtTopic := fmt.Sprintf("gateway/%s/status", gatewayID)
+    lwtMessage := map[string]interface{}{
+        "status":    "disconnected",
+        "timestamp": time.Now().Format(time.RFC3339),
+        "reason":    "connection_lost",
+    }
+    lwtPayload, _ := json.Marshal(lwtMessage)
+    opts.SetWill(lwtTopic, string(lwtPayload), 0, false)
+    log.Printf("Last Will configured for topic: %s", lwtTopic)
+
     opts.SetKeepAlive(60 * time.Second)
     opts.SetPingTimeout(10 * time.Second)
     opts.SetAutoReconnect(true)
@@ -1553,29 +1680,45 @@ func setupMQTTClient() {
     // Add connection handlers
     opts.SetOnConnectHandler(func(client mqtt.Client) {
         log.Printf("MQTT connected successfully to %s", brokerAddress)
-        
-        // Subscribe to control topic
-        controlTopic := fmt.Sprintf("control/%s", gatewayID)
-        log.Printf("Subscribing to control topic: %s", controlTopic)
-        
-        if token := client.Subscribe(controlTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
-            log.Printf("Received message on topic %s: %s", msg.Topic(), string(msg.Payload()))
-            eventChan <- Event{Type: EventMQTTMessage, Data: msg, Time: time.Now()}
-        }); token.Wait() && token.Error() != nil {
-            log.Printf("Error subscribing to control topic: %v", token.Error())
+
+        // Subscribe to control topic (only for local development)
+        // In AWS, Step Functions handles gateway lifecycle directly
+        if !isAWSEnvironment() {
+            controlTopic := fmt.Sprintf("control/%s", gatewayID)
+            log.Printf("Subscribing to control topic: %s", controlTopic)
+
+            if token := client.Subscribe(controlTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+                log.Printf("Received message on topic %s: %s", msg.Topic(), string(msg.Payload()))
+                eventChan <- Event{Type: EventMQTTMessage, Data: msg, Time: time.Now()}
+            }); token.Wait() && token.Error() != nil {
+                log.Printf("Error subscribing to control topic: %v", token.Error())
+            }
+        } else {
+            log.Printf("AWS environment: Skipping control topic subscription (handled by Step Functions)")
         }
 
-        // Subscribe to config update topic
+        // Subscribe to shadow delta topic (for AWS config updates)
+        shadowDeltaTopic := fmt.Sprintf("$aws/things/%s/shadow/name/configuration/update/delta", gatewayID)
+        log.Printf("Subscribing to shadow delta topic: %s", shadowDeltaTopic)
+
+        if token := client.Subscribe(shadowDeltaTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+            log.Printf("Received shadow delta on topic %s", msg.Topic())
+            handleShadowDelta(msg)
+        }); token.Wait() && token.Error() != nil {
+            log.Printf("Error subscribing to shadow delta topic: %v", token.Error())
+        }
+
+        // Subscribe to config update topic (for direct config delivery)
         configTopic := fmt.Sprintf("gateway/%s/config/update", gatewayID)
         log.Printf("Subscribing to config topic: %s", configTopic)
-        
+
         if token := client.Subscribe(configTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
             log.Printf("Received config update on topic %s", msg.Topic())
             eventChan <- Event{Type: EventConfigUpdate, Data: msg, Time: time.Now()}
         }); token.Wait() && token.Error() != nil {
             log.Printf("Error subscribing to config topic: %v", token.Error())
         }
-        
+
         eventChan <- Event{Type: EventMQTTConnected, Time: time.Now()}
     })
     
@@ -1849,14 +1992,32 @@ func sendStatusUpdate(status string, message string, additionalData ...map[strin
         "message": message,
         "timestamp": time.Now().Format(time.RFC3339),
     }
-    
+
     // Merge additional data if provided
     if len(additionalData) > 0 && additionalData[0] != nil {
         for k, v := range additionalData[0] {
             payload[k] = v
         }
     }
-    
+
+    // In AWS mode, publish status to MQTT (AWS IoT Rules will handle it)
+    if isAWSEnvironment() && isMqttConnected && mqttClient != nil {
+        jsonData, err := json.Marshal(payload)
+        if err != nil {
+            log.Printf("Error marshaling status update: %v", err)
+        } else {
+            topic := fmt.Sprintf("gateway/%s/status", gatewayID)
+            token := mqttClient.Publish(topic, 0, false, jsonData)
+            token.Wait()
+            if token.Error() != nil {
+                log.Printf("Error publishing status update: %v", token.Error())
+            } else {
+                log.Printf("Published status '%s' to MQTT topic: %s", status, topic)
+            }
+        }
+    }
+
+    // For local mode, send to API via HTTP
     sendEventToAPI(gatewayID, "status", payload)
 }
 
@@ -1875,9 +2036,16 @@ type ApiResponse struct {
 
 // sendEventToAPI sends an event to the API
 func sendEventToAPI(gatewayID string, eventType string, payload interface{}) (*ApiResponse, error) {
-    // Get API URL with adaptive handling
+    // In AWS, all events flow through MQTT → IoT Rules → Step Functions
+    // HTTP calls to API are not needed (and no API endpoint exists for gateway events)
+    if isAWSEnvironment() {
+        log.Printf("AWS environment: %s event sent via MQTT topic only", eventType)
+        return nil, nil
+    }
+
+    // Local environment: send HTTP request to FastAPI backend
     apiURL := setupApiUrl()
-    
+
     // Create event
     event := MQTTEvent{
         GatewayID: gatewayID,
@@ -1885,14 +2053,14 @@ func sendEventToAPI(gatewayID string, eventType string, payload interface{}) (*A
         Payload:   payload,
         Timestamp: time.Now().Format(time.RFC3339),
     }
-    
+
     // Convert to JSON
     jsonData, err := json.Marshal(event)
     if err != nil {
         log.Printf("Error marshaling event data: %v", err)
         return nil, err
     }
-    
+
     // Send to API
     url := fmt.Sprintf("%s/api/mqtt/events", apiURL)
     log.Printf("Sending %s event to API: %s", eventType, url)
@@ -1935,4 +2103,18 @@ func getUptime() string {
         return fmt.Sprintf("%ds", time.Now().Unix()%86400)
     }
     return uptime
+}
+
+// isAWSEnvironment detects if running in AWS environment
+func isAWSEnvironment() bool {
+    // AWS IoT Core endpoints always contain "amazonaws.com"
+    return strings.Contains(brokerAddress, "amazonaws.com")
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+    if a < b {
+        return a
+    }
+    return b
 }

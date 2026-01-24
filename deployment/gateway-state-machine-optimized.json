@@ -1,0 +1,428 @@
+{
+  "Comment": "Gateway State Machine - optimized with AWS SDK integrations",
+  "StartAt": "DetermineEventType",
+  "States": {
+    "DetermineEventType": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.detail-type",
+          "StringEquals": "GatewayCreated",
+          "Next": "HandleGatewayCreated"
+        },
+        {
+          "Variable": "$.detail-type",
+          "StringEquals": "GatewayConnected",
+          "Next": "HandleGatewayConnected"
+        },
+        {
+          "Variable": "$.detail-type",
+          "StringEquals": "GatewayDisconnected",
+          "Next": "HandleGatewayDisconnected"
+        },
+        {
+          "Variable": "$.detail-type",
+          "StringEquals": "GatewayDeleted",
+          "Next": "HandleGatewayDeleted"
+        },
+        {
+          "Variable": "$.detail-type",
+          "StringEquals": "GatewayUpdated",
+          "Next": "HandleGatewayUpdate"
+        }
+      ],
+      "Default": "UnknownEventType"
+    },
+    "HandleGatewayCreated": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "CreateKeysAndCertificate",
+          "States": {
+            "CreateKeysAndCertificate": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:iot:createKeysAndCertificate",
+              "Parameters": {
+                "SetAsActive": true
+              },
+              "ResultPath": "$.certificate",
+              "Next": "StoreCertificateInS3"
+            },
+            "StoreCertificateInS3": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-provision-certificate",
+                "Payload": {
+                  "gateway_id.$": "$.detail.gateway_id",
+                  "certificate_pem.$": "$.certificate.CertificatePem",
+                  "private_key.$": "$.certificate.KeyPair.PrivateKey",
+                  "certificate_arn.$": "$.certificate.CertificateArn",
+                  "certificate_id.$": "$.certificate.CertificateId"
+                }
+              },
+              "ResultPath": "$.certificate_storage",
+              "Next": "AttachPolicyToCertificate"
+            },
+            "AttachPolicyToCertificate": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:iot:attachPolicy",
+              "Parameters": {
+                "PolicyName": "GatewayPolicy",
+                "Target.$": "$.certificate.CertificateArn"
+              },
+              "ResultPath": "$.policy_attach",
+              "Next": "CreateThingInIoT"
+            },
+            "CreateThingInIoT": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:iot:createThing",
+              "Parameters": {
+                "ThingName.$": "$.detail.gateway_id",
+                "ThingTypeName": "IoTGateway",
+                "AttributePayload": {
+                  "Attributes": {
+                    "name.$": "$.detail.name",
+                    "location.$": "$.detail.location",
+                    "certificate_id.$": "$.certificate.CertificateId"
+                  }
+                }
+              },
+              "ResultPath": "$.iot_thing",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "ResultPath": "$.error",
+                  "Next": "ThingCreationFailed"
+                }
+              ],
+              "Next": "AttachThingPrincipal"
+            },
+            "AttachThingPrincipal": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:iot:attachThingPrincipal",
+              "Parameters": {
+                "ThingName.$": "$.detail.gateway_id",
+                "Principal.$": "$.certificate.CertificateArn"
+              },
+              "ResultPath": "$.attach_principal",
+              "Next": "StoreCertificateURLsInShadow"
+            },
+            "StoreCertificateURLsInShadow": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-update-shadow",
+                "Payload": {
+                  "thing_name.$": "$.detail.gateway_id",
+                  "shadow_name": "certificates",
+                  "state": {
+                    "reported": {
+                      "certificate_url.$": "$.certificate_storage.Payload.certificate_url",
+                      "private_key_url.$": "$.certificate_storage.Payload.private_key_url",
+                      "root_ca_url.$": "$.certificate_storage.Payload.root_ca_url",
+                      "certificate_id.$": "$.certificate.CertificateId",
+                      "expires_at.$": "States.Format('{}', $.certificate_storage.Payload.expires_at)",
+                      "provisioned_at.$": "$.detail.timestamp"
+                    }
+                  }
+                }
+              },
+              "ResultPath": "$.certificate_shadow",
+              "Next": "CreateStatusShadow"
+            },
+            "CreateStatusShadow": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-update-shadow",
+                "Payload": {
+                  "thing_name.$": "$.detail.gateway_id",
+                  "shadow_name": "status",
+                  "state": {
+                    "reported": {
+                      "status": "created",
+                      "created_at.$": "$.detail.timestamp",
+                      "certificate_id.$": "$.certificate.CertificateId"
+                    }
+                  }
+                }
+              },
+              "ResultPath": "$.status_shadow",
+              "End": true
+            },
+            "ThingCreationFailed": {
+              "Type": "Pass",
+              "Result": "Thing creation failed",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "WriteGatewayCreatedEvent",
+          "States": {
+            "WriteGatewayCreatedEvent": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-write-event",
+                "Payload": {
+                  "aggregate_id.$": "$.detail.gateway_id",
+                  "aggregate_type": "gateway",
+                  "event_type": "GatewayCreated",
+                  "event_data.$": "$.detail"
+                }
+              },
+              "ResultPath": "$.event_result",
+              "Next": "UpdateGatewayReadModel"
+            },
+            "UpdateGatewayReadModel": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-update-gateway-read-model",
+                "Payload": {
+                  "gateway_id.$": "$.detail.gateway_id"
+                }
+              },
+              "ResultPath": "$.read_model_result",
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.parallel_results",
+      "Next": "GatewayCreatedSuccess"
+    },
+    "GatewayCreatedSuccess": {
+      "Type": "Succeed"
+    },
+    "HandleGatewayConnected": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "UpdateStatusShadowConnected",
+          "States": {
+            "UpdateStatusShadowConnected": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-update-shadow",
+                "Payload": {
+                  "thing_name.$": "$.detail.gateway_id",
+                  "shadow_name": "status",
+                  "state": {
+                    "reported": {
+                      "status": "connected",
+                      "connected_at.$": "$.detail.timestamp"
+                    }
+                  }
+                }
+              },
+              "ResultPath": "$.shadow_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "WriteGatewayConnectedEvent",
+          "States": {
+            "WriteGatewayConnectedEvent": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-write-event",
+                "Payload": {
+                  "aggregate_id.$": "$.detail.gateway_id",
+                  "aggregate_type": "gateway",
+                  "event_type": "GatewayConnected",
+                  "event_data.$": "$.detail"
+                }
+              },
+              "ResultPath": "$.event_result",
+              "Next": "UpdateReadModelConnected"
+            },
+            "UpdateReadModelConnected": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-update-gateway-read-model",
+                "Payload": {
+                  "gateway_id.$": "$.detail.gateway_id"
+                }
+              },
+              "ResultPath": "$.read_model_result",
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.parallel_results",
+      "Next": "GatewayConnectedSuccess"
+    },
+    "GatewayConnectedSuccess": {
+      "Type": "Succeed"
+    },
+    "HandleGatewayDisconnected": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "UpdateStatusShadowDisconnected",
+          "States": {
+            "UpdateStatusShadowDisconnected": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-update-shadow",
+                "Payload": {
+                  "thing_name.$": "$.detail.gateway_id",
+                  "shadow_name": "status",
+                  "state": {
+                    "reported": {
+                      "status": "disconnected",
+                      "disconnected_at.$": "$.detail.timestamp"
+                    }
+                  }
+                }
+              },
+              "ResultPath": "$.shadow_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "WriteGatewayDisconnectedEvent",
+          "States": {
+            "WriteGatewayDisconnectedEvent": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-write-event",
+                "Payload": {
+                  "aggregate_id.$": "$.detail.gateway_id",
+                  "aggregate_type": "gateway",
+                  "event_type": "GatewayDisconnected",
+                  "event_data.$": "$.detail"
+                }
+              },
+              "ResultPath": "$.event_result",
+              "Next": "UpdateReadModelDisconnected"
+            },
+            "UpdateReadModelDisconnected": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-update-gateway-read-model",
+                "Payload": {
+                  "gateway_id.$": "$.detail.gateway_id"
+                }
+              },
+              "ResultPath": "$.read_model_result",
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.parallel_results",
+      "Next": "GatewayDisconnectedSuccess"
+    },
+    "GatewayDisconnectedSuccess": {
+      "Type": "Succeed"
+    },
+    "HandleGatewayDeleted": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "DeleteThingFromIoT",
+          "States": {
+            "DeleteThingFromIoT": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:iot:deleteThing",
+              "Parameters": {
+                "ThingName.$": "$.detail.gateway_id"
+              },
+              "ResultPath": "$.delete_result",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "ResultPath": "$.error",
+                  "Next": "ThingDeletionSkipped"
+                }
+              ],
+              "End": true
+            },
+            "ThingDeletionSkipped": {
+              "Type": "Pass",
+              "Result": "Thing deletion skipped or failed",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "WriteGatewayDeletedEvent",
+          "States": {
+            "WriteGatewayDeletedEvent": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-write-event",
+                "Payload": {
+                  "aggregate_id.$": "$.detail.gateway_id",
+                  "aggregate_type": "gateway",
+                  "event_type": "GatewayDeleted",
+                  "event_data.$": "$.detail"
+                }
+              },
+              "ResultPath": "$.event_result",
+              "Next": "UpdateReadModelDeleted"
+            },
+            "UpdateReadModelDeleted": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-update-gateway-read-model",
+                "Payload": {
+                  "gateway_id.$": "$.detail.gateway_id"
+                }
+              },
+              "ResultPath": "$.read_model_result",
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.parallel_results",
+      "Next": "GatewayDeletedSuccess"
+    },
+    "GatewayDeletedSuccess": {
+      "Type": "Succeed"
+    },
+    "HandleGatewayUpdate": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-handle-gateway-update",
+        "Payload": {
+          "gateway_id.$": "$.detail.gateway_id",
+          "update_type.$": "$.detail.update_type",
+          "payload.$": "$.detail.payload",
+          "timestamp.$": "$.detail.timestamp"
+        }
+      },
+      "ResultPath": "$.update_result",
+      "Next": "GatewayUpdateSuccess"
+    },
+    "GatewayUpdateSuccess": {
+      "Type": "Succeed"
+    },
+    "UnknownEventType": {
+      "Type": "Fail",
+      "Error": "UnknownEventType",
+      "Cause": "The event type is not recognized by the state machine"
+    }
+  }
+}
