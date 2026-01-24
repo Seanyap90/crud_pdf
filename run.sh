@@ -1008,6 +1008,82 @@ function iot-backend-cleanup() {
     echo "Cleanup complete"
 }
 
+# Deploy IoT Infrastructure to AWS
+function deploy-iot-aws() {
+    echo "=== Deploying IoT Infrastructure to AWS ==="
+
+    # Load AWS configuration
+    load_env_file ".env.deploy-aws"
+    export DEPLOYMENT_MODE="deploy-aws"
+
+    # Get database configuration
+    DATABASE_HOST="${DATABASE_HOST:-13.221.108.179}"
+    DATABASE_PORT="${DATABASE_PORT:-8080}"
+
+    echo "Configuration:"
+    echo "  Database Host: $DATABASE_HOST"
+    echo "  Database Port: $DATABASE_PORT"
+    echo "  Deployment Mode: $DEPLOYMENT_MODE"
+
+    # Phase 1: Validation
+    echo ""
+    echo "Phase 1: Validating prerequisites..."
+    python -m deployment.aws.services.iot_deploy --validate-only
+    if [ $? -ne 0 ]; then
+        echo "❌ Validation failed"
+        return 1
+    fi
+
+    # Phase 2: Deploy IoT Lambda (FastAPI)
+    echo ""
+    echo "Phase 2: Deploying IoT FastAPI Lambda..."
+    python -m deployment.aws.services.lambda_deploy \
+        --region "${AWS_REGION:-us-east-1}" \
+        --iot-only
+    if [ $? -ne 0 ]; then
+        echo "❌ IoT Lambda deployment failed"
+        return 1
+    fi
+
+    # Phase 3: Deploy MQTT Proxy Lambda
+    echo ""
+    echo "Phase 3: Deploying MQTT Proxy Lambda..."
+    python -m deployment.aws.services.iot_deploy --deploy-measurement-proxy
+    if [ $? -ne 0 ]; then
+        echo "⚠️ MQTT Proxy Lambda deployment had issues (may be expected)"
+    fi
+
+    # Phase 4: Deploy Step Functions State Machines
+    echo ""
+    echo "Phase 4: Deploying Step Functions..."
+    python -m deployment.aws.services.iot_deploy --deploy-state-machines
+    if [ $? -ne 0 ]; then
+        echo "⚠️ Step Functions deployment had issues (may be expected)"
+    fi
+
+    # Phase 5: Deploy/Update IoT Rules
+    echo ""
+    echo "Phase 5: Deploying IoT Rules..."
+    python -m deployment.aws.services.iot_deploy --deploy-iot-rules
+    if [ $? -ne 0 ]; then
+        echo "⚠️ IoT Rules deployment had issues (may be expected)"
+    fi
+
+    # Phase 6: Validation and Summary
+    echo ""
+    echo "Phase 6: Validating deployment..."
+    python -m deployment.aws.services.iot_deploy --status
+
+    echo ""
+    echo "=== IoT Infrastructure Deployment Complete ==="
+    echo ""
+    echo "Next steps:"
+    echo "  1. Verify Lambda Function URL is accessible"
+    echo "  2. Configure API Gateway if needed"
+    echo "  3. Deploy gateways and devices"
+    echo "  4. Test MQTT measurement flow"
+}
+
 # Function to generate certificates for a gateway
 function generate_cert() {
     local gateway_id=$1

@@ -4,12 +4,13 @@ import logging
 import hashlib
 import json
 import yaml
+import os
 from typing import Dict, Any, List, Optional
 from .schemas import (
-    CreateGatewayRequest, 
-    MQTTEventRequest, 
-    GatewayStatus, 
-    EventResponse, 
+    CreateGatewayRequest,
+    MQTTEventRequest,
+    GatewayStatus,
+    EventResponse,
     GatewayList,
     GatewayUpdateType,
     GatewayState,
@@ -685,4 +686,80 @@ async def list_devices(
         return devices
     except Exception as e:
         logger.error(f"Error listing devices: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/measurements", status_code=status.HTTP_201_CREATED)
+async def create_measurement(
+    device_id: str = Form(...),
+    gateway_id: str = Form(...),
+    measurement_type: str = Form("weight_measurement"),
+    payload: str = Form(...),
+    timestamp: Optional[str] = Form(None),
+    worker: BaseWorker = Depends(get_worker)
+):
+    """Store measurement from IoT gateway via MQTT proxy
+
+    Called by iot-process-measurement Lambda (proxy pattern).
+    Flow: Gateway → MQTT → IoT Rule → iot-process-measurement → This endpoint
+    """
+    try:
+        from .db_layer import get_measurement_service
+
+        # Parse JSON payload
+        try:
+            payload_dict = json.loads(payload)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid payload JSON")
+
+        # Get service with HTTP URL support
+        db_endpoint = worker.db_path or f"http://{os.getenv('DATABASE_HOST')}:{os.getenv('DATABASE_PORT')}"
+        measurement_service = get_measurement_service(db_endpoint)
+
+        measurement_id = measurement_service.store_measurement(
+            device_id=device_id,
+            gateway_id=gateway_id,
+            measurement_type=measurement_type,
+            payload=payload_dict,
+            timestamp=timestamp
+        )
+
+        logger.info(f"Stored measurement {measurement_id} from device {device_id}")
+
+        return {
+            "status": "success",
+            "measurement_id": measurement_id,
+            "device_id": device_id,
+            "gateway_id": gateway_id
+        }
+
+    except Exception as e:
+        logger.error(f"Error storing measurement: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/measurements")
+async def list_measurements(
+    device_id: Optional[str] = None,
+    gateway_id: Optional[str] = None,
+    limit: int = 100,
+    worker: BaseWorker = Depends(get_worker)
+):
+    """List measurements with optional filters"""
+    try:
+        from .db_layer import get_measurement_service
+
+        db_endpoint = worker.db_path or f"http://{os.getenv('DATABASE_HOST')}:{os.getenv('DATABASE_PORT')}"
+        measurement_service = get_measurement_service(db_endpoint)
+
+        measurements = measurement_service.get_measurements(
+            device_id=device_id,
+            gateway_id=gateway_id,
+            limit=limit
+        )
+
+        return {"measurements": measurements, "total": len(measurements)}
+
+    except Exception as e:
+        logger.error(f"Error listing measurements: {e}")
         raise HTTPException(status_code=500, detail=str(e))

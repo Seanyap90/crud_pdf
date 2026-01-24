@@ -13,12 +13,25 @@ from .device_service import get_device_service
 logger = logging.getLogger(__name__)
 
 
+def _get_adapter_for_db(db_path: str):
+    """Get appropriate adapter based on db_path (HTTP URL or local file)"""
+    if db_path.startswith('http://') or db_path.startswith('https://'):
+        # AWS deployment - use HTTP adapter
+        from database.sqlite_http_adapter import SQLiteHTTPAdapter
+        host_port = db_path.replace('http://', '').replace('https://', '')
+        host, port = host_port.split(':')
+        return SQLiteHTTPAdapter(host, int(port))
+    else:
+        # Local deployment - use NoSQL adapter
+        return get_nosql_adapter(db_path)
+
+
 class MeasurementService:
     """Service for managing measurement documents with embedded device info"""
-    
+
     def __init__(self, db_path: str = "recycling.db"):
         self.db_path = db_path
-        self.adapter = get_nosql_adapter(db_path)
+        self.adapter = _get_adapter_for_db(db_path)
         self.device_service = get_device_service(db_path)
     
     def store_measurement(

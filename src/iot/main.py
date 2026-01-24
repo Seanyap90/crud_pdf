@@ -57,15 +57,27 @@ def create_app(worker_instance: BaseWorker = None) -> FastAPI:
     # This maintains statelessness in line with event sourcing principles
     async def create_request_worker() -> BaseWorker:
         """Create a new worker instance for each request"""
-        # If worker_instance is provided by CLI, return that
-        # This allows CLI to use a specific worker implementation
-        if worker_instance is not None:
-            return worker_instance
-            
-        # Otherwise create a fresh worker for this request
-        worker = LocalWorker(db_path=DB_PATH)
-        await worker.start()
-        return worker
+        deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'local')
+
+        if deployment_mode == 'deploy-aws':
+            # AWS Lambda mode - use AWSWorker with HTTP adapter
+            from .worker.aws_worker import AWSWorker
+            db_host = os.environ.get('DATABASE_HOST')
+            db_port = int(os.environ.get('DATABASE_PORT', '8080'))
+            worker = AWSWorker(db_host=db_host, db_port=db_port)
+            await worker.start()
+            return worker
+        else:
+            # Local mode - use LocalWorker
+            # If worker_instance is provided by CLI, return that
+            # This allows CLI to use a specific worker implementation
+            if worker_instance is not None:
+                return worker_instance
+
+            # Otherwise create a fresh worker for this request
+            worker = LocalWorker(db_path=DB_PATH)
+            await worker.start()
+            return worker
     
     # Override the dependency in routes.py
     app.dependency_overrides[get_worker] = create_request_worker
@@ -78,29 +90,33 @@ def create_app(worker_instance: BaseWorker = None) -> FastAPI:
     async def startup_event():
         """Run when the application starts"""
         logger.info("Starting IoT Gateway Management API")
-        
-        # Initialize database
-        try:
-            logger.info(f"Initializing database at {DB_PATH}")
-            # Initialize main database with all tables
-            db.init_db(DB_PATH)
-            # Initialize event store
-            event_store.init_event_store(DB_PATH)
-            # Initialize gateway tables
-            GatewayStateMachine.initialize_gateway_tables(DB_PATH)
-            # Initialize configuration tables
-            ConfigUpdateStateMachine.initialize_config_tables(DB_PATH)
-            logger.info("Database initialization completed")
-        except Exception as e:
-            logger.error(f"Error initializing database: {str(e)}")
-            raise
-        
+        deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'local')
+
+        if deployment_mode != 'deploy-aws':
+            # Only initialize local database in non-AWS mode
+            try:
+                logger.info(f"Initializing database at {DB_PATH}")
+                # Initialize main database with all tables
+                db.init_db(DB_PATH)
+                # Initialize event store
+                event_store.init_event_store(DB_PATH)
+                # Initialize gateway tables
+                GatewayStateMachine.initialize_gateway_tables(DB_PATH)
+                # Initialize configuration tables
+                ConfigUpdateStateMachine.initialize_config_tables(DB_PATH)
+                logger.info("Database initialization completed")
+            except Exception as e:
+                logger.error(f"Error initializing database: {str(e)}")
+                raise
+        else:
+            logger.info("AWS mode - skipping local database initialization")
+
         # Start the CLI-provided worker if present
         if worker_instance is not None:
             if not getattr(worker_instance, 'running', False):
                 await worker_instance.start()
             logger.info(f"Started worker instance: {type(worker_instance).__name__}")
-        
+
         logger.info("API started successfully")
     
     # Handle shutdown
