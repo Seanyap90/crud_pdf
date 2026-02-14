@@ -1045,43 +1045,35 @@ function deploy-iot-aws() {
         return 1
     fi
 
-    # Phase 3: Deploy MQTT Proxy Lambda
+    # Phase 3: Deploy remaining IoT infrastructure (S3, State Machines, IoT Rules, IAM)
     echo ""
-    echo "Phase 3: Deploying MQTT Proxy Lambda..."
-    python -m deployment.aws.services.iot_deploy --deploy-measurement-proxy
+    echo "Phase 3: Deploying remaining IoT infrastructure..."
+    echo "  - S3 buckets for certificates and configs"
+    echo "  - MQTT proxy Lambda (iot-process-measurement)"
+    echo "  - Step Functions state machines"
+    echo "  - IoT Rules"
+    echo "  - IAM roles and policies"
+    echo ""
+    python -m deployment.aws.services.iot_deploy \
+        --region "${AWS_REGION:-us-east-1}" \
+        --mode incremental \
+        --full-deploy
     if [ $? -ne 0 ]; then
-        echo "⚠️ MQTT Proxy Lambda deployment had issues (may be expected)"
+        echo "❌ IoT infrastructure deployment failed"
+        return 1
     fi
-
-    # Phase 4: Deploy Step Functions State Machines
-    echo ""
-    echo "Phase 4: Deploying Step Functions..."
-    python -m deployment.aws.services.iot_deploy --deploy-state-machines
-    if [ $? -ne 0 ]; then
-        echo "⚠️ Step Functions deployment had issues (may be expected)"
-    fi
-
-    # Phase 5: Deploy/Update IoT Rules
-    echo ""
-    echo "Phase 5: Deploying IoT Rules..."
-    python -m deployment.aws.services.iot_deploy --deploy-iot-rules
-    if [ $? -ne 0 ]; then
-        echo "⚠️ IoT Rules deployment had issues (may be expected)"
-    fi
-
-    # Phase 6: Validation and Summary
-    echo ""
-    echo "Phase 6: Validating deployment..."
-    python -m deployment.aws.services.iot_deploy --status
 
     echo ""
     echo "=== IoT Infrastructure Deployment Complete ==="
     echo ""
     echo "Next steps:"
-    echo "  1. Verify Lambda Function URL is accessible"
-    echo "  2. Configure API Gateway if needed"
-    echo "  3. Deploy gateways and devices"
-    echo "  4. Test MQTT measurement flow"
+    echo "  1. Verify Lambda Function URL is accessible:"
+    echo "     curl https://psimki3g45sia7xhvsknog2w5m0zjxln.lambda-url.us-east-1.on.aws/health"
+    echo "  2. Test measurement endpoint:"
+    echo "     curl -X POST https://psimki3g45sia7xhvsknog2w5m0zjxln.lambda-url.us-east-1.on.aws/api/measurements"
+    echo "  3. Verify IoT Core MQTT rules are created"
+    echo "  4. Deploy gateways and devices"
+    echo "  5. Test MQTT measurement flow"
 }
 
 # Function to generate certificates for a gateway

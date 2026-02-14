@@ -6,7 +6,6 @@ import os
 
 from .routes import router, get_worker
 from .worker.base import BaseWorker
-from .worker.local_worker import LocalWorker
 from .worker.state_machine import GatewayStateMachine
 from .worker.config_state_machine import ConfigUpdateStateMachine
 from database import local as db
@@ -75,6 +74,8 @@ def create_app(worker_instance: BaseWorker = None) -> FastAPI:
                 return worker_instance
 
             # Otherwise create a fresh worker for this request
+            # Lazy load LocalWorker to avoid docker dependency in Lambda
+            from .worker.local_worker import LocalWorker
             worker = LocalWorker(db_path=DB_PATH)
             await worker.start()
             return worker

@@ -154,6 +154,7 @@ class LambdaLayerManager:
             "urllib3==1.26.20",        # Local: 1.26.20 (MUST be <2.0.0 for boto3)
             "boto3==1.36.12",          # Local: 1.36.12 (used in adapters)
             "botocore==1.36.12",       # Local: 1.36.12 (required by boto3)
+            "pyyaml==6.0.1",           # Local: 6.0.1 (used by IoT config parsing)
             "mangum==0.17.0",          # Not local - keep existing version
         ]
         

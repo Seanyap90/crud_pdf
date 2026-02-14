@@ -141,7 +141,7 @@ class IoTDeployer:
         """Deploy Step Functions from JSON definitions"""
         state_machines = [
             {
-                'name': 'GatewayStateMachine',
+                'name': 'GatewayLifecycleStateMachine',
                 'definition_file': 'deployment/gateway-state-machine-optimized.json',
                 'description': 'Orchestrates gateway registration, certificate provisioning, and connection lifecycle'
             },
@@ -401,6 +401,10 @@ def main():
                        default='incremental', help='Deployment mode')
     parser.add_argument('--validate-only', action='store_true', help='Validate prerequisites only')
     parser.add_argument('--status', action='store_true', help='Show deployment status')
+    parser.add_argument('--deploy-measurement-proxy', action='store_true', help='Deploy MQTT proxy Lambda (part of full deployment)')
+    parser.add_argument('--deploy-state-machines', action='store_true', help='Deploy Step Functions state machines')
+    parser.add_argument('--deploy-iot-rules', action='store_true', help='Deploy IoT Rules')
+    parser.add_argument('--full-deploy', action='store_true', help='Deploy complete IoT infrastructure')
 
     args = parser.parse_args()
 
@@ -420,9 +424,18 @@ def main():
         return
 
     deployer = IoTDeployer(region=args.region, mode=args.mode)
-    result = deployer.deploy_full_infrastructure()
 
-    logger.info(f"Deployment result: {json.dumps(result, indent=2, default=str)}")
+    # If any specific phase is requested, or full-deploy, run deployment
+    # Otherwise, these are informational options and we're done
+    if args.deploy_measurement_proxy or args.deploy_state_machines or args.deploy_iot_rules or args.full_deploy:
+        # Run the full deployment which handles all phases
+        result = deployer.deploy_full_infrastructure()
+        logger.info(f"Deployment result: {json.dumps(result, indent=2, default=str)}")
+    else:
+        # If no action specified, run full deployment by default
+        logger.info("No specific phase requested, running full infrastructure deployment")
+        result = deployer.deploy_full_infrastructure()
+        logger.info(f"Deployment result: {json.dumps(result, indent=2, default=str)}")
 
 
 if __name__ == '__main__':

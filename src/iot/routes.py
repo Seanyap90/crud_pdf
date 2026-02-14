@@ -21,8 +21,8 @@ from .schemas import (
     ConfigMQTTEventRequest
 )
 from .worker.base import BaseWorker
-from .worker.local_worker import LocalWorker
 from .db_layer import get_device_service
+# Note: LocalWorker import moved inside get_worker() to avoid docker dependency in AWS Lambda
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ router = APIRouter()
 # Helper function to get the worker
 async def get_worker() -> BaseWorker:
     """Default worker provider - will be overridden in main.py"""
+    from .worker.local_worker import LocalWorker
     worker = LocalWorker()  # Always return a concrete implementation
     await worker.start()
     return worker
