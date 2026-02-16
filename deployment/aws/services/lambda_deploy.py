@@ -552,7 +552,7 @@ class LambdaDeployer:
 
         # Get database host from environment if not provided
         if not database_host:
-            database_host = os.environ.get('DATABASE_HOST', '13.221.108.179')
+            database_host = os.environ.get('DATABASE_HOST', '44.201.200.44')
 
         try:
             # Use same FastAPI layer
@@ -831,7 +831,7 @@ from iot.main import create_app
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DATABASE_HOST = os.environ.get('DATABASE_HOST', '13.221.108.179')
+DATABASE_HOST = os.environ.get('DATABASE_HOST', '44.201.200.44')
 DATABASE_PORT = os.environ.get('DATABASE_PORT', '8080')
 DEPLOYMENT_MODE = os.environ.get('DEPLOYMENT_MODE', 'deploy-aws')
 

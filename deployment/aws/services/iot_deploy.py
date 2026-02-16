@@ -147,7 +147,7 @@ class IoTDeployer:
             },
             {
                 'name': 'ConfigUpdateStateMachine',
-                'definition_file': 'deployment/config-update-state-machine-optimized.json',
+                'definition_file': 'deployment/config-update-state-machine-simplified-v1.5.json',
                 'description': 'Orchestrates device configuration updates with async task token pattern'
             }
         ]

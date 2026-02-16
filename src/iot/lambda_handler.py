@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Environment variables for AWS deployment
-DATABASE_HOST = os.environ.get('DATABASE_HOST', '13.221.108.179')
+DATABASE_HOST = os.environ.get('DATABASE_HOST', '44.201.200.44')
 DATABASE_PORT = os.environ.get('DATABASE_PORT', '8080')
 DEPLOYMENT_MODE = os.environ.get('DEPLOYMENT_MODE', 'deploy-aws')
 

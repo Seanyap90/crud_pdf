@@ -1017,7 +1017,7 @@ function deploy-iot-aws() {
     export DEPLOYMENT_MODE="deploy-aws"
 
     # Get database configuration
-    DATABASE_HOST="${DATABASE_HOST:-13.221.108.179}"
+    DATABASE_HOST="${DATABASE_HOST:-44.201.200.44}"
     DATABASE_PORT="${DATABASE_PORT:-8080}"
 
     echo "Configuration:"

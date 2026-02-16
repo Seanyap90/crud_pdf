@@ -67,3 +67,4 @@ docs/RAG-VLM-Pipeline-Review.md
 src/iot/*.md
 deployment/*.md
 AWS_IOT_CONFIG_UPDATE_CONSOLE_PLAN.md
+deployment/config-update-state-machine-simplified-v1.5.json
