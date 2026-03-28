@@ -13,6 +13,7 @@ class DeploymentMode(str, Enum):
     LOCAL = "local"
     MOCK_AWS = "mock_aws"
     AWS = "aws"
+    DEPLOY_AWS = "deploy-aws"
 
 class EnvironmentType(str, Enum):
     DOCKER_DESKTOP = "docker_desktop"  # WSL or Docker Desktop on Windows/Mac

@@ -25,6 +25,19 @@ def _get_adapter_for_db(db_path: str):
         return get_nosql_adapter(db_path)
 
 
+TIMESTAMP_FIELDS = ('last_updated', 'last_heartbeat', 'created_at', 'connected_at',
+                    'disconnected_at', 'deleted_at')
+
+
+def _normalize_gateway(gateway: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert any integer Unix-ms timestamp fields to ISO strings."""
+    for field in TIMESTAMP_FIELDS:
+        val = gateway.get(field)
+        if isinstance(val, (int, float)):
+            gateway[field] = datetime.utcfromtimestamp(val / 1000).strftime("%Y-%m-%dT%H:%M:%S")
+    return gateway
+
+
 class GatewayService:
     """Service for managing gateway documents"""
 
@@ -188,14 +201,15 @@ class GatewayService:
                 gateways = self.adapter.query_documents('gateways', {})
                 gateways = [g for g in gateways if g.get('status') != 'deleted']
             
-            # Parse certificate_info from JSON string if needed
+            # Normalize each gateway document
             for gateway in gateways:
+                _normalize_gateway(gateway)
                 if gateway.get('certificate_info') and isinstance(gateway['certificate_info'], str):
                     try:
                         gateway['certificate_info'] = json.loads(gateway['certificate_info'])
                     except:
                         gateway['certificate_info'] = None
-            
+
             return gateways
             
         except Exception as e:
@@ -209,13 +223,14 @@ class GatewayService:
             if not gateway:
                 return None
             
-            # Parse certificate_info from JSON string if needed
+            # Normalize timestamp fields and certificate_info
+            _normalize_gateway(gateway)
             if gateway.get('certificate_info') and isinstance(gateway['certificate_info'], str):
                 try:
                     gateway['certificate_info'] = json.loads(gateway['certificate_info'])
                 except:
                     gateway['certificate_info'] = None
-            
+
             return gateway
             
         except Exception as e:

@@ -24,7 +24,7 @@ export default function ConnectedDevices({ gateway_id }: ConnectedDevicesProps) 
     queryKey: ['devices', gateway_id],
     queryFn: async () => {
       try {
-        const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://6pdfbz8kf9.execute-api.us-east-1.amazonaws.com/dev';
         const response = await fetch(`${API_BASE_URL}/api/devices?gateway_id=${gateway_id}`);
         
         if (!response.ok) {

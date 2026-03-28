@@ -112,12 +112,13 @@ const (
     CertPath          = "/app/certificates/cert.pem"
     KeyPath           = "/app/certificates/key.pem"
     CheckInterval     = 5 * time.Second
-    HeartbeatInterval = 120 * time.Second
+    HeartbeatInterval = 300 * time.Second
 )
 
 // Global variables
 var (
     gatewayID       string
+    sessionID       string                  // Unique ID for this gateway process instance
     brokerAddress   string
     mqttProtocol    string = "tcp"          // MQTT protocol (tcp, ssl, tls)
     mqttClient      mqtt.Client
@@ -134,6 +135,7 @@ var (
 func main() {
     log.SetFlags(log.LstdFlags | log.Lmicroseconds)
     rand.Seed(time.Now().UnixNano())
+    sessionID = fmt.Sprintf("%d", time.Now().UnixNano())
     setupSignalHandling()
     setupGatewayID()
     setupBrokerAddress()
@@ -1506,6 +1508,7 @@ func mainEventLoop() {
             // Send connected status along with certificate info
             sendStatusUpdate("connected", "Connected to MQTT broker", map[string]interface{}{
                 "certificate_status": "installed",
+                "session_id":         sessionID,
             })
 
             // Initialize device manager if not already done
@@ -1594,9 +1597,10 @@ func mainEventLoop() {
                 }
                 endDeviceManager.DeviceMutex.Unlock()
             }
-            // Send offline status
+            // Publish disconnected before clean shutdown so IoT rule fires
             sendStatusUpdate("shutdown", "Gateway shutting down", map[string]interface{}{
-                "status": "offline",
+                "status":     "disconnected",
+                "session_id": sessionID,
             })
             if isMqttConnected && mqttClient != nil {
                 mqttClient.Disconnect(1000)
@@ -1663,15 +1667,16 @@ func setupMQTTClient() {
     // Add Last Will and Testament
     lwtTopic := fmt.Sprintf("gateway/%s/status", gatewayID)
     lwtMessage := map[string]interface{}{
-        "status":    "disconnected",
-        "timestamp": time.Now().Format(time.RFC3339),
-        "reason":    "connection_lost",
+        "status":     "disconnected",
+        "timestamp":  time.Now().Format(time.RFC3339),
+        "reason":     "connection_lost",
+        "session_id": sessionID,
     }
     lwtPayload, _ := json.Marshal(lwtMessage)
     opts.SetWill(lwtTopic, string(lwtPayload), 0, false)
     log.Printf("Last Will configured for topic: %s", lwtTopic)
 
-    opts.SetKeepAlive(60 * time.Second)
+    opts.SetKeepAlive(10 * time.Second)
     opts.SetPingTimeout(10 * time.Second)
     opts.SetAutoReconnect(true)
     opts.SetMaxReconnectInterval(10 * time.Second)

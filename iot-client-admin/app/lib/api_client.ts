@@ -9,7 +9,7 @@ import {
 } from '../lib/gateway-normalizer';
 
 // Base API URL - ensure this is correctly set in your environment
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://6pdfbz8kf9.execute-api.us-east-1.amazonaws.com/dev';
 
 // Enable debug mode for development
 const DEBUG = process.env.NODE_ENV !== 'production';
@@ -278,6 +278,23 @@ export const api = {
         return response;
       } catch (error) {
         console.error(`Error updating certificate for gateway ${gatewayId}:`, error);
+        throw error;
+      }
+    },
+
+    // Get IoT Core certificate presigned URLs (AWS mode only)
+    getCertificates: async (gatewayId: string): Promise<{
+      status: string;
+      certificate_url?: string;
+      private_key_url?: string;
+      root_ca_url?: string;
+      certificate_id?: string;
+      expires_at?: string;
+    }> => {
+      try {
+        return await apiClient.get(`/api/gateways/${gatewayId}/certificates`);
+      } catch (error) {
+        console.error(`Error fetching certificates for gateway ${gatewayId}:`, error);
         throw error;
       }
     }
