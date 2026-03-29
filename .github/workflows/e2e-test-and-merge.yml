@@ -51,7 +51,7 @@ jobs:
       
       - name: Install frontend dependencies
         run: |
-          cd iot-client-admin
+          cd iot-admin-client
           npm ci
       
       - name: Start backend services
@@ -83,7 +83,7 @@ jobs:
       - name: Start frontend
         run: |
           echo "Starting frontend..."
-          cd iot-client-admin
+          cd iot-admin-client
           npm run dev &
           
           # Wait for frontend to be available
