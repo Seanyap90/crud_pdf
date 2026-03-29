@@ -1,0 +1,245 @@
+{
+  "Comment": "Config Update State Machine - v1.4 Simplified (8 states, hybrid event sourcing). Gateway updates its own shadow reported state after applying configuration.",
+  "StartAt": "StoreConfigInS3",
+  "States": {
+    "StoreConfigInS3": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Parameters": {
+        "Bucket": "iot-gateway-configs",
+        "Key.$": "States.Format('configs/{}/{}', $.gateway_id, $.config_file)",
+        "Body.$": "$.config_content",
+        "ContentType": "application/x-yaml"
+      },
+      "ResultPath": "$.s3_result",
+      "Next": "WriteConfigStoredEvent"
+    },
+
+    "WriteConfigStoredEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigStored",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "config_hash.$": "$.config_hash",
+            "s3_key.$": "States.Format('configs/{}/{}', $.gateway_id, $.config_file)",
+            "timestamp.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "UpdateConfigShadow"
+    },
+
+    "UpdateConfigShadow": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-update-shadow",
+        "Payload": {
+          "thing_name.$": "$.gateway_id",
+          "shadow_name": "configuration",
+          "state": {
+            "desired": {
+              "config_version.$": "$.update_id",
+              "config_hash.$": "$.config_hash",
+              "updated_at.$": "$$.State.EnteredTime"
+            }
+          }
+        }
+      },
+      "ResultPath": "$.shadow_result",
+      "Next": "WaitForConfigRequest"
+    },
+
+    "WaitForConfigRequest": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-store-task-token",
+        "Payload": {
+          "update_id.$": "$.update_id",
+          "gateway_id.$": "$.gateway_id",
+          "event_type": "config_request",
+          "task_token.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.request_result",
+      "TimeoutSeconds": 3600,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.Timeout"],
+          "ResultPath": "$.error",
+          "Next": "ConfigRequestTimeout"
+        }
+      ],
+      "Next": "GeneratePresignedURL"
+    },
+
+    "GeneratePresignedURL": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-generate-presigned-url",
+        "Payload": {
+          "bucket": "iot-gateway-configs",
+          "key.$": "States.Format('configs/{}/{}', $.gateway_id, $.config_file)",
+          "expires_in": 7200
+        }
+      },
+      "ResultPath": "$.presigned_url_result",
+      "Next": "NotifyGateway"
+    },
+
+    "NotifyGateway": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-publish",
+        "Payload": {
+          "topic.$": "States.Format('gateway/{}/config/update', $.gateway_id)",
+          "qos": 1,
+          "payload": {
+            "update_id.$": "$.update_id",
+            "config_url.$": "$.presigned_url_result.Payload.url",
+            "config_hash.$": "$.config_hash"
+          }
+        }
+      },
+      "ResultPath": "$.publish_result",
+      "Next": "WaitForConfigAck"
+    },
+
+    "WaitForConfigAck": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-store-task-token",
+        "Payload": {
+          "update_id.$": "$.update_id",
+          "gateway_id.$": "$.gateway_id",
+          "event_type": "config_delivered",
+          "task_token.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.ack_result",
+      "TimeoutSeconds": 3600,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.Timeout"],
+          "ResultPath": "$.error",
+          "Next": "ConfigDeliveryTimeout"
+        },
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "ResultPath": "$.error",
+          "Next": "ConfigDeliveryFailed"
+        }
+      ],
+      "Next": "WriteConfigCompletedEvent"
+    },
+
+    "WriteConfigCompletedEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigCompleted",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "status": "success",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version.$": "$.event_result.Payload.version"
+        }
+      },
+      "ResultPath": "$.event_result",
+      "End": true
+    },
+
+    "ConfigRequestTimeout": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigFailed",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "status": "timeout",
+            "reason": "Gateway did not request config within timeout period",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version.$": "$.event_result.Payload.version"
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "ConfigUpdateFailed"
+    },
+
+    "ConfigDeliveryTimeout": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigFailed",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "status": "timeout",
+            "reason": "Gateway did not acknowledge config delivery within timeout period",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version.$": "$.event_result.Payload.version"
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "ConfigUpdateFailed"
+    },
+
+    "ConfigDeliveryFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:167349419537:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigFailed",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "status": "failed",
+            "reason.$": "$.error.Cause",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version.$": "$.event_result.Payload.version"
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "ConfigUpdateFailed"
+    },
+
+    "ConfigUpdateFailed": {
+      "Type": "Fail",
+      "Error": "ConfigUpdateFailed",
+      "Cause": "Configuration update failed or timed out"
+    }
+  }
+}

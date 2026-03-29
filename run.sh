@@ -1008,6 +1008,74 @@ function iot-backend-cleanup() {
     echo "Cleanup complete"
 }
 
+# Deploy IoT Infrastructure to AWS
+function deploy-iot-aws() {
+    echo "=== Deploying IoT Infrastructure to AWS ==="
+
+    # Load AWS configuration
+    load_env_file ".env.deploy-aws"
+    export DEPLOYMENT_MODE="deploy-aws"
+
+    # Get database configuration
+    DATABASE_HOST="${DATABASE_HOST:-44.201.200.44}"
+    DATABASE_PORT="${DATABASE_PORT:-8080}"
+
+    echo "Configuration:"
+    echo "  Database Host: $DATABASE_HOST"
+    echo "  Database Port: $DATABASE_PORT"
+    echo "  Deployment Mode: $DEPLOYMENT_MODE"
+
+    # Phase 1: Validation
+    echo ""
+    echo "Phase 1: Validating prerequisites..."
+    python -m deployment.aws.services.iot_deploy --validate-only
+    if [ $? -ne 0 ]; then
+        echo "❌ Validation failed"
+        return 1
+    fi
+
+    # Phase 2: Deploy IoT Lambda (FastAPI)
+    echo ""
+    echo "Phase 2: Deploying IoT FastAPI Lambda..."
+    python -m deployment.aws.services.lambda_deploy \
+        --region "${AWS_REGION:-us-east-1}" \
+        --iot-only
+    if [ $? -ne 0 ]; then
+        echo "❌ IoT Lambda deployment failed"
+        return 1
+    fi
+
+    # Phase 3: Deploy remaining IoT infrastructure (S3, State Machines, IoT Rules, IAM)
+    echo ""
+    echo "Phase 3: Deploying remaining IoT infrastructure..."
+    echo "  - S3 buckets for certificates and configs"
+    echo "  - MQTT proxy Lambda (iot-process-measurement)"
+    echo "  - Step Functions state machines"
+    echo "  - IoT Rules"
+    echo "  - IAM roles and policies"
+    echo ""
+    python -m deployment.aws.services.iot_deploy \
+        --region "${AWS_REGION:-us-east-1}" \
+        --mode incremental \
+        --full-deploy
+    if [ $? -ne 0 ]; then
+        echo "❌ IoT infrastructure deployment failed"
+        return 1
+    fi
+
+    echo ""
+    echo "=== IoT Infrastructure Deployment Complete ==="
+    echo ""
+    echo "Next steps:"
+    echo "  1. Verify Lambda Function URL is accessible:"
+    echo "     curl https://psimki3g45sia7xhvsknog2w5m0zjxln.lambda-url.us-east-1.on.aws/health"
+    echo "  2. Test measurement endpoint:"
+    echo "     curl -X POST https://psimki3g45sia7xhvsknog2w5m0zjxln.lambda-url.us-east-1.on.aws/api/measurements"
+    echo "  3. Verify IoT Core MQTT rules are created"
+    echo "  4. Deploy gateways and devices"
+    echo "  5. Test MQTT measurement flow"
+}
+
 # Function to generate certificates for a gateway
 function generate_cert() {
     local gateway_id=$1

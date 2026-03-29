@@ -1,15 +1,19 @@
 from fastapi import APIRouter, HTTPException, Depends, status, File, Form, UploadFile
+from fastapi.responses import JSONResponse
+from botocore.exceptions import ClientError
 from datetime import datetime
 import logging
 import hashlib
 import json
 import yaml
+import os
+import boto3
 from typing import Dict, Any, List, Optional
 from .schemas import (
-    CreateGatewayRequest, 
-    MQTTEventRequest, 
-    GatewayStatus, 
-    EventResponse, 
+    CreateGatewayRequest,
+    MQTTEventRequest,
+    GatewayStatus,
+    EventResponse,
     GatewayList,
     GatewayUpdateType,
     GatewayState,
@@ -20,10 +24,20 @@ from .schemas import (
     ConfigMQTTEventRequest
 )
 from .worker.base import BaseWorker
-from .worker.local_worker import LocalWorker
 from .db_layer import get_device_service
+# Note: LocalWorker import moved inside get_worker() to avoid docker dependency in AWS Lambda
 
 logger = logging.getLogger(__name__)
+
+GATEWAY_SM_ARN = os.environ.get('GATEWAY_SM_ARN', '')
+CONFIG_SM_ARN = os.environ.get('CONFIG_SM_ARN', '')
+_sfn_client = None
+
+def get_sfn_client():
+    global _sfn_client
+    if _sfn_client is None:
+        _sfn_client = boto3.client('stepfunctions')
+    return _sfn_client
 
 # Create a router instance
 router = APIRouter()
@@ -31,6 +45,7 @@ router = APIRouter()
 # Helper function to get the worker
 async def get_worker() -> BaseWorker:
     """Default worker provider - will be overridden in main.py"""
+    from .worker.local_worker import LocalWorker
     worker = LocalWorker()  # Always return a concrete implementation
     await worker.start()
     return worker
@@ -57,7 +72,9 @@ async def create_gateway(
         logger.info(f"Received gateway creation request: {request_dict}")
 
         if not request.gateway_id:
-            request.gateway_id = f"gateway-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            import re
+            sanitized = re.sub(r'[^a-zA-Z0-9\-]', '-', request.name).strip('-').lower()
+            request.gateway_id = sanitized or f"gateway-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             logger.info(f"Generated gateway_id: {request.gateway_id}")
 
         task_data = {
@@ -72,6 +89,24 @@ async def create_gateway(
 
         result = await worker.process_task(task_data)
         logger.info(f"Gateway creation successful. Result: {result}")
+
+        if GATEWAY_SM_ARN:
+            sfn_response = get_sfn_client().start_execution(
+                stateMachineArn=GATEWAY_SM_ARN,
+                name=request.gateway_id,
+                input=json.dumps({
+                    "detail-type": "GatewayCreated",
+                    "detail": {
+                        "gateway_id": request.gateway_id,
+                        "name": request.name,
+                        "location": request.location,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                })
+            )
+            logger.info(f"Started GatewayLifecycleStateMachine: {sfn_response['executionArn']}")
+            result["execution_arn"] = sfn_response["executionArn"]
+
         return result
 
     except ValueError as e:
@@ -263,6 +298,60 @@ async def update_certificate_status(
         return await process_mqtt_event(mqtt_event, worker)
     except Exception as e:
         logger.error(f"Error updating certificate status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/gateways/{gateway_id}/certificates")
+async def get_gateway_certificates(gateway_id: str):
+    """Return S3 presigned URLs for IoT Core certificates (AWS mode only).
+
+    Returns:
+        200 {status: "ready", certificate_url, private_key_url, root_ca_url, certificate_id, expires_at}
+        202 {status: "provisioning"}  — shadow not yet written (state machine still running)
+        404                           — local mode, IoT Core not available
+        500                           — unexpected AWS error
+    """
+    deployment_mode = os.environ.get('DEPLOYMENT_MODE', 'local')
+    if deployment_mode != 'deploy-aws':
+        raise HTTPException(status_code=404, detail="Certificate download is only available in AWS deployment mode")
+
+    CERT_BUCKET = os.environ.get('CERTIFICATES_BUCKET', 'iot-gateway-certificates')
+
+    try:
+        # Check shadow to confirm provisioning is complete
+        iot_data = boto3.client('iot-data')
+        response = iot_data.get_thing_shadow(thingName=gateway_id, shadowName='certificates')
+        shadow = json.loads(response['payload'].read())
+        reported = shadow.get('state', {}).get('reported', {})
+
+        if not reported.get('certificate_id'):
+            return JSONResponse(status_code=202, content={"status": "provisioning"})
+
+        # Generate fresh presigned URLs (1 hour expiry) from known S3 key pattern
+        s3 = boto3.client('s3')
+        expiry = 3600  # 1 hour
+
+        certificate_url = s3.generate_presigned_url('get_object',
+            Params={'Bucket': CERT_BUCKET, 'Key': f'certificates/{gateway_id}/certificate.pem.crt'},
+            ExpiresIn=expiry)
+        private_key_url = s3.generate_presigned_url('get_object',
+            Params={'Bucket': CERT_BUCKET, 'Key': f'certificates/{gateway_id}/private.pem.key'},
+            ExpiresIn=expiry)
+        root_ca_url = s3.generate_presigned_url('get_object',
+            Params={'Bucket': CERT_BUCKET, 'Key': f'certificates/{gateway_id}/AmazonRootCA1.pem'},
+            ExpiresIn=expiry)
+
+        return {
+            "status": "ready",
+            "certificate_url": certificate_url,
+            "private_key_url": private_key_url,
+            "root_ca_url": root_ca_url,
+            "certificate_id": reported.get('certificate_id'),
+            "expires_at": reported.get('expires_at'),
+        }
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ResourceNotFoundException':
+            return JSONResponse(status_code=202, content={"status": "provisioning"})
+        logger.error(f"Error reading certificates shadow for {gateway_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Connection management endpoints
@@ -514,12 +603,30 @@ async def create_config_update(
         # Process the task
         logger.info(f"Creating configuration update {update_id} for gateway {gateway_id}")
         result = await worker.process_task(task_data)
-        
+
+        execution_arn = None
+        if CONFIG_SM_ARN:
+            config_file = f"{update_id}.yaml"
+            sfn_response = get_sfn_client().start_execution(
+                stateMachineArn=CONFIG_SM_ARN,
+                name=update_id,
+                input=json.dumps({
+                    "update_id": update_id,
+                    "gateway_id": gateway_id,
+                    "config_file": config_file,
+                    "config_hash": config_hash,
+                    "config_content": yaml_config,
+                })
+            )
+            execution_arn = sfn_response["executionArn"]
+            logger.info(f"Started ConfigUpdateStateMachine: {execution_arn}")
+
         return {
             "status": "created",
             "update_id": update_id,
             "gateway_id": gateway_id,
-            "config_hash": config_hash
+            "config_hash": config_hash,
+            "execution_arn": execution_arn,
         }
     
     except ValueError as e:
@@ -685,4 +792,80 @@ async def list_devices(
         return devices
     except Exception as e:
         logger.error(f"Error listing devices: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/measurements", status_code=status.HTTP_201_CREATED)
+async def create_measurement(
+    device_id: str = Form(...),
+    gateway_id: str = Form(...),
+    measurement_type: str = Form("weight_measurement"),
+    payload: str = Form(...),
+    timestamp: Optional[str] = Form(None),
+    worker: BaseWorker = Depends(get_worker)
+):
+    """Store measurement from IoT gateway via MQTT proxy
+
+    Called by iot-process-measurement Lambda (proxy pattern).
+    Flow: Gateway → MQTT → IoT Rule → iot-process-measurement → This endpoint
+    """
+    try:
+        from .db_layer import get_measurement_service
+
+        # Parse JSON payload
+        try:
+            payload_dict = json.loads(payload)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid payload JSON")
+
+        # Get service with HTTP URL support
+        db_endpoint = worker.db_path or f"http://{os.getenv('DATABASE_HOST')}:{os.getenv('DATABASE_PORT')}"
+        measurement_service = get_measurement_service(db_endpoint)
+
+        measurement_id = measurement_service.store_measurement(
+            device_id=device_id,
+            gateway_id=gateway_id,
+            measurement_type=measurement_type,
+            payload=payload_dict,
+            timestamp=timestamp
+        )
+
+        logger.info(f"Stored measurement {measurement_id} from device {device_id}")
+
+        return {
+            "status": "success",
+            "measurement_id": measurement_id,
+            "device_id": device_id,
+            "gateway_id": gateway_id
+        }
+
+    except Exception as e:
+        logger.error(f"Error storing measurement: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/measurements")
+async def list_measurements(
+    device_id: Optional[str] = None,
+    gateway_id: Optional[str] = None,
+    limit: int = 100,
+    worker: BaseWorker = Depends(get_worker)
+):
+    """List measurements with optional filters"""
+    try:
+        from .db_layer import get_measurement_service
+
+        db_endpoint = worker.db_path or f"http://{os.getenv('DATABASE_HOST')}:{os.getenv('DATABASE_PORT')}"
+        measurement_service = get_measurement_service(db_endpoint)
+
+        measurements = measurement_service.get_measurements(
+            device_id=device_id,
+            gateway_id=gateway_id,
+            limit=limit
+        )
+
+        return {"measurements": measurements, "total": len(measurements)}
+
+    except Exception as e:
+        logger.error(f"Error listing measurements: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -154,6 +154,7 @@ class LambdaLayerManager:
             "urllib3==1.26.20",        # Local: 1.26.20 (MUST be <2.0.0 for boto3)
             "boto3==1.36.12",          # Local: 1.36.12 (used in adapters)
             "botocore==1.36.12",       # Local: 1.36.12 (required by boto3)
+            "pyyaml==6.0.1",           # Local: 6.0.1 (used by IoT config parsing)
             "mangum==0.17.0",          # Not local - keep existing version
         ]
         
@@ -536,34 +537,60 @@ class LambdaDeployer:
             raise
     
     @log_operation("Deploying IoT Backend Lambda")
-    def deploy_iot_lambda(self) -> Dict[str, Any]:
-        """Deploy IoT Backend as Lambda function."""
+    @log_operation("Deploying IoT Backend Lambda with HTTP database adapter")
+    def deploy_iot_backend_lambda(self, database_host: str = None, database_port: int = 8080) -> Dict[str, Any]:
+        """Deploy IoT Backend as Mangum-wrapped Lambda with HTTP database adapter.
+
+        Args:
+            database_host: EC2 database host (default: from environment or config)
+            database_port: EC2 database port (default: 8080)
+
+        Returns:
+            Function info dict with ARN, URL, and layers
+        """
         function_name = f"{settings.app_name}-iot-backend"
-        
+
+        # Get database host from environment if not provided
+        if not database_host:
+            database_host = os.environ.get('DATABASE_HOST', '44.201.200.44')
+
         try:
             # Use same FastAPI layer
             if 'fastapi' not in self.layer_manager.layers:
                 layer_info = self.layer_manager.create_fastapi_layer()
             else:
                 layer_info = self.layer_manager.layers['fastapi']
-            
+
             # Create deployment package
             deployment_zip = self._create_iot_package()
-            
-            # Get execution role
-            execution_role_arn = self._get_lambda_execution_role()
-            
+
+            # Get execution role (using no-VPC version for HTTP database access)
+            execution_role_arn = self._get_lambda_execution_role_no_vpc()
+
             # Check for existing function
             existing_function = self._find_existing_function(function_name)
-            
+
             if existing_function:
                 # Update existing function
+                logger.info(f"Updating existing IoT Backend Lambda: {function_name}")
                 lambda_response = self._update_lambda_function(
                     function_name, deployment_zip, [layer_info['layer_version_arn']]
                 )
-                logger.info(f"Updated IoT Backend Lambda: {function_name}")
+                # Also update environment variables
+                self.lambda_client.update_function_configuration(
+                    FunctionName=function_name,
+                    Environment={
+                        'Variables': {
+                            'DEPLOYMENT_MODE': 'deploy-aws',
+                            'DATABASE_HOST': database_host,
+                            'DATABASE_PORT': str(database_port)
+                        }
+                    }
+                )
+                logger.info(f"Updated IoT Backend Lambda environment variables")
             else:
                 # Create new function
+                logger.info(f"Creating new IoT Backend Lambda: {function_name}")
                 with open(deployment_zip, 'rb') as f:
                     deployment_zip_content = f.read()
                 lambda_response = self.lambda_client.create_function(
@@ -572,42 +599,55 @@ class LambdaDeployer:
                     Role=execution_role_arn,
                     Handler="iot.lambda_handler.lambda_handler",
                     Code={'ZipFile': deployment_zip_content},
-                    Description="IoT Backend FastAPI application",
+                    Description="IoT Backend FastAPI application - Stateless AWS deployment with HTTP database adapter",
                     Timeout=LAMBDA_TIMEOUT,
                     MemorySize=LAMBDA_MEMORY,
                     Layers=[layer_info['layer_version_arn']],
                     Environment={
                         'Variables': {
                             'DEPLOYMENT_MODE': 'deploy-aws',
-                            'DATABASE_PATH': '/tmp/recycling.db'  # SQLite for IoT
+                            'DATABASE_HOST': database_host,
+                            'DATABASE_PORT': str(database_port)
                         }
                     },
                     Tags={
                         'Project': settings.app_name,
                         'Component': 'IoTBackend',
-                        'Type': 'Lambda'
+                        'Type': 'Lambda',
+                        'Architecture': 'No-VPC-HTTP-DB'
                     }
                 )
                 logger.info(f"Created IoT Backend Lambda: {function_name}")
-            
+
+            # Create Function URL for client access
+            function_url = self.create_lambda_function_url(function_name)
+
             function_info = {
                 'function_name': function_name,
                 'function_arn': lambda_response['FunctionArn'],
+                'function_url': function_url,
                 'version': lambda_response.get('Version', '$LATEST'),
                 'handler': lambda_response['Handler'],
-                'layers': [layer_info['layer_version_arn']]
+                'layers': [layer_info['layer_version_arn']],
+                'database_host': database_host,
+                'database_port': database_port
             }
-            
+
             self.functions['iot_backend'] = function_info
-            
+
             # Cleanup
             os.remove(deployment_zip)
-            
+
+            logger.info(f"IoT Backend Lambda deployment complete - URL: {function_url}")
             return function_info
-            
+
         except Exception as e:
             logger.error(f"Failed to deploy IoT Backend Lambda: {e}")
             raise
+
+    def deploy_iot_lambda(self) -> Dict[str, Any]:
+        """Deploy IoT Backend as Lambda function (legacy method - uses new deploy_iot_backend_lambda)."""
+        return self.deploy_iot_backend_lambda()
     
     @log_operation("Creating Lambda Function URL")
     def create_lambda_function_url(self, function_name: str) -> str:
@@ -750,50 +790,78 @@ lambda_handler = handler
             return zip_path
     
     def _create_iot_package(self) -> str:
-        """Create deployment package for IoT Backend."""
+        """Create deployment package for IoT Backend with HTTP adapter support."""
         with tempfile.TemporaryDirectory() as temp_dir:
             package_dir = Path(temp_dir) / "package"
             package_dir.mkdir()
-            
-            # Copy IoT source code
-            src_iot = Path("src/iot")
+
+            # Use absolute path for cross-directory compatibility
+            project_root = Path(__file__).parent.parent.parent.parent
+            src_iot = project_root / "src" / "iot"
             dest_iot = package_dir / "iot"
             shutil.copytree(src_iot, dest_iot, ignore=shutil.ignore_patterns(
-                'gateway', 'rules_engine', 'mosquitto', '*.pyc', '__pycache__', 'docker-compose*.yml'
+                'gateway',        # Docker gateway code
+                'rules_engine',   # Local rules engine
+                'mosquitto',      # MQTT broker
+                'sample',         # Sample code
+                '*.pyc',
+                '__pycache__',
+                'docker-compose*.yml'
             ))
-            
-            # Copy database module
-            src_database = Path("src/database")
+
+            # Copy database module (includes SQLiteHTTPAdapter)
+            src_database = project_root / "src" / "database"
             dest_database = package_dir / "database"
             shutil.copytree(src_database, dest_database, ignore=shutil.ignore_patterns(
                 '*.pyc', '__pycache__'
             ))
-            
-            # Create Lambda handler for IoT
+
+            # Note: lambda_handler.py already exists in src/iot and will be included above
+            # Verify it exists, don't recreate
             lambda_handler_path = dest_iot / "lambda_handler.py"
-            with open(lambda_handler_path, 'w') as f:
-                f.write("""\"\"\"Lambda handler for IoT Backend using Mangum.\"\"\"
+            if not lambda_handler_path.exists():
+                logger.warning("lambda_handler.py not found, creating fallback")
+                with open(lambda_handler_path, 'w') as f:
+                    f.write("""\"\"\"Lambda handler for IoT Backend using Mangum.\"\"\"
+import os
+import logging
 from mangum import Mangum
 from iot.main import create_app
 
-# Create FastAPI app
-app = create_app()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+DATABASE_HOST = os.environ.get('DATABASE_HOST', '44.201.200.44')
+DATABASE_PORT = os.environ.get('DATABASE_PORT', '8080')
+DEPLOYMENT_MODE = os.environ.get('DEPLOYMENT_MODE', 'deploy-aws')
+
+logger.info(f"IoT Lambda init: {DEPLOYMENT_MODE}, DB: {DATABASE_HOST}:{DATABASE_PORT}")
+
+# Create FastAPI app without LocalWorker (stateless AWS mode)
+app = create_app(worker_instance=None)
 
 # Wrap with Mangum for Lambda compatibility
 handler = Mangum(app, lifespan="off")
 
-# Export handler for Lambda runtime
+# Export for Lambda runtime
 lambda_handler = handler
 """)
-            
+
             # Create ZIP package
             zip_path = f"/tmp/iot-backend-{int(time.time())}.zip"
+            file_count = 0
+
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for file_path in package_dir.rglob('*'):
                     if file_path.is_file():
                         arcname = file_path.relative_to(package_dir)
                         zipf.write(file_path, arcname)
-            
+                        file_count += 1
+
+            # Validate ZIP file
+            zip_size = os.path.getsize(zip_path)
+            logger.info(f"Created IoT deployment package: {zip_path} ({zip_size / 1024 / 1024:.2f}MB, {file_count} files)")
+
             return zip_path
     
     def _get_lambda_execution_role(self) -> str:

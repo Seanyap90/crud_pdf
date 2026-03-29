@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { zipSync, strToU8 } from 'fflate';
 import {
   Dialog,
   DialogContent,
@@ -7,9 +8,11 @@ import {
   DialogDescription,
   DialogFooter,
 } from "./ui/dialog";
-import { Info, Server, Clock, MapPin, Activity, Cpu, Cloud, Shield, HardDrive, Settings } from "lucide-react";
+import { Info, Server, Clock, MapPin, Activity, Cpu, Cloud, Shield, HardDrive, Settings, Download } from "lucide-react";
 import StatusBadge from "./status-badge";
 import { Gateway } from "../../shared/schema";
+import { useToast } from "@/hooks/use-toast";
+import { api } from "../lib/api_client";
 
 interface GatewayDetailsProps {
   gateway: Gateway | null;
@@ -19,6 +22,52 @@ interface GatewayDetailsProps {
 
 export default function GatewayDetails({ gateway, isOpen, onClose }: GatewayDetailsProps) {
   if (!gateway) return null;
+
+  const { toast } = useToast();
+  const [isDownloading, setIsDownloading] = useState(false);
+
+  const handleDownloadCertificates = async () => {
+    setIsDownloading(true);
+    try {
+      const result = await api.gateways.getCertificates(gateway.id);
+      if (result.status === 'provisioning') {
+        toast({ title: "Still Provisioning", description: "Certificates are being generated. Please try again in a moment." });
+        return;
+      }
+      const files = [
+        { url: result.certificate_url, name: 'certificate.pem.crt' },
+        { url: result.private_key_url, name: 'private.pem.key' },
+        { url: result.root_ca_url,     name: 'AmazonRootCA1.pem' },
+      ];
+      const zipEntries: Record<string, Uint8Array> = {};
+      await Promise.all(files.map(async ({ url, name }) => {
+        if (!url) return;
+        const res = await fetch(url);
+        const buf = await res.arrayBuffer();
+        zipEntries[name] = new Uint8Array(buf);
+      }));
+      const zipped = zipSync(zipEntries);
+      const blob = new Blob([zipped], { type: 'application/zip' });
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = `${gateway.id}-certificates.zip`;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      if (msg.includes('404')) {
+        toast({ title: "Not Available", description: "Certificate download requires AWS deployment." });
+      } else {
+        toast({ title: "Error", description: `Failed to fetch certificates: ${msg}`, variant: "destructive" });
+      }
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
   // Format date strings safely
   const formatDate = (dateString?: string | null): string => {
@@ -37,10 +86,6 @@ export default function GatewayDetails({ gateway, isOpen, onClose }: GatewayDeta
       return dateString;
     }
   };
-
-  // Helper to check if certificate is installed
-  const isCertificateInstalled = gateway.certificate_info && 
-    gateway.certificate_info.status === 'installed';
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
@@ -107,29 +152,21 @@ export default function GatewayDetails({ gateway, isOpen, onClose }: GatewayDeta
             </div>
           </div>
 
-          {/* Certificate Information */}
+          {/* Certificate Download */}
           <div className="space-y-1">
             <h4 className="font-medium flex items-center gap-2">
               <Shield className="h-4 w-4 text-blue-500" />
-              Certificate Status
+              Certificates
             </h4>
-            <div className="grid grid-cols-2 gap-2 ml-6 text-sm">
-              <span className="text-gray-500">Status:</span>
-              <span>
-                {isCertificateInstalled ? (
-                  <span className="text-green-600">Installed</span>
-                ) : (
-                  <span className="text-yellow-600">Not Installed</span>
-                )}
-              </span>
-              
-              {isCertificateInstalled && gateway.certificate_info?.installed_at && (
-                <>
-                  <span className="text-gray-500">Installed At:</span>
-                  <span>{formatDate(gateway.certificate_info.installed_at)}</span>
-                </>
-              )}
-            </div>
+            <button
+              type="button"
+              onClick={handleDownloadCertificates}
+              disabled={isDownloading}
+              className="mt-1 ml-6 flex items-center px-3 py-2 text-sm border border-blue-300 rounded-lg text-blue-600 hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Download size={16} className="mr-2" />
+              {isDownloading ? "Fetching..." : "Download Certificates"}
+            </button>
           </div>
           
           {/* Firmware Information */}

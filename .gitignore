@@ -64,3 +64,12 @@ archive/*
 deployment/kubernetes/*
 .github/workflows/e2e-test-and-merge.yml
 docs/RAG-VLM-Pipeline-Review.md
+src/iot/*.md
+deployment/*.md
+AWS_IOT_CONFIG_UPDATE_CONSOLE_PLAN.md
+deployment/config-update-state-machine-simplified-v1.5.json
+src/iot/lambdas/write_event.zip
+src/iot/lambdas/update_gateway_read_model.zip
+deployment/gateway-state-machine-optimized.json
+deployment/config-update-state-machine-simplified-v1.4.json
+deployment/config-update-state-machine-optimized.json

@@ -1,0 +1,287 @@
+{
+  "Comment": "Config Update State Machine - optimized with AWS SDK integrations and task token pattern",
+  "StartAt": "StoreConfigInS3",
+  "States": {
+    "StoreConfigInS3": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Parameters": {
+        "Bucket": "iot-gateway-configs-${AWS::AccountId}",
+        "Key.$": "States.Format('configs/{}/{}', $.gateway_id, $.config_file)",
+        "Body.$": "$.config_content",
+        "ContentType": "application/x-yaml"
+      },
+      "ResultPath": "$.s3_result",
+      "Next": "WriteConfigStoredEvent"
+    },
+
+    "WriteConfigStoredEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigStored",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "config_hash.$": "$.config_hash",
+            "s3_key.$": "$.s3_result.Key",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version": 0
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "UpdateConfigShadow"
+    },
+
+    "UpdateConfigShadow": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:iot-data:updateThingShadow",
+      "Parameters": {
+        "ThingName.$": "$.gateway_id",
+        "ShadowName": "configuration",
+        "Payload": {
+          "state": {
+            "desired": {
+              "config_version.$": "$.update_id",
+              "config_hash.$": "$.config_hash",
+              "updated_at.$": "$$.State.EnteredTime"
+            }
+          }
+        }
+      },
+      "ResultPath": "$.shadow_result",
+      "Next": "WaitForConfigRequest"
+    },
+
+    "WaitForConfigRequest": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:iot-store-task-token",
+        "Payload": {
+          "update_id.$": "$.update_id",
+          "gateway_id.$": "$.gateway_id",
+          "event_type": "config_request",
+          "task_token.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.request_result",
+      "TimeoutSeconds": 3600,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.Timeout"],
+          "ResultPath": "$.error",
+          "Next": "ConfigRequestTimeout"
+        }
+      ],
+      "Next": "GeneratePresignedURL"
+    },
+
+    "GeneratePresignedURL": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:iot-generate-presigned-url",
+        "Payload": {
+          "bucket": "iot-gateway-configs-${AWS::AccountId}",
+          "key.$": "$.s3_result.Key",
+          "expires_in": 3600
+        }
+      },
+      "ResultPath": "$.presigned_url_result",
+      "Next": "NotifyGateway"
+    },
+
+    "NotifyGateway": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:iot-data:publish",
+      "Parameters": {
+        "Topic.$": "States.Format('gateway/{}/config/update', $.gateway_id)",
+        "Qos": 1,
+        "Payload": {
+          "update_id.$": "$.update_id",
+          "config_url.$": "$.presigned_url_result.Payload.url",
+          "config_hash.$": "$.config_hash"
+        }
+      },
+      "ResultPath": "$.publish_result",
+      "Next": "WriteConfigNotifyingEvent"
+    },
+
+    "WriteConfigNotifyingEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigNotifying",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version.$": "$.event_result.Payload.version"
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "WaitForConfigAck"
+    },
+
+    "WaitForConfigAck": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:iot-store-task-token",
+        "Payload": {
+          "update_id.$": "$.update_id",
+          "gateway_id.$": "$.gateway_id",
+          "event_type": "config_delivered",
+          "task_token.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.ack_result",
+      "TimeoutSeconds": 3600,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.Timeout"],
+          "ResultPath": "$.error",
+          "Next": "ConfigDeliveryTimeout"
+        },
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "ResultPath": "$.error",
+          "Next": "ConfigDeliveryFailed"
+        }
+      ],
+      "Next": "UpdateShadowReported"
+    },
+
+    "UpdateShadowReported": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:iot-data:updateThingShadow",
+      "Parameters": {
+        "ThingName.$": "$.gateway_id",
+        "ShadowName": "configuration",
+        "Payload": {
+          "state": {
+            "reported": {
+              "config_version.$": "$.update_id",
+              "config_hash.$": "$.config_hash",
+              "applied_at.$": "$.ack_result.Payload.applied_at"
+            }
+          }
+        }
+      },
+      "ResultPath": "$.shadow_update_result",
+      "Next": "WriteConfigCompletedEvent"
+    },
+
+    "WriteConfigCompletedEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigCompleted",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "status": "success",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version.$": "$.event_result.Payload.version"
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "ConfigUpdateSuccess"
+    },
+
+    "ConfigUpdateSuccess": {
+      "Type": "Succeed"
+    },
+
+    "ConfigRequestTimeout": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigFailed",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "status": "timeout",
+            "reason": "Gateway did not request config within timeout period",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version.$": "$.event_result.Payload.version"
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "ConfigUpdateFailed"
+    },
+
+    "ConfigDeliveryTimeout": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigFailed",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "status": "timeout",
+            "reason": "Gateway did not acknowledge config delivery within timeout period",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version.$": "$.event_result.Payload.version"
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "ConfigUpdateFailed"
+    },
+
+    "ConfigDeliveryFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:iot-write-event",
+        "Payload": {
+          "aggregate_id.$": "$.update_id",
+          "aggregate_type": "config_update",
+          "event_type": "ConfigFailed",
+          "event_data": {
+            "update_id.$": "$.update_id",
+            "gateway_id.$": "$.gateway_id",
+            "status": "failed",
+            "reason.$": "$.error.Cause",
+            "timestamp.$": "$$.State.EnteredTime"
+          },
+          "version.$": "$.event_result.Payload.version"
+        }
+      },
+      "ResultPath": "$.event_result",
+      "Next": "ConfigUpdateFailed"
+    },
+
+    "ConfigUpdateFailed": {
+      "Type": "Fail",
+      "Error": "ConfigUpdateFailed",
+      "Cause": "Configuration update failed or timed out"
+    }
+  }
+}

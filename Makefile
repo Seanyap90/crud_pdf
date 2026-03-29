@@ -57,6 +57,9 @@ iot-backend-start:
 iot-backend-cleanup:
 	bash run.sh iot-backend-cleanup
 
+deploy-iot-aws:
+	bash run.sh deploy-iot-aws
+
 generate_cert:
 	@if [ -z "$(GATEWAY_ID)" ]; then \
 		echo "Error: GATEWAY_ID is required"; \
