@@ -73,4 +73,6 @@ src/iot/lambdas/update_gateway_read_model.zip
 deployment/gateway-state-machine-optimized.json
 deployment/config-update-state-machine-simplified-v1.4.json
 deployment/config-update-state-machine-optimized.json
-src/iot/aws-certs
+src/iot/aws-certs/AmazonRootCA1.pem
+src/iot/aws-certs/cert.pem
+src/iot/aws-certs/key.pem
