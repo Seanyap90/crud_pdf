@@ -13,9 +13,9 @@
 /.pytest_cache
 /.vscode
 /src/iot/sample
-/iot-client-admin/node_modules
+/iot-admin-client/node_modules
 /certificates
-/iot-client-admin/.next
+/iot-admin-client/.next
 /src/*.egg-info
 certs
 gateway-config-structure.yaml
@@ -73,3 +73,4 @@ src/iot/lambdas/update_gateway_read_model.zip
 deployment/gateway-state-machine-optimized.json
 deployment/config-update-state-machine-simplified-v1.4.json
 deployment/config-update-state-machine-optimized.json
+src/iot/aws-certs
