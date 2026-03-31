@@ -60,6 +60,18 @@ iot-backend-cleanup:
 deploy-iot-aws:
 	bash run.sh deploy-iot-aws
 
+datarecon-backend-start:
+	bash run.sh datarecon-backend-start
+
+datarecon-backend-cleanup:
+	bash run.sh datarecon-backend-cleanup
+
+deploy-datarecon-aws:
+	bash run.sh deploy-datarecon-aws
+
+datarecon-dev:
+	bash run.sh datarecon-dev
+
 generate_cert:
 	@if [ -z "$(GATEWAY_ID)" ]; then \
 		echo "Error: GATEWAY_ID is required"; \
