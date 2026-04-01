@@ -1076,6 +1076,70 @@ function deploy-iot-aws() {
     echo "  5. Test MQTT measurement flow"
 }
 
+# ====================================================================
+# Data Reconciliation Service
+# ====================================================================
+
+function datarecon-backend-start() {
+    echo "Starting Data Reconciliation API..."
+    load_env_file ".env.local-dev"
+    export DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-local-dev}"
+    cd "$THIS_DIR"
+    python -m uvicorn datarecon.main:create_app --reload --port 8002
+}
+
+function datarecon-backend-cleanup() {
+    echo "Cleaning up Data Reconciliation service..."
+    pkill -f "datarecon.main:create_app" 2>/dev/null || true
+    echo "Cleanup complete"
+}
+
+function deploy-datarecon-aws() {
+    echo "=== Deploying Data Reconciliation to AWS ==="
+
+    load_env_file ".env.deploy-aws"
+    export DEPLOYMENT_MODE="deploy-aws"
+
+    DATABASE_HOST="${DATABASE_HOST:-44.201.200.44}"
+    DATABASE_PORT="${DATABASE_PORT:-8080}"
+
+    echo "Configuration:"
+    echo "  Database Host: $DATABASE_HOST"
+    echo "  Database Port: $DATABASE_PORT"
+    echo "  Deployment Mode: $DEPLOYMENT_MODE"
+
+    python -m deployment.aws.services.datarecon_deploy \
+        --region "${AWS_REGION:-us-east-1}" \
+        --database-host "$DATABASE_HOST" \
+        --database-port "$DATABASE_PORT"
+
+    echo ""
+    echo "=== Data Reconciliation Deployment Complete ==="
+}
+
+function datarecon-dev() {
+    echo "Starting Data Reconciliation (backend + frontend)..."
+    load_env_file ".env.local-dev"
+    export DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-local-dev}"
+
+    cd "$THIS_DIR"
+    python -m uvicorn datarecon.main:create_app --reload --port 8002 &
+    BACKEND_PID=$!
+    trap "kill $BACKEND_PID 2>/dev/null" EXIT
+
+    echo "Waiting for backend to start..."
+    sleep 2
+
+    if [ -d "$THIS_DIR/datarecon-client" ]; then
+        cd "$THIS_DIR/datarecon-client"
+        npm run dev
+    else
+        echo "Frontend directory not found at datarecon-client/"
+        echo "Backend running at http://localhost:8002"
+        wait
+    fi
+}
+
 # Function to generate certificates for a gateway
 function generate_cert() {
     local gateway_id=$1

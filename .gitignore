@@ -76,3 +76,8 @@ deployment/config-update-state-machine-optimized.json
 src/iot/aws-certs/AmazonRootCA1.pem
 src/iot/aws-certs/cert.pem
 src/iot/aws-certs/key.pem
+DataReconciler/*
+gateway-config-structure copy.yaml
+gateway-config-structure-2 copy.yaml
+/datarecon-client/.next
+/datarecon-client/node_modules
