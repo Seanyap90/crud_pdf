@@ -4,7 +4,7 @@ import type {
 } from "@shared/schema";
 
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8002";
+  process.env.NEXT_PUBLIC_API_URL || "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev";
 
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: "no-store", mode: "cors" });

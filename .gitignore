@@ -81,3 +81,5 @@ gateway-config-structure copy.yaml
 gateway-config-structure-2 copy.yaml
 /datarecon-client/.next
 /datarecon-client/node_modules
+/src/iot/aws-certs
+/src/iot/aws-certs/*
