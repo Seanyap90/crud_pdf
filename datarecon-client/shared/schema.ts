@@ -13,9 +13,16 @@ export const DeviceMeasurementSummarySchema = z.object({
   event_count: z.number(),
 });
 
+export const InvoiceCategoryBreakdownSchema = z.object({
+  category: z.string(),
+  weight_kg: z.number(),
+  invoice_count: z.number(),
+});
+
 export const ReconciliationLineItemSchema = z.object({
   vendor_name: z.string(),
-  category: z.string(),
+  categories: z.array(z.string()),
+  category_breakdown: z.array(InvoiceCategoryBreakdownSchema),
   invoice_weight_kg: z.number().nullable(),
   measured_weight_kg: z.number().nullable(),
   discrepancy_kg: z.number().nullable(),
@@ -51,6 +58,7 @@ export const ReconciliationResponseSchema = z.object({
 
 export type Vendor = z.infer<typeof VendorSchema>;
 export type DeviceMeasurementSummary = z.infer<typeof DeviceMeasurementSummarySchema>;
+export type InvoiceCategoryBreakdown = z.infer<typeof InvoiceCategoryBreakdownSchema>;
 export type ReconciliationLineItem = z.infer<typeof ReconciliationLineItemSchema>;
 export type ReconciliationSummary = z.infer<typeof ReconciliationSummarySchema>;
 export type ReconciliationResponse = z.infer<typeof ReconciliationResponseSchema>;
