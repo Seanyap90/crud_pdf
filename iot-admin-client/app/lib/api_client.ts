@@ -9,7 +9,7 @@ import {
 } from '../lib/gateway-normalizer';
 
 // Base API URL - ensure this is correctly set in your environment
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://6pdfbz8kf9.execute-api.us-east-1.amazonaws.com/dev';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "<API_GATEWAY_URL>"
 
 // Enable debug mode for development
 const DEBUG = process.env.NODE_ENV !== 'production';
