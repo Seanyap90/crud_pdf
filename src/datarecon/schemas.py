@@ -9,9 +9,16 @@ class DeviceMeasurementSummary(BaseModel):
     event_count: int = Field(description="Number of measurement events from this device")
 
 
+class InvoiceCategoryBreakdown(BaseModel):
+    category: str
+    weight_kg: float
+    invoice_count: int
+
+
 class ReconciliationLineItem(BaseModel):
     vendor_name: str
-    category: str
+    categories: List[str] = Field(default_factory=list, description="Invoice categories for this vendor")
+    category_breakdown: List[InvoiceCategoryBreakdown] = Field(default_factory=list)
     invoice_weight_kg: Optional[float] = None
     measured_weight_kg: Optional[float] = None
     discrepancy_kg: Optional[float] = None

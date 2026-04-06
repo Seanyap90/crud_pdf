@@ -91,14 +91,29 @@ export default function WeightComparison({ lineItem }: WeightComparisonProps) {
               <TableHeader>
                 <TableRow>
                   <TableHead>Category</TableHead>
-                  <TableHead className="text-right">Total Weight (kg)</TableHead>
+                  <TableHead className="text-right">Weight (kg)</TableHead>
+                  <TableHead className="text-right">Invoices</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
+                {lineItem.category_breakdown.map((cat) => (
+                  <TableRow key={cat.category}>
+                    <TableCell>{cat.category || "—"}</TableCell>
+                    <TableCell className="text-right">
+                      {cat.weight_kg.toFixed(2)}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {cat.invoice_count}
+                    </TableCell>
+                  </TableRow>
+                ))}
                 <TableRow>
-                  <TableCell>{lineItem.category}</TableCell>
-                  <TableCell className="text-right">
-                    {lineItem.invoice_weight_kg.toFixed(2)}
+                  <TableCell className="font-medium">Total</TableCell>
+                  <TableCell className="text-right font-medium">
+                    {lineItem.invoice_weight_kg.toFixed(2)} kg
+                  </TableCell>
+                  <TableCell className="text-right font-medium">
+                    {lineItem.invoice_count}
                   </TableCell>
                 </TableRow>
               </TableBody>

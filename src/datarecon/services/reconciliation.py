@@ -1,10 +1,11 @@
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from collections import defaultdict
 
 from datarecon.schemas import (
     DeviceMeasurementSummary,
+    InvoiceCategoryBreakdown,
     ReconciliationLineItem,
     ReconciliationResponse,
     ReconciliationSummary,
@@ -104,29 +105,34 @@ class ReconciliationService:
 
     def _aggregate_invoices(
         self, invoices: List[Dict[str, Any]]
-    ) -> Dict[Tuple[str, str], Dict[str, Any]]:
-        """Group invoices by (vendor_name, category) and sum weights."""
-        agg: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    ) -> Dict[str, Dict[str, Any]]:
+        """Group invoices by vendor and sum weights, tracking per-category breakdown."""
+        agg: Dict[str, Dict[str, Any]] = {}
         for inv in invoices:
             vendor_name = (inv.get("vendor", {}).get("vendor_name") or "").strip()
+            if not vendor_name:
+                continue
             category = ""
             cat_obj = inv.get("category")
             if cat_obj:
                 category = (cat_obj.get("category_name") or "").strip()
-            key = (vendor_name.lower(), category.lower())
+            key = vendor_name.lower()
 
             if key not in agg:
                 agg[key] = {
                     "vendor_name": vendor_name,
-                    "category": category,
                     "weight": 0.0,
                     "count": 0,
                     "total_amount": 0.0,
+                    "cat_breakdown": defaultdict(lambda: {"weight": 0.0, "count": 0, "display": ""}),
                 }
             weight = inv.get("reported_weight_kg")
             if weight is not None:
                 agg[key]["weight"] += float(weight)
+                agg[key]["cat_breakdown"][category.lower()]["weight"] += float(weight)
             agg[key]["count"] += 1
+            agg[key]["cat_breakdown"][category.lower()]["count"] += 1
+            agg[key]["cat_breakdown"][category.lower()]["display"] = category
             amount = inv.get("total_amount")
             if amount is not None:
                 agg[key]["total_amount"] += float(amount)
@@ -134,23 +140,21 @@ class ReconciliationService:
 
     def _aggregate_measurements(
         self, measurements: List[Dict[str, Any]]
-    ) -> Dict[Tuple[str, str], Dict[str, Any]]:
-        """Group measurements by (vendor, category) and sum weights with per-device breakdown."""
-        agg: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    ) -> Dict[str, Dict[str, Any]]:
+        """Group measurements by vendor (all material types) and sum weights with per-device breakdown."""
+        agg: Dict[str, Dict[str, Any]] = {}
         for m in measurements:
             payload = m.get("payload", {})
             device_info = m.get("device_info", {})
 
             vendor = (payload.get("vendor") or "").strip()
-            category = (payload.get("material_category") or "").strip()
             if not vendor:
                 continue
 
-            key = (vendor.lower(), category.lower())
+            key = vendor.lower()
             if key not in agg:
                 agg[key] = {
                     "vendor": vendor,
-                    "category": category,
                     "weight": 0.0,
                     "count": 0,
                     "devices": defaultdict(lambda: {"weight": 0.0, "count": 0, "gateway_id": ""}),
@@ -170,8 +174,8 @@ class ReconciliationService:
 
     def _join_and_compare(
         self,
-        invoice_agg: Dict[Tuple[str, str], Dict[str, Any]],
-        measurement_agg: Dict[Tuple[str, str], Dict[str, Any]],
+        invoice_agg: Dict[str, Dict[str, Any]],
+        measurement_agg: Dict[str, Dict[str, Any]],
         tolerance_pct: float,
         vendor_filter: Optional[str],
         category_filter: Optional[str],
@@ -184,11 +188,8 @@ class ReconciliationService:
             meas_data = measurement_agg.get(key)
 
             vendor_name = (inv_data or meas_data)["vendor_name" if inv_data else "vendor"]
-            category = (inv_data or meas_data)["category"]
 
             if vendor_filter and vendor_filter.lower() != vendor_name.lower():
-                continue
-            if category_filter and category_filter.lower() != category.lower():
                 continue
 
             inv_weight = inv_data["weight"] if inv_data else None
@@ -226,10 +227,26 @@ class ReconciliationService:
                         )
                     )
 
+            # Per-category invoice breakdown
+            categories = []
+            cat_breakdown = []
+            if inv_data:
+                for cat_key, cat_info in sorted(inv_data["cat_breakdown"].items()):
+                    display_name = cat_info["display"] or cat_key
+                    categories.append(display_name)
+                    cat_breakdown.append(
+                        InvoiceCategoryBreakdown(
+                            category=display_name,
+                            weight_kg=round(cat_info["weight"], 2),
+                            invoice_count=cat_info["count"],
+                        )
+                    )
+
             line_items.append(
                 ReconciliationLineItem(
                     vendor_name=vendor_name,
-                    category=category,
+                    categories=categories,
+                    category_breakdown=cat_breakdown,
                     invoice_weight_kg=round(inv_weight, 2) if inv_weight is not None else None,
                     measured_weight_kg=round(meas_weight, 2) if meas_weight is not None else None,
                     discrepancy_kg=discrepancy_kg,

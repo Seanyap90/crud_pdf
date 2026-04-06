@@ -127,7 +127,7 @@ function Dashboard() {
                       key={vendor.vendor_id}
                       value={vendor.vendor_name}
                     >
-                      {vendor.vendor_name} - {vendor.waste_type}
+                      {vendor.vendor_name}
                     </SelectItem>
                   ))}
                 </SelectContent>

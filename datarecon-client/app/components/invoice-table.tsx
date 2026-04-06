@@ -63,7 +63,7 @@ export default function InvoiceTable({
   const handleExport = () => {
     const headers = [
       "Vendor",
-      "Category",
+      "Categories",
       "Invoice Weight (kg)",
       "Measured Weight (kg)",
       "Discrepancy (kg)",
@@ -74,7 +74,7 @@ export default function InvoiceTable({
     ];
     const csvData = data.map((row) => [
       row.vendor_name,
-      row.category,
+      row.categories.join("; "),
       row.invoice_weight_kg ?? "N/A",
       row.measured_weight_kg ?? "N/A",
       row.discrepancy_kg != null ? row.discrepancy_kg.toFixed(2) : "N/A",
@@ -126,7 +126,7 @@ export default function InvoiceTable({
         <TableHeader>
           <TableRow>
             <TableHead>Vendor</TableHead>
-            <TableHead>Category</TableHead>
+            <TableHead>Categories</TableHead>
             <TableHead className="text-right">Invoice Weight (kg)</TableHead>
             <TableHead className="text-right">Measured Weight (kg)</TableHead>
             <TableHead className="text-right">Discrepancy (kg)</TableHead>
@@ -139,7 +139,7 @@ export default function InvoiceTable({
           {data.map((entry, idx) => (
             <TableRow key={`${entry.vendor_name}-${entry.category}-${idx}`}>
               <TableCell className="font-medium">{entry.vendor_name}</TableCell>
-              <TableCell>{entry.category}</TableCell>
+              <TableCell>{entry.categories.join(", ") || "—"}</TableCell>
               <TableCell className="text-right">
                 {entry.invoice_weight_kg != null
                   ? `${entry.invoice_weight_kg.toFixed(2)}`
@@ -167,7 +167,7 @@ export default function InvoiceTable({
                   size="sm"
                   onClick={() =>
                     router.push(
-                      `/reconciliation/${encodeURIComponent(entry.vendor_name)}?category=${encodeURIComponent(entry.category)}`
+                      `/reconciliation/${encodeURIComponent(entry.vendor_name)}`
                     )
                   }
                 >

@@ -45,7 +45,7 @@ class DataReconDeployer:
         self.iam_client = self.client_manager.get_client("iam")
 
     def deploy(self, database_host: str, database_port: int = 8080) -> Dict[str, Any]:
-        """Full deployment: package → layer → Lambda → Function URL."""
+        """Full deployment: package → layer → IAM role → Lambda."""
         logger.info("=== Deploying Data Reconciliation API ===")
 
         # Step 1: Create deployment ZIP
@@ -62,14 +62,10 @@ class DataReconDeployer:
             zip_path, layer_arn, role_arn, database_host, database_port
         )
 
-        # Step 5: Create Function URL
-        function_url = self._create_function_url(FUNCTION_NAME)
-        function_info["function_url"] = function_url
-
         # Cleanup
         os.remove(zip_path)
 
-        logger.info(f"Deployment complete. URL: {function_url}")
+        logger.info(f"Deployment complete. Function: {function_info['function_arn']}")
         return function_info
 
     def _create_package(self) -> str:
@@ -110,25 +106,40 @@ class DataReconDeployer:
             return zip_path
 
     def _get_or_create_layer(self) -> str:
-        """Reuse existing FastAPI layer or create one."""
-        logger.info("Looking for existing FastAPI layer...")
+        """Reuse existing datarecon layer or build a new one with Docker."""
+        layer_name = "datarecon-fastapi-layer"
+        logger.info(f"Looking for existing layer: {layer_name}...")
         try:
-            response = self.lambda_client.list_layers(CompatibleRuntime=LAMBDA_RUNTIME)
-            for layer in response.get("Layers", []):
-                if "fastapi" in layer["LayerName"].lower():
-                    latest = layer["LatestMatchingVersion"]["LayerVersionArn"]
-                    logger.info(f"Reusing layer: {latest}")
-                    return latest
+            response = self.lambda_client.list_layer_versions(
+                LayerName=layer_name, CompatibleRuntime=LAMBDA_RUNTIME
+            )
+            versions = response.get("LayerVersions", [])
+            if versions:
+                latest = versions[0]["LayerVersionArn"]
+                logger.info(f"Reusing layer: {latest}")
+                return latest
         except Exception:
             pass
 
-        # Import layer manager from existing deployment code
-        logger.info("No existing layer found, creating new one...")
+        logger.info("No existing layer found, building new one with Docker...")
         from deployment.aws.services.lambda_deploy import LambdaLayerManager
 
         manager = LambdaLayerManager(self.region)
-        layer_info = manager.create_fastapi_layer()
-        return layer_info["layer_version_arn"]
+        # Build layer with Docker then publish under the datarecon-specific name
+        zip_path = manager._create_fastapi_layer_zip()
+        with open(zip_path, "rb") as f:
+            response = self.lambda_client.publish_layer_version(
+                LayerName=layer_name,
+                Description="FastAPI layer for datarecon Lambda (includes all dependencies)",
+                Content={"ZipFile": f.read()},
+                CompatibleRuntimes=[LAMBDA_RUNTIME],
+                CompatibleArchitectures=["x86_64"],
+            )
+        import os
+        os.remove(zip_path)
+        layer_arn = response["LayerVersionArn"]
+        logger.info(f"Published layer: {layer_arn}")
+        return layer_arn
 
     def _get_or_create_role(self) -> str:
         """Get or create Lambda execution role."""
@@ -230,43 +241,6 @@ class DataReconDeployer:
                 "function_arn": response["FunctionArn"],
             }
 
-    def _create_function_url(self, function_name: str) -> str:
-        """Create or get Lambda Function URL."""
-        try:
-            response = self.lambda_client.get_function_url_config(
-                FunctionName=function_name
-            )
-            url = response["FunctionUrl"]
-            logger.info(f"Function URL exists: {url}")
-            return url
-        except self.lambda_client.exceptions.ResourceNotFoundException:
-            pass
-
-        # Add permission for public access
-        try:
-            self.lambda_client.add_permission(
-                FunctionName=function_name,
-                StatementId="FunctionURLAllowPublicAccess",
-                Action="lambda:InvokeFunctionUrl",
-                Principal="*",
-                FunctionUrlAuthType="NONE",
-            )
-        except self.lambda_client.exceptions.ResourceConflictException:
-            pass
-
-        response = self.lambda_client.create_function_url_config(
-            FunctionName=function_name,
-            AuthType="NONE",
-            Cors={
-                "AllowOrigins": ["*"],
-                "AllowMethods": ["*"],
-                "AllowHeaders": ["*"],
-            },
-        )
-        url = response["FunctionUrl"]
-        logger.info(f"Created Function URL: {url}")
-        return url
-
 
 def main():
     parser = argparse.ArgumentParser(description="Deploy Data Reconciliation API to AWS Lambda")
@@ -281,7 +255,6 @@ def main():
     print(f"\nDeployment Result:")
     print(f"  Function: {result['function_name']}")
     print(f"  ARN: {result['function_arn']}")
-    print(f"  URL: {result.get('function_url', 'N/A')}")
 
 
 if __name__ == "__main__":
