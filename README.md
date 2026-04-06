@@ -1,4 +1,4 @@
-# Custom Enterprise Application with CRUD, IoT, VLM+RAG functionality
+# Digitalising Industrial Recycling for Data Integrity with VLM/RAG, IoT and Data Management
 
 ## Summary
 
