@@ -1,9 +1,9 @@
 #!/bin/bash
 # deploy.sh
 #
-# Uploads Grafana provisioning files to S3, then creates or updates the
-# CloudFormation stack. The EC2 instance downloads these files during
-# UserData bootstrap — no manual SSH/SCP needed after deploy.
+# Creates or updates the grafana-datarecon CloudFormation stack.
+# All provisioning files are embedded in cloudformation.yaml via cfn-init —
+# no S3 upload or manual SSH steps required.
 #
 # Usage (from repo root):
 #   bash deployment/aws/grafana/deploy.sh [stack-name]
@@ -14,47 +14,37 @@
 set -euo pipefail
 
 STACK_NAME="${1:-grafana-datarecon}"
-BUCKET="rag-pdf-storage-1751732972"
-PREFIX="grafana/provisioning"
 TEMPLATE="deployment/aws/grafana/cloudformation.yaml"
-PROVISIONING_DIR="deployment/aws/grafana/provisioning"
 
-# ── Verify we're in the repo root ──
 if [[ ! -f "$TEMPLATE" ]]; then
   echo "ERROR: Run this script from the repo root (cd /path/to/crud_pdf)"
   exit 1
 fi
 
-echo "==> Uploading provisioning files to s3://$BUCKET/$PREFIX/ ..."
-aws s3 cp "$PROVISIONING_DIR/datasources/infinity.yaml" \
-  "s3://$BUCKET/$PREFIX/datasources/infinity.yaml"
-aws s3 cp "$PROVISIONING_DIR/dashboards/dashboard.yaml" \
-  "s3://$BUCKET/$PREFIX/dashboards/dashboard.yaml"
-aws s3 cp "$PROVISIONING_DIR/dashboards/datarecon.json" \
-  "s3://$BUCKET/$PREFIX/dashboards/datarecon.json"
-echo "    Done."
-
-# ── Detect create vs update ──
 STACK_STATUS=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
   --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
 
 if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]]; then
-  echo "==> Creating stack $STACK_NAME ..."
-  echo "    KeyPairName? (enter key pair name):"
+  echo "==> Stack $STACK_NAME not found — creating..."
+  echo -n "    EC2 key pair name: "
   read -r KEY_PAIR
+  echo -n "    Your IP for SSH/Grafana access (e.g. 1.2.3.4/32, or 0.0.0.0/0 for open): "
+  read -r MY_CIDR
+
   aws cloudformation create-stack \
     --stack-name "$STACK_NAME" \
     --template-body "file://$TEMPLATE" \
     --capabilities CAPABILITY_NAMED_IAM \
     --parameters \
       ParameterKey=KeyPairName,ParameterValue="$KEY_PAIR" \
-      ParameterKey=AllowedSSHCidr,ParameterValue="0.0.0.0/0" \
-      ParameterKey=AllowedGrafanaCidr,ParameterValue="0.0.0.0/0"
-  echo "==> Waiting for stack create to complete..."
+      ParameterKey=AllowedSSHCidr,ParameterValue="$MY_CIDR" \
+      ParameterKey=AllowedGrafanaCidr,ParameterValue="$MY_CIDR"
+
+  echo "==> Waiting for CREATE_COMPLETE (up to 15 min)..."
   aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"
 else
-  echo "==> Updating stack $STACK_NAME (current status: $STACK_STATUS) ..."
+  echo "==> Stack $STACK_NAME exists ($STACK_STATUS) — updating..."
   aws cloudformation update-stack \
     --stack-name "$STACK_NAME" \
     --template-body "file://$TEMPLATE" \
@@ -65,10 +55,9 @@ else
       ParameterKey=AllowedGrafanaCidr,UsePreviousValue=true \
       ParameterKey=VpcId,UsePreviousValue=true \
       ParameterKey=SubnetId,UsePreviousValue=true \
-      ParameterKey=InstanceType,UsePreviousValue=true \
-      ParameterKey=ProvisioningBucket,UsePreviousValue=true \
-      ParameterKey=ProvisioningPrefix,UsePreviousValue=true
-  echo "==> Waiting for stack update to complete..."
+      ParameterKey=InstanceType,UsePreviousValue=true
+
+  echo "==> Waiting for UPDATE_COMPLETE (up to 15 min)..."
   aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"
 fi
 
@@ -77,6 +66,6 @@ echo "================================================================"
 aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
   --query "Stacks[0].Outputs[*].[OutputKey,OutputValue]" --output table
 echo "================================================================"
-echo " Login: admin / admin  (change on first login)"
-echo " Dashboard: Dashboards > datarecon > Waste Reconciliation"
+echo " Login      : admin / admin  (change on first login)"
+echo " Dashboard  : Dashboards > datarecon > Waste Reconciliation"
 echo "================================================================"
