@@ -1,0 +1,745 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Grafana on EC2 — fully self-contained bootstrap via cfn-init, no manual steps after deploy"
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "Existing EC2 key pair name for SSH access"
+  AllowedSSHCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: "CIDR block for SSH access — restrict to your IP (e.g. 1.2.3.4/32)"
+  AllowedGrafanaCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: "CIDR block for Grafana UI access on port 3000"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: "vpc-0237dd5f0dc025eaa"
+    Description: "VPC to deploy into (fastapi-app-vpc)"
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: "subnet-09ef1abedfebf6663"
+    Description: "Public subnet within the VPC"
+  InstanceType:
+    Type: String
+    Default: "t3.small"
+    AllowedValues: ["t3.micro", "t3.small", "t3.medium"]
+    Description: "EC2 instance type"
+
+Resources:
+
+  # ── IAM: lets cfn-init read stack metadata and cfn-signal report back ──
+  GrafanaEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: grafana-datarecon-ec2-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cfn-init-signal
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:SignalResource
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+
+  GrafanaInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: grafana-datarecon-instance-profile
+      Roles:
+        - !Ref GrafanaEC2Role
+
+  GrafanaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Grafana + datarecon: SSH and Grafana UI access"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHCidr
+          Description: "SSH access"
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: !Ref AllowedGrafanaCidr
+          Description: "Grafana UI"
+
+  GrafanaEC2Instance:
+    Type: AWS::EC2::Instance
+    # cfn-init: provisioning files are defined here and applied during UserData bootstrap.
+    # Execution order: packages → files → commands → services
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /etc/grafana/provisioning/datasources/infinity.yaml:
+              owner: grafana
+              group: grafana
+              mode: "000644"
+              content: |
+                apiVersion: 1
+
+                datasources:
+                  - name: datarecon-api
+                    uid: datarecon-infinity
+                    type: yesoreyeram-infinity-datasource
+                    access: proxy
+                    isDefault: true
+                    jsonData:
+                      base_url: "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev"
+                      allowed_hosts:
+                        - "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com"
+
+            /etc/grafana/provisioning/dashboards/dashboard.yaml:
+              owner: grafana
+              group: grafana
+              mode: "000644"
+              content: |
+                apiVersion: 1
+
+                providers:
+                  - name: datarecon
+                    orgId: 1
+                    folder: "datarecon"
+                    folderUid: "datarecon"
+                    type: file
+                    disableDeletion: false
+                    updateIntervalSeconds: 30
+                    allowUiUpdates: true
+                    options:
+                      path: /var/lib/grafana/dashboards
+                      foldersFromFilesStructure: false
+
+            /var/lib/grafana/dashboards/datarecon.json:
+              owner: grafana
+              group: grafana
+              mode: "000644"
+              content: |
+                {
+                  "__inputs": [],
+                  "__requires": [
+                    { "type": "datasource", "id": "yesoreyeram-infinity-datasource", "name": "Infinity", "version": "2.0.0" },
+                    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.4.0" },
+                    { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
+                    { "type": "panel", "id": "barchart", "name": "Bar chart", "version": "" },
+                    { "type": "panel", "id": "bargauge", "name": "Bar gauge", "version": "" },
+                    { "type": "panel", "id": "piechart", "name": "Pie chart", "version": "" },
+                    { "type": "panel", "id": "table", "name": "Table", "version": "" }
+                  ],
+                  "annotations": { "list": [] },
+                  "description": "Waste vendor invoice reconciliation — invoice weight vs IoT-measured weight",
+                  "editable": true,
+                  "fiscalYearStartMonth": 0,
+                  "graphTooltip": 1,
+                  "id": null,
+                  "links": [],
+                  "panels": [
+                    {
+                      "id": 1,
+                      "title": "Service Health",
+                      "type": "stat",
+                      "gridPos": { "h": 3, "w": 3, "x": 0, "y": 0 },
+                      "options": {
+                        "colorMode": "background",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "textMode": "value_and_name",
+                        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^status$/", "values": false }
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "mappings": [
+                            { "type": "value", "options": { "ok": { "text": "OK", "color": "green", "index": 0 } } },
+                            { "type": "special", "options": { "match": "null", "result": { "text": "DOWN", "color": "red", "index": 1 } } }
+                          ],
+                          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
+                          "color": { "mode": "thresholds" }
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/health",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "",
+                          "columns": [{ "selector": "status", "text": "status", "type": "string" }],
+                          "format": "table"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 2,
+                      "title": "Total Line Items",
+                      "type": "stat",
+                      "gridPos": { "h": 3, "w": 3, "x": 3, "y": 0 },
+                      "options": {
+                        "colorMode": "value",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "textMode": "value_and_name",
+                        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^total_line_items$/", "values": false }
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
+                          "color": { "mode": "thresholds" }
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "summary",
+                          "columns": [{ "selector": "total_line_items", "text": "total_line_items", "type": "number" }],
+                          "format": "table"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 3,
+                      "title": "Within Tolerance",
+                      "type": "stat",
+                      "gridPos": { "h": 3, "w": 3, "x": 6, "y": 0 },
+                      "options": {
+                        "colorMode": "background",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "textMode": "value_and_name",
+                        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^within_tolerance$/", "values": false }
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+                          "color": { "mode": "thresholds" }
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "summary",
+                          "columns": [{ "selector": "within_tolerance", "text": "within_tolerance", "type": "number" }],
+                          "format": "table"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 4,
+                      "title": "Over Tolerance",
+                      "type": "stat",
+                      "gridPos": { "h": 3, "w": 3, "x": 9, "y": 0 },
+                      "options": {
+                        "colorMode": "background",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "textMode": "value_and_name",
+                        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^over_tolerance$/", "values": false }
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] },
+                          "color": { "mode": "thresholds" }
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "summary",
+                          "columns": [{ "selector": "over_tolerance", "text": "over_tolerance", "type": "number" }],
+                          "format": "table"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 5,
+                      "title": "Invoice Only",
+                      "type": "stat",
+                      "gridPos": { "h": 3, "w": 3, "x": 12, "y": 0 },
+                      "options": {
+                        "colorMode": "background",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "textMode": "value_and_name",
+                        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^invoice_only$/", "values": false }
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "thresholds": { "mode": "absolute", "steps": [{ "color": "orange", "value": null }] },
+                          "color": { "mode": "thresholds" }
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "summary",
+                          "columns": [{ "selector": "invoice_only", "text": "invoice_only", "type": "number" }],
+                          "format": "table"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 6,
+                      "title": "Measurement Only",
+                      "type": "stat",
+                      "gridPos": { "h": 3, "w": 3, "x": 15, "y": 0 },
+                      "options": {
+                        "colorMode": "background",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "textMode": "value_and_name",
+                        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^measurement_only$/", "values": false }
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "thresholds": { "mode": "absolute", "steps": [{ "color": "yellow", "value": null }] },
+                          "color": { "mode": "thresholds" }
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "summary",
+                          "columns": [{ "selector": "measurement_only", "text": "measurement_only", "type": "number" }],
+                          "format": "table"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 7,
+                      "title": "Total Invoice Weight (kg)",
+                      "type": "stat",
+                      "gridPos": { "h": 3, "w": 6, "x": 18, "y": 0 },
+                      "options": {
+                        "colorMode": "value",
+                        "graphMode": "none",
+                        "justifyMode": "center",
+                        "textMode": "value_and_name",
+                        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^total_invoice_weight_kg$/", "values": false }
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "kg",
+                          "decimals": 1,
+                          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
+                          "color": { "mode": "thresholds" }
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "summary",
+                          "columns": [{ "selector": "total_invoice_weight_kg", "text": "total_invoice_weight_kg", "type": "number" }],
+                          "format": "table"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 8,
+                      "title": "Invoice vs Measured Weight by Vendor (kg)",
+                      "description": "Side-by-side comparison of reported invoice weight vs IoT-measured weight per vendor",
+                      "type": "barchart",
+                      "gridPos": { "h": 10, "w": 14, "x": 0, "y": 3 },
+                      "options": {
+                        "barWidth": 0.7,
+                        "groupWidth": 0.8,
+                        "orientation": "auto",
+                        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+                        "tooltip": { "mode": "multi", "sort": "none" },
+                        "xTickLabelRotation": -30,
+                        "xTickLabelSpacing": 100
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "kg",
+                          "decimals": 1,
+                          "custom": { "fillOpacity": 80, "lineWidth": 0 }
+                        },
+                        "overrides": [
+                          { "matcher": { "id": "byName", "options": "invoice_weight_kg" },
+                            "properties": [{ "id": "displayName", "value": "Invoice Weight" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+                          { "matcher": { "id": "byName", "options": "measured_weight_kg" },
+                            "properties": [{ "id": "displayName", "value": "Measured Weight" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+                        ]
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "line_items",
+                          "columns": [
+                            { "selector": "vendor_name", "text": "vendor_name", "type": "string" },
+                            { "selector": "invoice_weight_kg", "text": "invoice_weight_kg", "type": "number" },
+                            { "selector": "measured_weight_kg", "text": "measured_weight_kg", "type": "number" }
+                          ],
+                          "format": "table"
+                        }
+                      ],
+                      "transformations": [
+                        { "id": "organize", "options": { "renameByName": { "vendor_name": "Vendor" } } }
+                      ]
+                    },
+                    {
+                      "id": 9,
+                      "title": "Status Breakdown",
+                      "description": "Proportion of vendors in each reconciliation status",
+                      "type": "piechart",
+                      "gridPos": { "h": 10, "w": 10, "x": 14, "y": 3 },
+                      "options": {
+                        "displayLabels": ["percent", "name"],
+                        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "values": ["percent", "value"] },
+                        "pieType": "pie",
+                        "tooltip": { "mode": "single", "sort": "none" }
+                      },
+                      "fieldConfig": {
+                        "defaults": {},
+                        "overrides": [
+                          { "matcher": { "id": "byName", "options": "within_tolerance" },
+                            "properties": [{ "id": "displayName", "value": "Within Tolerance" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+                          { "matcher": { "id": "byName", "options": "over_tolerance" },
+                            "properties": [{ "id": "displayName", "value": "Over Tolerance" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+                          { "matcher": { "id": "byName", "options": "invoice_only" },
+                            "properties": [{ "id": "displayName", "value": "Invoice Only" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+                          { "matcher": { "id": "byName", "options": "measurement_only" },
+                            "properties": [{ "id": "displayName", "value": "Measurement Only" }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] }
+                        ]
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "summary",
+                          "columns": [
+                            { "selector": "within_tolerance", "text": "within_tolerance", "type": "number" },
+                            { "selector": "over_tolerance", "text": "over_tolerance", "type": "number" },
+                            { "selector": "invoice_only", "text": "invoice_only", "type": "number" },
+                            { "selector": "measurement_only", "text": "measurement_only", "type": "number" }
+                          ],
+                          "format": "table"
+                        }
+                      ]
+                    },
+                    {
+                      "id": 10,
+                      "title": "Discrepancy % by Vendor",
+                      "description": "Percentage difference between invoice and measured weight. Red = exceeds tolerance.",
+                      "type": "bargauge",
+                      "gridPos": { "h": 10, "w": 14, "x": 0, "y": 13 },
+                      "options": {
+                        "displayMode": "gradient",
+                        "orientation": "horizontal",
+                        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true },
+                        "showUnfilled": true,
+                        "valueMode": "color",
+                        "minVizWidth": 0,
+                        "minVizHeight": 16
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "unit": "percent",
+                          "decimals": 1,
+                          "min": 0,
+                          "thresholds": {
+                            "mode": "absolute",
+                            "steps": [
+                              { "color": "green", "value": null },
+                              { "color": "orange", "value": 3 },
+                              { "color": "red", "value": 5 }
+                            ]
+                          },
+                          "color": { "mode": "thresholds" },
+                          "mappings": [{ "type": "special", "options": { "match": "null", "result": { "text": "N/A" } } }]
+                        },
+                        "overrides": []
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "line_items",
+                          "columns": [
+                            { "selector": "vendor_name", "text": "vendor_name", "type": "string" },
+                            { "selector": "discrepancy_pct", "text": "discrepancy_pct", "type": "number" }
+                          ],
+                          "format": "table"
+                        }
+                      ],
+                      "transformations": [
+                        { "id": "organize", "options": { "renameByName": { "vendor_name": "Vendor", "discrepancy_pct": "Discrepancy %" } } },
+                        { "id": "labelsToFields", "options": { "mode": "rows", "keepLabels": [] } }
+                      ]
+                    },
+                    {
+                      "id": 11,
+                      "title": "Vendor Line Items",
+                      "description": "Full reconciliation detail per vendor. Status colour: green=within tolerance, red=over tolerance, orange=invoice only, yellow=measurement only.",
+                      "type": "table",
+                      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 23 },
+                      "options": {
+                        "footer": { "show": false },
+                        "showHeader": true,
+                        "cellHeight": "sm",
+                        "sortBy": [{ "displayName": "Discrepancy %", "desc": true }]
+                      },
+                      "fieldConfig": {
+                        "defaults": {
+                          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "filterable": true }
+                        },
+                        "overrides": [
+                          { "matcher": { "id": "byName", "options": "status" },
+                            "properties": [
+                              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "basic" } },
+                              { "id": "mappings", "value": [
+                                { "type": "value", "options": { "within_tolerance": { "color": "green", "index": 0 } } },
+                                { "type": "value", "options": { "over_tolerance": { "color": "red", "index": 1 } } },
+                                { "type": "value", "options": { "invoice_only": { "color": "orange", "index": 2 } } },
+                                { "type": "value", "options": { "measurement_only": { "color": "yellow", "index": 3 } } }
+                              ]}
+                            ]
+                          },
+                          { "matcher": { "id": "byName", "options": "invoice_weight_kg" },
+                            "properties": [{ "id": "unit", "value": "kg" }, { "id": "decimals", "value": 1 }, { "id": "displayName", "value": "Invoice Weight (kg)" }] },
+                          { "matcher": { "id": "byName", "options": "measured_weight_kg" },
+                            "properties": [{ "id": "unit", "value": "kg" }, { "id": "decimals", "value": 1 }, { "id": "displayName", "value": "Measured Weight (kg)" }] },
+                          { "matcher": { "id": "byName", "options": "discrepancy_kg" },
+                            "properties": [{ "id": "unit", "value": "kg" }, { "id": "decimals", "value": 1 }, { "id": "displayName", "value": "Discrepancy (kg)" }] },
+                          { "matcher": { "id": "byName", "options": "discrepancy_pct" },
+                            "properties": [{ "id": "unit", "value": "percent" }, { "id": "decimals", "value": 1 }, { "id": "displayName", "value": "Discrepancy %" }] },
+                          { "matcher": { "id": "byName", "options": "vendor_name" },
+                            "properties": [{ "id": "displayName", "value": "Vendor" }, { "id": "custom.width", "value": 200 }] },
+                          { "matcher": { "id": "byName", "options": "invoice_count" },
+                            "properties": [{ "id": "displayName", "value": "Invoices" }] },
+                          { "matcher": { "id": "byName", "options": "measurement_count" },
+                            "properties": [{ "id": "displayName", "value": "Measurements" }] }
+                        ]
+                      },
+                      "targets": [
+                        {
+                          "refId": "A",
+                          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "datarecon-infinity" },
+                          "type": "json",
+                          "source": "url",
+                          "url": "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev/v1/reconcile?year=${year}&month=${month}",
+                          "url_options": { "method": "GET" },
+                          "root_selector": "line_items",
+                          "columns": [
+                            { "selector": "vendor_name",       "text": "vendor_name",       "type": "string" },
+                            { "selector": "status",             "text": "status",             "type": "string" },
+                            { "selector": "invoice_weight_kg",  "text": "invoice_weight_kg",  "type": "number" },
+                            { "selector": "measured_weight_kg", "text": "measured_weight_kg", "type": "number" },
+                            { "selector": "discrepancy_kg",     "text": "discrepancy_kg",     "type": "number" },
+                            { "selector": "discrepancy_pct",    "text": "discrepancy_pct",    "type": "number" },
+                            { "selector": "invoice_count",      "text": "invoice_count",      "type": "number" },
+                            { "selector": "measurement_count",  "text": "measurement_count",  "type": "number" }
+                          ],
+                          "format": "table"
+                        }
+                      ]
+                    }
+                  ],
+                  "refresh": "5m",
+                  "schemaVersion": 39,
+                  "tags": ["datarecon", "waste", "reconciliation"],
+                  "templating": {
+                    "list": [
+                      {
+                        "name": "year",
+                        "type": "custom",
+                        "label": "Year",
+                        "hide": 0,
+                        "options": [
+                          { "text": "2024", "value": "2024", "selected": false },
+                          { "text": "2025", "value": "2025", "selected": false },
+                          { "text": "2026", "value": "2026", "selected": true }
+                        ],
+                        "current": { "text": "2026", "value": "2026" },
+                        "query": "2024,2025,2026",
+                        "multi": false,
+                        "includeAll": false
+                      },
+                      {
+                        "name": "month",
+                        "type": "custom",
+                        "label": "Month",
+                        "hide": 0,
+                        "options": [
+                          { "text": "January",   "value": "1",  "selected": false },
+                          { "text": "February",  "value": "2",  "selected": false },
+                          { "text": "March",     "value": "3",  "selected": false },
+                          { "text": "April",     "value": "4",  "selected": true  },
+                          { "text": "May",       "value": "5",  "selected": false },
+                          { "text": "June",      "value": "6",  "selected": false },
+                          { "text": "July",      "value": "7",  "selected": false },
+                          { "text": "August",    "value": "8",  "selected": false },
+                          { "text": "September", "value": "9",  "selected": false },
+                          { "text": "October",   "value": "10", "selected": false },
+                          { "text": "November",  "value": "11", "selected": false },
+                          { "text": "December",  "value": "12", "selected": false }
+                        ],
+                        "current": { "text": "April", "value": "4" },
+                        "query": "1,2,3,4,5,6,7,8,9,10,11,12",
+                        "multi": false,
+                        "includeAll": false
+                      }
+                    ]
+                  },
+                  "time": { "from": "now-1h", "to": "now" },
+                  "timepicker": { "hidden": true },
+                  "timezone": "browser",
+                  "title": "Waste Reconciliation",
+                  "uid": "datarecon-waste-recon",
+                  "version": 1
+                }
+
+          commands:
+            01-daemon-reload:
+              command: "systemctl daemon-reload"
+            02-enable-grafana:
+              command: "systemctl enable grafana-server"
+            03-start-grafana:
+              command: "systemctl start grafana-server"
+
+    # CloudFormation waits up to 15 min for cfn-signal before marking the update failed
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref GrafanaInstanceProfile
+      ImageId: "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref GrafanaSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: grafana-datarecon
+        - Key: Project
+          Value: crud-pdf
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > /var/log/userdata.log 2>&1
+
+          apt-get update -y
+          apt-get upgrade -y
+          apt-get install -y apt-transport-https wget gnupg curl python3-pip
+
+          # ── Grafana APT repo ──
+          mkdir -p /etc/apt/keyrings
+          wget -q -O /etc/apt/keyrings/grafana.asc https://apt.grafana.com/gpg-full.key
+          chmod 644 /etc/apt/keyrings/grafana.asc
+          echo "deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main" \
+            | tee /etc/apt/sources.list.d/grafana.list
+          apt-get update -y
+          apt-get install -y grafana
+
+          # ── Infinity plugin ──
+          grafana-cli plugins install yesoreyeram-infinity-datasource
+
+          # ── Allow unsigned plugin ──
+          sed -i \
+            's/;allow_loading_unsigned_plugins =/allow_loading_unsigned_plugins = yesoreyeram-infinity-datasource/' \
+            /etc/grafana/grafana.ini
+
+          # ── cfn-init: places provisioning files then starts Grafana ──
+          pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+
+          /usr/local/bin/cfn-init -v \
+            --stack ${AWS::StackName} \
+            --resource GrafanaEC2Instance \
+            --region ${AWS::Region} \
+            || { echo "cfn-init failed"; /usr/local/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource GrafanaEC2Instance --region ${AWS::Region}; exit 1; }
+
+          /usr/local/bin/cfn-signal -e 0 \
+            --stack ${AWS::StackName} \
+            --resource GrafanaEC2Instance \
+            --region ${AWS::Region}
+
+          echo "Bootstrap complete — Grafana provisioned and running on :3000"
+
+Outputs:
+  PublicIP:
+    Description: "EC2 public IP address"
+    Value: !GetAtt GrafanaEC2Instance.PublicIp
+  PublicDNS:
+    Description: "EC2 public DNS hostname"
+    Value: !GetAtt GrafanaEC2Instance.PublicDnsName
+  GrafanaURL:
+    Description: "Grafana UI"
+    Value: !Sub "http://${GrafanaEC2Instance.PublicDnsName}:3000"
+  SSHCommand:
+    Description: "SSH command (replace <key.pem>)"
+    Value: !Sub "ssh -i <key.pem> ubuntu@${GrafanaEC2Instance.PublicIp}"
+  UserDataLog:
+    Description: "Bootstrap log path on instance"
+    Value: "/var/log/userdata.log"
