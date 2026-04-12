@@ -12,7 +12,8 @@ This is a multi-service enterprise application with three main components:
 
 ### Current Overall Architecture
 
-<img width="1081" height="801" alt="DataReconcile_vlm_rag_iot-Architecture drawio" src="https://github.com/user-attachments/assets/f62c6b20-dfdb-4b12-a4de-ecb58071ffce" />
+<img width="4408" height="3284" alt="image" src="https://github.com/user-attachments/assets/fd2384f6-28aa-40b2-af0f-e12e59df35d6" />
+
 
 ### Component-Based Architecture
 
