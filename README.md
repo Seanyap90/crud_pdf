@@ -221,6 +221,77 @@ This platform is designed for:
 
 It represents a **reference architecture for data integrity-driven operational digitalisation*
 
+## Frontend / Next.js Initialisation
+
+Each frontend client has its own `package.json` with `dev`, `build`, and `start` scripts. Install dependencies and start each client from its own directory.
+
+### Files API Client (`files-api-client/`) — port 3003
+
+```bash
+cd files-api-client
+npm install
+npm run dev    # http://localhost:3003
+```
+
+### IoT Admin Client (`iot-admin-client/`) — port 3000
+
+```bash
+cd iot-admin-client
+npm install
+npm run dev    # http://localhost:3000
+```
+
+### Data Reconciliation Client (`datarecon-client/`) — port 3002
+
+```bash
+cd datarecon-client
+npm install
+npm run dev    # http://localhost:3002
+```
+
+> `npm install` only needs to be run once after cloning, or whenever `package.json` changes.
+
+---
+
+### Make Targets
+
+All targets are run from the **project root** with `make <target>`.
+
+#### 📄 Files API (`src/files_api`)
+
+| Target | Description |
+|---|---|
+| `make local-dev` | Start backend + Files API frontend in local dev mode (mocked AWS services) |
+| `make build` | Build the Docker images |
+| `make deploy-aws-local` | Test the full AWS ECS deployment locally |
+| `make deploy-aws-local-down` | Shut down the local AWS ECS deployment |
+| `make deploy-aws` | Deploy to AWS production |
+| `make deploy-aws-cleanup` | Tear down the AWS production deployment |
+| `make deploy-aws-status` | Show AWS deployment status, costs, and health |
+| `make deploy-aws-validate` | Validate AWS deployment prerequisites |
+| `make local-dev-validate` | Validate local development prerequisites |
+
+#### 🌐 IoT (`src/iot`)
+
+| Target | Description |
+|---|---|
+| `make iot-backend-start` | Build and start the MQTT broker and gateway simulator containers |
+| `make iot-backend-cleanup` | Stop and remove IoT Docker containers |
+| `make deploy-iot-aws` | Deploy IoT infrastructure to AWS |
+| `make generate_cert GATEWAY_ID=<id>` | Generate a TLS certificate for the specified gateway |
+| `make inject_cert GATEWAY_ID=<id>` | Inject the TLS certificate into the specified gateway |
+
+#### 🔄 Data Reconciliation (`src/datarecon`)
+
+| Target | Description |
+|---|---|
+| `make datarecon-backend-start` | Start the Data Reconciliation FastAPI backend on port 8002 |
+| `make datarecon-dev` | Start both the backend (port 8002) and the datarecon-client frontend (port 3002) together |
+| `make datarecon-backend-cleanup` | Stop the running Data Reconciliation backend process |
+| `make deploy-datarecon-aws` | Deploy the Data Reconciliation service to AWS |
+
+---
+
 ## 🎥 Demos & Preview
 
 ### Full Demo
