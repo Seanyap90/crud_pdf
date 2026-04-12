@@ -107,7 +107,7 @@ Handles:
 - IoT device gateway management  
 - MQTT-based telemetry ingestion  
 - Real-time weight and sensor data capture  
-- Rule-based processing engine (Go services)  
+- Rule-based processing engine (Go services)/AWS IoT Core  
 
 Enables:
 
