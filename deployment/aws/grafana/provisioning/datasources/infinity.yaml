@@ -1,0 +1,13 @@
+apiVersion: 1
+
+datasources:
+  - name: datarecon-api
+    uid: datarecon-infinity
+    type: yesoreyeram-infinity-datasource
+    access: proxy
+    isDefault: true
+    jsonData:
+      # Existing datarecon API Gateway endpoint (Lambda-backed, us-east-1)
+      base_url: "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com/dev"
+      allowed_hosts:
+        - "https://1yyjmleyke.execute-api.us-east-1.amazonaws.com"
