@@ -162,7 +162,7 @@ A core focus of the roadmap is strengthening the platform’s security posture t
 - IAM-based least privilege access control across all services to ensure strict identity and permission boundaries between system components and external users  
 - Secure external access patterns for vendors and third-party systems through controlled authentication and access layers  
 - Integration with SIEM/UEBA systems to enable centralized security monitoring, auditability, and behavioural anomaly detection across system events  
-- End-to-end audit logging to ensure traceability of critical actions for compliance, forensic analysis, and ESG reporting requirements  
+- End-to-end audit logging to ensure traceability of critical actions for compliance, forensic analysis, and other security reporting requirements  
 
 > Goal: Enable deployment in enterprise, government, and regulated environments where security, auditability, and data governance are mandatory requirements.
 
