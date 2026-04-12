@@ -140,7 +140,7 @@ This enables:
 
 ## ☁️ Cloud & Infrastructure Design
 
-Built on AWS with a hybrid architecture:
+Built on a hybrid architecture that can deploy on a local machine or more importantly, AWS:
 
 - **Serverless**: API Gateway, Lambda  
 - **Containers**: ECS (including GPU inference)  
@@ -149,16 +149,71 @@ Built on AWS with a hybrid architecture:
 - **Storage**: S3 + central database layer  
 - **Scaling**: Auto Scaling Groups + ECS task scaling
 
-## 🔐 Enterprise Readiness (Roadmap)
 
-The system is designed for evolution toward production-grade deployment:
+## 🔐 Enterprise Readiness (High Level Roadmap)
 
-- Private subnet isolation for sensitive workloads  
-- IAM-based least privilege access control  
-- Structured logging and observability  
-- SIEM/UEBA integration for security analytics  
-- Persistent vector storage for AI auditability  
-- Multi-tenant scalability for enterprise use
+The system is designed as an evolving enterprise-grade platform, progressing from a functional proof-of-concept into a production-ready, scalable, and secure digitalisation solution for industrial recycling and operational data integrity use cases.
+
+### 🛡️ Enterprise Security & Compliance
+
+A core focus of the roadmap is strengthening the platform’s security posture to meet enterprise and regulated environment requirements. This includes:
+
+- Deployment of sensitive workloads (AI inference, reconciliation logic, and core services) within private subnets to reduce exposure and enforce network-level isolation  
+- IAM-based least privilege access control across all services to ensure strict identity and permission boundaries between system components and external users  
+- Secure external access patterns for vendors and third-party systems through controlled authentication and access layers  
+- Integration with SIEM/UEBA systems to enable centralized security monitoring, auditability, and behavioural anomaly detection across system events  
+- End-to-end audit logging to ensure traceability of critical actions for compliance, forensic analysis, and ESG reporting requirements  
+
+> Goal: Enable deployment in enterprise, government, and regulated environments where security, auditability, and data governance are mandatory requirements.
+
+
+### 📊 Observability & Operational Intelligence (SRE Readiness)
+
+The platform is being enhanced with system-wide observability to support production-grade reliability and operational governance:
+
+- Structured logging across all services using consistent event schemas (request tracing, processing states, and system events)  
+- CloudWatch-based metrics and log aggregation for centralized monitoring of system health and performance  
+- Distributed tracing across event-driven workflows spanning API Gateway, queues, AI processing workers, and database operations  
+- Failure visibility and replayability for asynchronous workflows to support debugging, incident response, and system resilience  
+
+> Goal: Provide SRE-level observability, enabling operators to understand system behaviour across distributed, asynchronous pipelines.
+
+
+### 👥 Multi-Tenancy & Role-Based Access Architecture
+
+To support real-world enterprise adoption, the system is being designed for multi-tenant and role-aware usage:
+
+- Vendor-facing access layer enabling external users to securely upload and manage documents  
+- Internal user roles including operators, analysts, and administrators with clearly defined permissions  
+- Role-based access control (RBAC) across APIs, data layers, and operational dashboards  
+- Tenant-aware data isolation to support potential SaaS-style deployment across multiple organisations or business units  
+
+> Goal: Evolve the platform from a single-deployment system into a scalable multi-tenant architecture suitable for enterprise SaaS adoption.
+
+
+### 📄 Expansion of Document AI Capabilities
+
+The document intelligence layer is designed to evolve beyond invoice processing into a broader enterprise automation platform:
+
+- Extension of document AI pipelines beyond invoices to include operational documents such as delivery notes, manifests, compliance records, and reports  
+- Improved VLM + RAG pipelines for higher robustness, accuracy, and generalisation across document types  
+- Structured extraction frameworks that can adapt to domain-specific schemas and enterprise data models  
+- Modular architecture to support reuse of document intelligence capabilities across multiple industries and workflows  
+
+> Goal: Transition from invoice-specific automation to a general-purpose enterprise document intelligence platform.
+
+
+### 🤖 Agentic AI for Data Reconciliation & Automation
+
+A key future direction of the platform is the introduction of agentic AI capabilities to enhance data integrity workflows:
+
+- AI-assisted reconciliation between IoT telemetry data, vendor invoices, and system-generated events  
+- Automated anomaly detection across cross-domain datasets (e.g. mismatches between reported weight and sensor readings)  
+- Intelligent resolution suggestions for reconciliation conflicts to reduce manual intervention  
+- Future exploration of agent-based orchestration to dynamically manage workflow execution and exception handling  
+
+> Goal: Evolve from rule-based reconciliation pipelines into adaptive, AI-driven data integrity systems capable of reducing operational overhead and improving decision quality.
+
 
 ## 📈 Strategic Positioning
 
@@ -166,7 +221,7 @@ This platform is designed for:
 
 - ♻️ Recycling and waste management operators  
 - 🏭 Industrial logistics and operations teams  
-- 🌱 ESG and sustainability reporting initiatives  
+- 🌱 Sustainability reporting initiatives  
 - 🏢 Enterprise digital transformation programs  
 
 It represents a **reference architecture for data integrity-driven operational digitalisation*
