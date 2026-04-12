@@ -25,17 +25,6 @@ Without a unified digital system:
 
 > In practice, critical “ground truth” data in recycling workflows is often unreliable.
 
-## 🚀 Solution Overview
-
-This platform demonstrates a **cloud-native, AI-driven digitalisation system** that unifies:
-
-- 📄 Document Intelligence (VLM + RAG) for invoice understanding  
-- 🌐 IoT telemetry processing for real-time operational data  
-- 🔄 Data reconciliation layer for cross-system consistency  
-- ☁️ Event-driven architecture for scalable processing  
-
-Together, these components enable a **traceable, auditable, and intelligent recycling operations platform**.
-
 ## 📊 Business Impact
 
 By digitising and correlating operational and financial data, the system enables:
