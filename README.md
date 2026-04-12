@@ -1,78 +1,177 @@
-# Digitalising Industrial Recycling for Data Integrity with VLM/RAG, IoT and Data Management
+# 🌍 Digitalising Industrial Recycling for Data Integrity  
+### AI-Powered Document Intelligence, IoT Telemetry & Reconciliation Platform
 
-## Summary
+## 🧠 Executive Summary
 
-This is a multi-service enterprise application with three main components:
-- **Files API**: Document processing with VLM (Vision Language Model) and RAG capabilities
-- **IoT Management**: Gateway and device management with event sourcing
-- **Frontend Clients**: React/Next.js applications for user interfaces
-- **Infrastructure/Deployment**: AWS-based deployment management for scalable application hosting
+Industrial recycling and waste management processes are still heavily dependent on **manual recording, fragmented systems, and paper-based workflows**.
 
-## Architecture
+In many organisations today:
 
-### Current Overall Architecture
+- Weight measurements are recorded manually or on paper  
+- Vendor invoices are submitted as unstructured documents  
+- Operational and financial data are stored in disconnected systems  
+- Reconciliation between physical activity and billing is slow and error-prone  
+
+> This creates a fundamental issue: **data integrity is not guaranteed, and operational truth is difficult to verify.**
+
+## 💡 Problem Statement
+
+Without a unified digital system:
+
+- 📉 Operational data is inconsistent or lost  
+- 💰 Invoice validation is manual and error-prone  
+- 📊 ESG and sustainability reporting lacks auditability  
+- 🧾 Disputes arise between vendors and operators due to mismatched records  
+- 🕒 Significant human effort is spent on reconciliation instead of optimisation  
+
+> In practice, critical “ground truth” data in recycling workflows is often unreliable.
+
+## 🚀 Solution Overview
+
+This platform demonstrates a **cloud-native, AI-driven digitalisation system** that unifies:
+
+- 📄 Document Intelligence (VLM + RAG) for invoice understanding  
+- 🌐 IoT telemetry processing for real-time operational data  
+- 🔄 Data reconciliation layer for cross-system consistency  
+- ☁️ Event-driven architecture for scalable processing  
+
+Together, these components enable a **traceable, auditable, and intelligent recycling operations platform**.
+
+## 📊 Business Impact
+
+By digitising and correlating operational and financial data, the system enables:
+
+- ✔ Reduced manual reconciliation effort  
+- ✔ Improved invoice accuracy and validation  
+- ✔ Real-time visibility into recycling operations  
+- ✔ Stronger fraud and anomaly detection  
+- ✔ Reliable ESG and sustainability reporting  
+- ✔ Direct improvement to operational efficiency and bottom line  
+
+> Data integrity becomes a measurable business outcome, not a manual process.
+
+## 🏗️ High-Level Architecture
 
 <img width="4408" height="3284" alt="image" src="https://github.com/user-attachments/assets/fd2384f6-28aa-40b2-af0f-e12e59df35d6" />
 
+This system consists of:
 
-### Component-Based Architecture
+- Serverless ingestion layer (API Gateway + Lambda)  
+- Asynchronous processing (SQS + Step Functions)  
+- Containerised AI workloads (ECS GPU inference)  
+- IoT ingestion and rules processing layer  
+- Centralised data and event store  
+- Frontend applications for operational visibility  
 
-The application is organized into distinct components for clean separation of concerns:
+## 🧩 System Components
 
-```
-src/
-├── files_api/          # 🚀 API Component (Lambda-Ready)
-│   ├── routers/        # API endpoints (files, invoices, health)
-│   ├── services/       # Business logic and database services
-│   ├── adapters/       # Storage and queue abstractions
-│   ├── s3/             # S3 operations (read, write, delete, event notifications)
-│   └── schemas.py      # Data models and validation
-│
-├── vlm_workers/        # 🤖 Worker Component (ECS-Ready)
-│   ├── models/         # VLM model management and loaders
-│   ├── processing/     # Invoice parsing and document processing
-│   ├── gpu/            # GPU configuration for model inference
-│   └── worker.py       # Main worker logic for processing tasks
-│
-├── iot/                # 🌐 IoT Component
-│   ├── db_layer/       # IoT database services (gateway, device, measurement, config)
-│   ├── worker/         # MQTT workers and state machines
-│   ├── gateway/        # Go-based IoT gateway service
-│   ├── rules_engine/   # Go-based rules processing engine
-│   └── mosquitto/      # MQTT broker configuration
-│
-├── database/           # 💾 Shared Database Layer
-│   ├── local.py        # Local SQLite database operations
-│   ├── sqlite_http_adapter.py  # HTTP adapter for remote SQLite on EC2
-│   ├── event_store.py  # Event sourcing implementation
-│   └── indexes.py      # Database indexing utilities
-│
-└── deployment/         # 🏗️ Infrastructure Component
-    ├── aws/            # AWS infrastructure (Lambda, ECS, EC2, API Gateway, etc.)
-    ├── docker/         # Container definitions and compose files
-    └── kubernetes/     # Kubernetes manifests
-```
+### 📄 Files API (Document Intelligence Layer)
 
-## Tech Stack
+Handles:
 
-- **Backend**: Python 3.7+, FastAPI, Pydantic
-- **Frontend**: Next.js, React, TypeScript, Tailwind CSS
-- **Database**: SQLite (local and EC2), Event Store
-- **ML/AI**: PyTorch, Transformers, Byaldi (ColPali), SmolVLM
-- **Infrastructure**: AWS (Lambda, ECS, S3, SQS, EC2, ASG, API Gateway), Docker
-- **IoT**: MQTT, Go-based gateway services
+- Vendor invoice uploads  
+- Document storage and preprocessing  
+- AI-based extraction using VLM + RAG  
+- Integration with downstream workflows  
 
-## How to Run
+Key capabilities:
 
-For detailed instructions on running the application, please refer to:
-- **Files API**: See `src/files_api/README.md`
-- **IoT Services**: See `src/iot/README.md`
+- Multimodal invoice understanding (including handwritten content)  
+- Asynchronous event-driven processing  
+- Extensible storage and queue abstractions
 
-## Latest Relevant Articles
+### 🤖 VLM Workers (AI Processing Layer)
 
-<!-- Add links to relevant articles, blog posts, or documentation here -->
+Responsible for:
 
-## Preview
+- Vision-Language Model inference on invoices  
+- Structured document extraction  
+- GPU-accelerated processing on ECS  
+- Asynchronous task execution  
+
+Supports:
+
+- SmolVLM / ColPali-based pipelines  
+- Scalable batch inference architecture
+
+### 🌐 IoT System (Operational Telemetry Layer)
+
+Handles:
+
+- IoT device gateway management  
+- MQTT-based telemetry ingestion  
+- Real-time weight and sensor data capture  
+- Rule-based processing engine (Go services)  
+
+Enables:
+
+- Edge-to-cloud data streaming  
+- Device-level event tracking  
+- Operational visibility across recycling workflows
+
+### 🔄 Data Reconciliation Layer
+
+Ensures consistency across:
+
+- Vendor invoices  
+- IoT sensor measurements  
+- System-generated events  
+
+Capabilities:
+
+- Cross-source data correlation  
+- Detection of mismatches and anomalies  
+- Event sourcing for traceability  
+- Foundation for audit-ready datasets
+
+## 🧠 AI & Data Intelligence
+
+The platform integrates:
+
+- Vision-Language Models (VLMs) for invoice understanding  
+- Retrieval-Augmented Generation (RAG) for document reasoning  
+- Event-driven AI pipelines for scalable processing  
+
+This enables:
+
+- Structured extraction from unstructured documents  
+- Cross-validation between operational and financial data  
+- Intelligent anomaly detection in workflows
+
+## ☁️ Cloud & Infrastructure Design
+
+Built on AWS with a hybrid architecture:
+
+- **Serverless**: API Gateway, Lambda  
+- **Containers**: ECS (including GPU inference)  
+- **IoT**: AWS IoT Core + custom gateways  
+- **Messaging**: SQS + event-driven workflows  
+- **Storage**: S3 + central database layer  
+- **Scaling**: Auto Scaling Groups + ECS task scaling
+
+## 🔐 Enterprise Readiness (Roadmap)
+
+The system is designed for evolution toward production-grade deployment:
+
+- Private subnet isolation for sensitive workloads  
+- IAM-based least privilege access control  
+- Structured logging and observability  
+- SIEM/UEBA integration for security analytics  
+- Persistent vector storage for AI auditability  
+- Multi-tenant scalability for enterprise use
+
+## 📈 Strategic Positioning
+
+This platform is designed for:
+
+- ♻️ Recycling and waste management operators  
+- 🏭 Industrial logistics and operations teams  
+- 🌱 ESG and sustainability reporting initiatives  
+- 🏢 Enterprise digital transformation programs  
+
+It represents a **reference architecture for data integrity-driven operational digitalisation*
+
+## 🎥 Demos & Preview
 
 ### Full Demo
 [![Watch the video](https://i9.ytimg.com/vi_webp/F4hKg0rivH8/mq3.webp?sqp=CJi27M4G-oaymwEmCMACELQB8quKqQMa8AEB-AG2CYAC0AWKAgwIABABGEwgWShlMA8=&rs=AOn4CLCeROCzP9blXzs3AMfn5ME_rZ2dbQ)](https://www.youtube.com/watch?v=F4hKg0rivH8)
