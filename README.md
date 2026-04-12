@@ -5,7 +5,7 @@
 
 Industrial recycling and waste management processes are still heavily dependent on **manual recording, fragmented systems, and paper-based workflows**.
 
-In many organisations today:
+In many organisations today, managing waste and recycling:
 
 - Weight measurements are recorded manually or on paper  
 - Vendor invoices are submitted as unstructured documents  
@@ -49,6 +49,13 @@ By digitising and correlating operational and financial data, the system enables
 - ✔ Direct improvement to operational efficiency and bottom line  
 
 > Data integrity becomes a measurable business outcome, not a manual process.
+
+## Solution Synopsis
+This enterprise solution is built on the following:
+- Invoice upload portal from vendors
+- Document AI involving VLM+RAG pipeline with local VLM models (Colpali, SmolVLM) to extract specific invoice data with a prompt
+- IoT Administration involving iot gateways and the following smart, configurable weighing measurement machines (https://scale-tech.com.sg/scaletech/wp-content/uploads/2020/06/OMNITOUCH-10-Touch-Screen-Indicator.pdf) as end devices
+- Data Reconciliation to ensure that vendors are compliant to required volume of waste recycled per agreed contract
 
 ## 🏗️ High-Level Architecture
 
