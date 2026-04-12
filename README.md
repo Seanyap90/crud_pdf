@@ -84,6 +84,7 @@ For detailed instructions on running the application, please refer to:
 [IoT Administrator Dashboard for managing gateways and End Devices](https://github.com/user-attachments/assets/ee58c146-f114-4bdc-8d97-9df7eb4414dd)
 
 
-[![Watch the video](https://youtube.com)](([https://youtu.be/F4hKg0rivH8](https://www.youtube.com/watch?v=F4hKg0rivH8)))
+[![Watch the video](https://youtube.com)](https://www.youtube.com/watch?v=F4hKg0rivH8)
+
 
 
