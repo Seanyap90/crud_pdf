@@ -76,6 +76,7 @@ For detailed instructions on running the application, please refer to:
 ### Full Demo
 [![Watch the video](https://i9.ytimg.com/vi_webp/F4hKg0rivH8/mq3.webp?sqp=CJi27M4G-oaymwEmCMACELQB8quKqQMa8AEB-AG2CYAC0AWKAgwIABABGEwgWShlMA8=&rs=AOn4CLCeROCzP9blXzs3AMfn5ME_rZ2dbQ)](https://www.youtube.com/watch?v=F4hKg0rivH8)
 
+### File upload and invoice value extraction
 [Extract from digital copies](https://github.com/user-attachments/assets/b7423621-88a8-49a2-aac8-2d39b0a13d63)
 
 [Extract handwritten notes on scanned copies](https://github.com/user-attachments/assets/da86c450-802b-470a-a7d9-2ff1e667bcd3)
@@ -84,6 +85,7 @@ For detailed instructions on running the application, please refer to:
 
 ![Upload Status Review Feature](Review.png)
 
+### IoT Administration Dashboard
 [IoT Administrator Dashboard for managing gateways and End Devices](https://github.com/user-attachments/assets/ee58c146-f114-4bdc-8d97-9df7eb4414dd)
 
 
