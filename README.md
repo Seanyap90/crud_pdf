@@ -221,7 +221,7 @@ This platform is designed for:
 
 It represents a **reference architecture for data integrity-driven operational digitalisation*
 
-## Frontend / Next.js Initialisation
+## Deployment Summary
 
 Each frontend client has its own `package.json` with `dev`, `build`, and `start` scripts. Install dependencies and start each client from its own directory.
 
