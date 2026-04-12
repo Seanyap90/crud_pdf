@@ -20,7 +20,6 @@ Without a unified digital system:
 
 - 📉 Operational data is inconsistent or lost  
 - 💰 Invoice validation is manual and error-prone  
-- 📊 ESG and sustainability reporting lacks auditability  
 - 🧾 Disputes arise between vendors and operators due to mismatched records  
 - 🕒 Significant human effort is spent on reconciliation instead of optimisation  
 
